@@ -35,6 +35,366 @@ fn shared_wait_idle_completes() {
     conformance::wait_idle_completes(&mut engine);
 }
 
+#[test]
+fn shared_page_digest_and_observation_agree() {
+    let mut engine = MockEngine::new();
+    conformance::page_digest_and_observation_agree(&mut engine, "https://a.example/page");
+}
+
+#[test]
+fn shared_find_text_of_absent_text_finds_nothing() {
+    let mut engine = MockEngine::new();
+    conformance::find_text_of_absent_text_finds_nothing(&mut engine);
+}
+
+#[test]
+fn shared_list_tabs_reports_exactly_one_active_tab() {
+    let mut engine = MockEngine::new();
+    conformance::list_tabs_reports_exactly_one_active_tab(&mut engine);
+    engine.open_tab(Some("https://b.example/")).unwrap();
+    conformance::list_tabs_reports_exactly_one_active_tab(&mut engine);
+}
+
+#[test]
+fn shared_optional_interactions_fail_typed_not_by_panicking() {
+    let mut engine = MockEngine::new();
+    conformance::optional_interactions_fail_typed_not_by_panicking(&mut engine);
+}
+
+// ── An engine that implements ONLY the required methods: the new surface's
+//    default implementations, exercised through the same shared assertions ──
+
+/// Forwards every *required* method to a [`MockEngine`] and overrides none of
+/// the new ones, so everything it does for them is the trait's default.
+struct DefaultsOnly(MockEngine);
+
+impl BrowserEngine for DefaultsOnly {
+    fn navigate(&mut self, url: &str) -> Result<((), Origin), EngineError> {
+        self.0.navigate(url)
+    }
+    fn go_back(&mut self) -> Result<((), Origin), EngineError> {
+        self.0.go_back()
+    }
+    fn go_forward(&mut self) -> Result<((), Origin), EngineError> {
+        self.0.go_forward()
+    }
+    fn reload(&mut self) -> Result<((), Origin), EngineError> {
+        self.0.reload()
+    }
+    fn current_url(&mut self) -> Result<(String, Origin), EngineError> {
+        self.0.current_url()
+    }
+    fn dom_snapshot(&mut self) -> Result<(DomSnapshot, Origin), EngineError> {
+        self.0.dom_snapshot()
+    }
+    fn query(&mut self, s: &str) -> Result<(Vec<ElementHandle>, Origin), EngineError> {
+        self.0.query(s)
+    }
+    fn read_text(&mut self, s: &str) -> Result<(String, Origin), EngineError> {
+        self.0.read_text(s)
+    }
+    fn click(&mut self, s: &str) -> Result<((), Origin), EngineError> {
+        self.0.click(s)
+    }
+    fn type_text(&mut self, s: &str, t: &str) -> Result<((), Origin), EngineError> {
+        self.0.type_text(s, t)
+    }
+    fn fill_form(&mut self, f: &[(String, String)]) -> Result<((), Origin), EngineError> {
+        self.0.fill_form(f)
+    }
+    fn select_option(&mut self, s: &str, v: &str) -> Result<((), Origin), EngineError> {
+        self.0.select_option(s, v)
+    }
+    fn scroll(&mut self, dx: i64, dy: i64) -> Result<((), Origin), EngineError> {
+        self.0.scroll(dx, dy)
+    }
+    fn wait_for(&mut self, c: WaitCondition) -> Result<((), Origin), EngineError> {
+        self.0.wait_for(c)
+    }
+    fn screenshot(&mut self) -> Result<(ferrite_engine::Frame, Origin), EngineError> {
+        self.0.screenshot()
+    }
+    fn download(&mut self, u: &str) -> Result<(String, Origin), EngineError> {
+        self.0.download(u)
+    }
+    fn open_tab(&mut self, u: Option<&str>) -> Result<(TabId, Origin), EngineError> {
+        self.0.open_tab(u)
+    }
+    fn close_tab(&mut self, t: TabId) -> Result<((), Origin), EngineError> {
+        self.0.close_tab(t)
+    }
+    fn switch_tab(&mut self, t: TabId) -> Result<((), Origin), EngineError> {
+        self.0.switch_tab(t)
+    }
+    fn cookies_read(&mut self, s: &Origin) -> Result<(Vec<Cookie>, Origin), EngineError> {
+        self.0.cookies_read(s)
+    }
+    fn storage_read(&mut self, s: &Origin) -> Result<(Vec<(String, String)>, Origin), EngineError> {
+        self.0.storage_read(s)
+    }
+    fn clipboard_read(&mut self) -> Result<(String, Origin), EngineError> {
+        self.0.clipboard_read()
+    }
+    fn clipboard_write(&mut self, t: &str) -> Result<((), Origin), EngineError> {
+        self.0.clipboard_write(t)
+    }
+    fn js_execute(&mut self, s: &str) -> Result<(String, Origin), EngineError> {
+        self.0.js_execute(s)
+    }
+}
+
+#[test]
+fn defaults_only_engine_passes_the_shared_new_surface_assertions() {
+    let mut engine = DefaultsOnly(MockEngine::new());
+    conformance::page_digest_and_observation_agree(&mut engine, "https://a.example/page");
+    conformance::find_text_of_absent_text_finds_nothing(&mut engine);
+    conformance::list_tabs_reports_exactly_one_active_tab(&mut engine);
+    conformance::optional_interactions_fail_typed_not_by_panicking(&mut engine);
+}
+
+#[test]
+fn default_impls_derive_from_the_snapshot_and_are_honestly_unsupported_otherwise() {
+    let a = origin("https://a.example/");
+    let mut mock = MockEngine::new();
+    mock.navigate(a.as_str()).unwrap();
+    mock.seed_dom_snapshot(
+        &a,
+        DomSnapshot {
+            root: DomNode {
+                role: "generic".into(),
+                text: Some("Order total is 42 dollars".into()),
+                children: vec![DomNode {
+                    role: "button".into(),
+                    label: Some("Pay".into()),
+                    ..DomNode::default()
+                }],
+                ..DomNode::default()
+            },
+        },
+    );
+    let mut engine = DefaultsOnly(mock);
+
+    let (digest, o) = engine.page_digest().unwrap();
+    assert_eq!(o, a);
+    assert_eq!(digest.url, a.as_str());
+    assert_eq!(digest.elements[0].label, "Pay");
+
+    let (m, _) = engine.find_text("42").unwrap();
+    assert_eq!(m.count, 1);
+    assert!(m.snippets[0].contains("[42]"));
+
+    // observe_page defaults to page_digest.
+    assert_eq!(engine.observe_page().unwrap().0, digest);
+
+    // No DOM behind the default engine: acting is honestly unsupported, and a
+    // selector-scoped link extraction cannot be faked.
+    assert!(matches!(
+        engine.press_key(None, "Enter"),
+        Err(EngineError::Unsupported(_))
+    ));
+    assert!(matches!(
+        engine.hover("@1"),
+        Err(EngineError::Unsupported(_))
+    ));
+    assert!(matches!(
+        engine.set_checked("@1", true),
+        Err(EngineError::Unsupported(_))
+    ));
+    assert!(matches!(
+        engine.scroll_to("@1"),
+        Err(EngineError::Unsupported(_))
+    ));
+    assert!(matches!(
+        engine.submit_form(None),
+        Err(EngineError::Unsupported(_))
+    ));
+    assert!(matches!(
+        engine.extract_links(Some("nav")),
+        Err(EngineError::Unsupported(_))
+    ));
+    assert!(engine.extract_links(None).unwrap().0.is_empty());
+}
+
+// ── Element refs and the new action surface on MockEngine ──
+
+#[test]
+fn every_selector_taking_op_normalizes_refs_before_logging() {
+    let mut engine = MockEngine::new();
+    let a = origin("https://a.example/");
+    engine.navigate(a.as_str()).unwrap();
+    let canon = |n: u32| ferrite_engine::ref_selector(n);
+
+    engine.click("@1").unwrap();
+    engine.type_text("[2]", "x").unwrap();
+    engine
+        .fill_form(&[
+            ("@3".to_string(), "v".to_string()),
+            ("#css".into(), "w".into()),
+        ])
+        .unwrap();
+    engine.select_option("ref:4", "b").unwrap();
+    let _ = engine.query("@5");
+    let _ = engine.read_text("@6");
+    let _ = engine.wait_for(WaitCondition::Selector("@7".into()));
+    engine.press_key(Some("@8"), "Enter").unwrap();
+    engine.hover("@9").unwrap();
+    engine.set_checked("@10", true).unwrap();
+    engine.scroll_to("@11").unwrap();
+    engine.submit_form(Some("@12")).unwrap();
+    engine.extract_links(Some("@13")).unwrap();
+
+    use ferrite_engine::{Call, WaitConditionKind};
+    let calls = engine.calls();
+    assert_eq!(calls[1], Call::Click(canon(1)));
+    assert_eq!(calls[2], Call::TypeText(canon(2), "x".into()));
+    assert_eq!(
+        calls[3],
+        Call::FillForm(vec![
+            (canon(3), "v".into()),
+            ("#css".into(), "w".into()) // a real CSS selector passes through untouched
+        ])
+    );
+    assert_eq!(calls[4], Call::SelectOption(canon(4), "b".into()));
+    assert_eq!(calls[5], Call::Query(canon(5)));
+    assert_eq!(calls[6], Call::ReadText(canon(6)));
+    assert_eq!(
+        calls[7],
+        Call::WaitFor(WaitConditionKind::Selector(canon(7)))
+    );
+    assert_eq!(calls[8], Call::PressKey(Some(canon(8)), "Enter".into()));
+    assert_eq!(calls[9], Call::Hover(canon(9)));
+    assert_eq!(calls[10], Call::SetChecked(canon(10), true));
+    assert_eq!(calls[11], Call::ScrollTo(canon(11)));
+    assert_eq!(calls[12], Call::SubmitForm(Some(canon(12))));
+    assert_eq!(calls[13], Call::ExtractLinks(Some(canon(13))));
+}
+
+#[test]
+fn seeds_match_a_ref_written_either_way_and_a_dead_ref_explains_itself() {
+    let mut engine = MockEngine::new();
+    let a = origin("https://a.example/");
+    engine.navigate(a.as_str()).unwrap();
+    engine.seed_read_text(&a, "@5", "five");
+    assert_eq!(engine.read_text("[5]").unwrap().0, "five");
+    assert_eq!(
+        engine.read_text("@5").unwrap().0,
+        "five",
+        "a single seeded reply repeats"
+    );
+
+    match engine.read_text("@77").unwrap_err() {
+        EngineError::ElementNotFound(msg) => {
+            assert!(msg.contains("@77") && msg.contains("read_page"), "{msg}");
+        }
+        other => panic!("expected ElementNotFound, got {other:?}"),
+    }
+}
+
+#[test]
+fn page_digest_is_logged_but_observe_page_is_not_and_does_not_consume_the_queue() {
+    use ferrite_engine::{Call, DigestElement, PageDigest};
+    let mut engine = MockEngine::new();
+    let a = origin("https://a.example/");
+    engine.navigate(a.as_str()).unwrap();
+    let digest = |label: &str| PageDigest {
+        elements: vec![DigestElement {
+            ref_id: 1,
+            role: "button".into(),
+            label: label.into(),
+            in_viewport: true,
+            ..DigestElement::default()
+        }],
+        ..PageDigest::default()
+    };
+    engine.seed_page_digest(&a, digest("first"));
+    engine.seed_page_digest(&a, digest("second"));
+    let logged_before = engine.calls().len();
+
+    // The harness's observation peeks: same answer twice, nothing logged.
+    assert_eq!(engine.observe_page().unwrap().0.elements[0].label, "first");
+    assert_eq!(engine.observe_page().unwrap().0.elements[0].label, "first");
+    assert_eq!(engine.calls().len(), logged_before);
+
+    // The agent-initiated read consumes and is logged exactly once each.
+    assert_eq!(engine.page_digest().unwrap().0.elements[0].label, "first");
+    assert_eq!(engine.page_digest().unwrap().0.elements[0].label, "second");
+    let new_calls = &engine.calls()[logged_before..];
+    assert_eq!(new_calls, &[Call::PageDigest, Call::PageDigest]);
+    // The digest's url is filled in from the tab when the seed left it empty.
+    assert_eq!(engine.page_digest().unwrap().0.url, a.as_str());
+}
+
+#[test]
+fn find_text_and_extract_links_read_the_seeded_digest() {
+    use ferrite_engine::{DigestElement, PageDigest};
+    let mut engine = MockEngine::new();
+    let a = origin("https://a.example/");
+    engine.navigate(a.as_str()).unwrap();
+    engine.seed_page_digest(
+        &a,
+        PageDigest {
+            text: "The refund window is 30 days. Refunds take 5 days.".into(),
+            elements: vec![DigestElement {
+                ref_id: 1,
+                role: "link".into(),
+                label: "Policy".into(),
+                href: Some("https://a.example/policy".into()),
+                in_viewport: true,
+                ..DigestElement::default()
+            }],
+            ..PageDigest::default()
+        },
+    );
+    let (m, _) = engine.find_text("refund").unwrap();
+    assert_eq!(m.count, 2);
+    let (links, _) = engine.extract_links(None).unwrap();
+    assert_eq!(links.len(), 1);
+    assert_eq!(links[0].href, "https://a.example/policy");
+}
+
+#[test]
+fn list_tabs_reports_every_open_tab_and_marks_the_active_one() {
+    let mut engine = MockEngine::new();
+    engine.navigate("https://a.example/").unwrap();
+    let (tab_b, _) = engine.open_tab(Some("https://b.example/")).unwrap();
+    let (tabs, o) = engine.list_tabs().unwrap();
+    assert_eq!(o, origin("https://b.example/"));
+    assert_eq!(tabs.len(), 2);
+    assert_eq!(tabs[0].url, "https://a.example/");
+    assert!(!tabs[0].active);
+    assert_eq!(tabs[1].id, tab_b);
+    assert!(tabs[1].active);
+}
+
+#[test]
+fn every_new_trait_method_is_visible_in_the_call_log() {
+    use ferrite_engine::Call;
+    let mut engine = MockEngine::new();
+    let _ = engine.page_digest();
+    let _ = engine.press_key(None, "Tab");
+    let _ = engine.hover("#x");
+    let _ = engine.set_checked("#x", false);
+    let _ = engine.scroll_to("#x");
+    let _ = engine.find_text("x");
+    let _ = engine.extract_links(None);
+    let _ = engine.submit_form(None);
+    let _ = engine.list_tabs();
+    assert_eq!(
+        engine.calls(),
+        &[
+            Call::PageDigest,
+            Call::PressKey(None, "Tab".into()),
+            Call::Hover("#x".into()),
+            Call::SetChecked("#x".into(), false),
+            Call::ScrollTo("#x".into()),
+            Call::FindText("x".into()),
+            Call::ExtractLinks(None),
+            Call::SubmitForm(None),
+            Call::ListTabs,
+        ]
+    );
+}
+
 // ── Navigation: navigate / go_back / go_forward / reload / current_url ──
 
 #[test]

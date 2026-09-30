@@ -51,6 +51,19 @@ use crate::{DomNode, DomSnapshot};
 /// resolved back to a live node with the CSS selector [`ref_selector`].
 pub const REF_ATTRIBUTE: &str = "data-ferrite-ref";
 
+/// Longest URL kept in a digest.
+pub const MAX_URL_CHARS: usize = 1_000;
+/// Longest page title kept in a digest.
+pub const MAX_TITLE_CHARS: usize = 200;
+/// Longest visible-text excerpt kept in a digest.
+pub const MAX_TEXT_CHARS: usize = 6_000;
+/// Most interactive elements kept in a digest.
+pub const MAX_ELEMENTS: usize = 150;
+/// Longest element label kept in a digest.
+pub const MAX_LABEL_CHARS: usize = 200;
+/// Most `<select>` options kept per element.
+pub const MAX_OPTIONS: usize = 50;
+
 /// Vertical scroll position of the page's main scroller.
 #[derive(Debug, Clone, Copy, PartialEq, Default, Serialize, Deserialize)]
 pub struct ScrollState {
@@ -305,6 +318,68 @@ impl PageDigest {
         }
     }
 
+    /// Enforces every bound on a digest produced by an engine's page
+    /// script: the script is best-effort, runs inside a page an attacker may
+    /// control, and could be shadowed by it — so nothing it returned is
+    /// trusted to be bounded, control-character-free, or password-free.
+    ///
+    /// A `password`-type element (or any element already flagged
+    /// [`DigestElement::sensitive`]) has its value dropped here regardless of
+    /// what the script put there.
+    #[must_use]
+    pub fn sanitized(mut self) -> Self {
+        self.url = sanitize_text(&self.url, MAX_URL_CHARS);
+        self.title = sanitize_text(&self.title, MAX_TITLE_CHARS);
+        self.text = sanitize_text(&self.text, MAX_TEXT_CHARS);
+        if self.elements.len() > MAX_ELEMENTS {
+            self.elements.truncate(MAX_ELEMENTS);
+            self.elements_truncated = true;
+        }
+        for e in &mut self.elements {
+            e.role = sanitize_text(&e.role, 40);
+            e.label = sanitize_text(&e.label, MAX_LABEL_CHARS);
+            e.input_type = e.input_type.take().map(|t| sanitize_text(&t, 40));
+            e.placeholder = e.placeholder.take().map(|t| sanitize_text(&t, 120));
+            e.href = e.href.take().map(|t| sanitize_text(&t, MAX_URL_CHARS));
+            if e.input_type.as_deref() == Some("password") {
+                e.sensitive = true;
+            }
+            e.value = if e.sensitive {
+                None
+            } else {
+                e.value.take().map(|v| sanitize_text(&v, 300))
+            };
+            e.options.truncate(MAX_OPTIONS);
+            for o in &mut e.options {
+                *o = sanitize_text(o, 100);
+            }
+        }
+        self
+    }
+
+    /// Case-insensitive find-in-page over the digest's text.
+    #[must_use]
+    pub fn find_text(&self, needle: &str) -> TextMatches {
+        TextMatches::search(&self.text, needle)
+    }
+
+    /// The digest's links (elements with an `href`), in document order.
+    #[must_use]
+    pub fn links(&self) -> Vec<LinkInfo> {
+        self.elements
+            .iter()
+            .filter_map(|e| {
+                e.href
+                    .as_deref()
+                    .filter(|h| !h.is_empty())
+                    .map(|h| LinkInfo {
+                        text: e.label.clone(),
+                        href: h.to_string(),
+                    })
+            })
+            .collect()
+    }
+
     /// Renders the digest as model-readable text under `budget`.
     ///
     /// In-viewport elements are listed before off-screen ones, so a budget
@@ -354,6 +429,125 @@ impl PageDigest {
             out.push('\n');
         }
         out
+    }
+}
+
+/// The result of a find-in-page ([`BrowserEngine::find_text`](crate::BrowserEngine::find_text)):
+/// how many times the text occurs on the page and a few surrounding
+/// snippets, so the model can confirm a fact without paying for the whole
+/// page again.
+#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
+pub struct TextMatches {
+    /// Total (case-insensitive) occurrences.
+    #[serde(default)]
+    pub count: usize,
+    /// Up to [`MAX_SNIPPETS`] short excerpts around the first matches, with
+    /// the match itself wrapped in `[...]`.
+    #[serde(default)]
+    pub snippets: Vec<String>,
+}
+
+/// Most snippets a [`TextMatches`] carries.
+pub const MAX_SNIPPETS: usize = 5;
+/// Characters of context kept on each side of a match in a snippet.
+pub const SNIPPET_CONTEXT_CHARS: usize = 60;
+
+impl TextMatches {
+    /// Finds `needle` (case-insensitively) in `haystack`.
+    #[must_use]
+    pub fn search(haystack: &str, needle: &str) -> Self {
+        // Fold to one char per char so indices stay aligned with the original.
+        fn fold(c: char) -> char {
+            c.to_lowercase().next().unwrap_or(c)
+        }
+        let hay: Vec<char> = haystack.chars().collect();
+        let hay_folded: Vec<char> = hay.iter().copied().map(fold).collect();
+        let needle_folded: Vec<char> = needle.trim().chars().map(fold).collect();
+        let mut out = Self::default();
+        if needle_folded.is_empty() || needle_folded.len() > hay.len() {
+            return out;
+        }
+        let mut i = 0;
+        while i + needle_folded.len() <= hay.len() {
+            if hay_folded[i..i + needle_folded.len()] == needle_folded[..] {
+                out.count += 1;
+                let end = i + needle_folded.len();
+                if out.snippets.len() < MAX_SNIPPETS {
+                    let from = i.saturating_sub(SNIPPET_CONTEXT_CHARS);
+                    let to = (end + SNIPPET_CONTEXT_CHARS).min(hay.len());
+                    let before: String = hay[from..i].iter().collect();
+                    let hit: String = hay[i..end].iter().collect();
+                    let after: String = hay[end..to].iter().collect();
+                    out.snippets.push(format!(
+                        "{}{}[{}]{}{}",
+                        if from > 0 { "…" } else { "" },
+                        before,
+                        hit,
+                        after,
+                        if to < hay.len() { "…" } else { "" },
+                    ));
+                }
+                i = end;
+            } else {
+                i += 1;
+            }
+        }
+        out
+    }
+
+    /// One-line-per-snippet rendering for a model observation.
+    #[must_use]
+    pub fn render(&self, needle: &str) -> String {
+        let mut out = format!(
+            "find_text \"{}\": {} match(es)",
+            truncate_chars(&sanitize_text(needle, 80), 80),
+            self.count
+        );
+        for (i, s) in self.snippets.iter().enumerate() {
+            out.push_str(&format!("\n  {}. {}", i + 1, sanitize_text(s, 240)));
+        }
+        out
+    }
+}
+
+/// One link, as returned by [`BrowserEngine::extract_links`](crate::BrowserEngine::extract_links).
+#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
+pub struct LinkInfo {
+    /// The link's accessible name / visible text.
+    #[serde(default)]
+    pub text: String,
+    /// Absolute target URL.
+    #[serde(default)]
+    pub href: String,
+}
+
+impl LinkInfo {
+    /// One line: `text -> href`, bounded.
+    #[must_use]
+    pub fn render_line(&self) -> String {
+        format!(
+            "{} -> {}",
+            truncate_chars(&sanitize_text(&self.text, 200), 80),
+            truncate_chars(&sanitize_text(&self.href, 400), 200)
+        )
+    }
+}
+
+/// The message of the [`EngineError::ElementNotFound`](crate::EngineError::ElementNotFound)
+/// an engine reports when `selector` resolves to nothing. For a ref (`@12`)
+/// it tells the model *why* (the page changed since the ref was issued) and
+/// what to do (`read_page` again) — a bare "element not found: @12" would
+/// invite the model to retry the same dead ref. Any other selector keeps its
+/// historical message: the selector itself.
+#[must_use]
+pub fn not_found_message(selector: &str) -> String {
+    match parse_ref(selector) {
+        Some(id) => format!(
+            "@{id} no longer exists — the page changed since it was read (refs do not survive \
+             navigation or re-rendering). Call read_page again and use the new @refs."
+        ),
+        // A plain selector keeps its historical message (the selector).
+        None => selector.to_string(),
     }
 }
 
@@ -626,5 +820,93 @@ mod tests {
         assert!(d.elements[0].in_viewport, "in_viewport defaults to true");
         assert!(!d.elements[0].disabled);
         assert_eq!(d.elements[0].label, "");
+    }
+
+    #[test]
+    fn sanitized_drops_password_values_even_if_the_script_leaked_them() {
+        let mut pw = el(1, "textbox", "Password");
+        pw.input_type = Some("password".into());
+        pw.value = Some("hunter2".into()); // sensitive flag deliberately unset
+        let mut flagged = el(2, "textbox", "Card");
+        flagged.sensitive = true;
+        flagged.value = Some("4111".into());
+        let mut plain = el(3, "textbox", "Name");
+        plain.value = Some("  Ada \n Lovelace ".into());
+        let d = PageDigest {
+            elements: vec![pw, flagged, plain],
+            ..PageDigest::default()
+        }
+        .sanitized();
+        assert!(d.elements[0].sensitive && d.elements[0].value.is_none());
+        assert!(d.elements[1].value.is_none());
+        assert_eq!(d.elements[2].value.as_deref(), Some("Ada Lovelace"));
+        assert!(!d.render(RenderBudget::default()).contains("hunter2"));
+    }
+
+    #[test]
+    fn sanitized_bounds_every_field_and_marks_truncation() {
+        let mut big = el(1, "select", &"L".repeat(5_000));
+        big.options = (0..500).map(|i| format!("option {i}")).collect();
+        let d = PageDigest {
+            url: format!("https://a.example/{}", "u".repeat(5_000)),
+            title: "T".repeat(5_000),
+            text: "word ".repeat(10_000),
+            elements: (0..400).map(|i| el(i, "button", "b")).collect(),
+            ..PageDigest::default()
+        };
+        let mut d = d;
+        d.elements[0] = big;
+        let d = d.sanitized();
+        assert!(d.url.chars().count() <= MAX_URL_CHARS + 1);
+        assert!(d.title.chars().count() <= MAX_TITLE_CHARS + 1);
+        assert!(d.text.chars().count() <= MAX_TEXT_CHARS + 1);
+        assert_eq!(d.elements.len(), MAX_ELEMENTS);
+        assert!(d.elements_truncated);
+        assert!(d.elements[0].label.chars().count() <= MAX_LABEL_CHARS + 1);
+        assert_eq!(d.elements[0].options.len(), MAX_OPTIONS);
+    }
+
+    #[test]
+    fn find_text_is_case_insensitive_counts_all_and_bounds_snippets() {
+        let text = format!("Alpha beta ALPHA {} gamma alpha", "x ".repeat(100));
+        let m = TextMatches::search(&text, "alpha");
+        assert_eq!(m.count, 3);
+        assert_eq!(m.snippets.len(), 3);
+        assert!(
+            m.snippets[0].starts_with("[Alpha] beta"),
+            "{:?}",
+            m.snippets
+        );
+        assert!(m.snippets[1].contains("[ALPHA]"));
+        let many = TextMatches::search(&"a ".repeat(50), "a");
+        assert_eq!(many.count, 50);
+        assert_eq!(many.snippets.len(), MAX_SNIPPETS);
+        assert_eq!(TextMatches::search("abc", "  ").count, 0);
+        assert_eq!(TextMatches::search("abc", "zzz").count, 0);
+        assert_eq!(TextMatches::search("ÄÖÜ äöü", "äöü").count, 2);
+        assert!(m
+            .render("alpha")
+            .starts_with("find_text \"alpha\": 3 match(es)"));
+    }
+
+    #[test]
+    fn links_lists_only_elements_with_an_href() {
+        let mut a = el(1, "link", "Docs");
+        a.href = Some("https://a.example/docs".into());
+        let b = el(2, "button", "Go");
+        let d = PageDigest {
+            elements: vec![a, b],
+            ..PageDigest::default()
+        };
+        let links = d.links();
+        assert_eq!(links.len(), 1);
+        assert_eq!(links[0].render_line(), "Docs -> https://a.example/docs");
+    }
+
+    #[test]
+    fn a_stale_ref_error_message_tells_the_model_to_read_the_page_again() {
+        let msg = not_found_message("@12");
+        assert!(msg.contains("@12") && msg.contains("read_page"), "{msg}");
+        assert_eq!(not_found_message("#login"), "#login");
     }
 }
