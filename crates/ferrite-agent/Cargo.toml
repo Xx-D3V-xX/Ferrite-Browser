@@ -13,3 +13,9 @@ chrono = { workspace = true }
 ferrite-core = { workspace = true }
 ferrite-engine = { workspace = true }
 ferrite-model = { workspace = true }
+
+[dev-dependencies]
+# `decider.rs`'s tests run a loopback-only HTTP responder on
+# `tokio::net::TcpListener` (nothing leaves the machine, R7). The workspace
+# tokio omits "net" on purpose (T-207); enabled here for tests only.
+tokio = { workspace = true, features = ["net"] }
