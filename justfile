@@ -141,6 +141,20 @@ bloat *ARGS:
 eval:
     cargo run -p ferrite-eval --example eval
 
+# The runtime-guard experiment (ADR-014, docs/EVALUATION.md §8.4): what the real
+# run does when the dry run could not have seen the attack. Prints a table and
+# writes target/eval-report/GUARD_REPORT.md. No network, no API key.
+guard-eval:
+    cargo run -p ferrite-eval --example guard_eval
+
+# Regenerate the 909-case red-team corpus (deterministic; ids are uuid5 of the
+# case name). `redteam-corpus-check` fails if the files on disk differ.
+redteam-corpus:
+    python3 scripts/gen_redteam_corpus.py
+
+redteam-corpus-check:
+    python3 scripts/gen_redteam_corpus.py --check
+
 # Prune stale (7+ day old) build artifacts from the target dir. Requires
 # `cargo install cargo-sweep` (not bundled, same reasoning as `bloat`).
 # Deliberately NEVER a blanket `cargo clean` — REBUILD_DIRECTIVE.md §7.4.
