@@ -4319,3 +4319,44 @@ run-id-less stale messages), T-238 (heuristic is English-centric).
 **Commits:** `5c318ac`, `4fdbb10`, `d2f7454`, `7ba6d00`, `08152bb`,
 `29ee565`, `57e0baa`, `060fa07`, `8e3c1ea`, `a982a8c`, `faefb99`, `8300c35`,
 `b4157f5`, `ac1c872`, `22c97b0`, `b473d0c` (plus merge commits).
+
+## 2026-09-30 — coordinator — typing into web pages, repo-local setup
+
+**Reported by the owner:** input boxes and search boxes on web pages could
+not be typed into. Root cause: the UI only forwarded mouse events to Servo;
+keyboard events were never sent (`crates/ferrite-servo` had no key path at
+all). Not fixed by any earlier round, contrary to what the previous summary
+implied.
+
+**Changed.**
+- `ferrite-servo::session`: plain `PageKeyEvent`/`PageKey`/`PageNamedKey`/
+  `PageEdit` types (compile without the `servo` feature) and a gated
+  `send_key` that builds `servo::InputEvent::Keyboard` events; Cmd (macOS) /
+  Ctrl + C/X/V go through `InputEvent::EditingAction` instead.
+- `ferrite-ui`: `page_input.rs` maps iced key events to `PageKeyEvent`; a
+  `listen_with` subscription forwards only events no widget captured, never
+  chrome shortcuts, and not while the address/find bar is focused or the
+  new-tab page is showing. Clicking the page clears address-bar focus.
+- Found by the first real `--features servo` compile of `ferrite-servo` and
+  `ferrite-shell`: the session's `last_history` was never refreshed (dead
+  field warning), so back/forward availability never updated. Fixed in
+  `sync_and_read`. That compile also surfaced six servo-gated clippy lints
+  that CI never linted (`type_complexity` ×3, `chunks_exact_to_as_chunks`
+  ×3) — fixed with a `SharedFavicon` alias and a targeted `allow`.
+- Repo-local layout: `FERRITE_HOME` now defaults to `<repo>/.ferrite` and
+  `CARGO_TARGET_DIR` to `<repo>/target` in the scripts and justfile; the app's
+  chats, bookmarks and favicon cache follow `FERRITE_HOME` when set (else
+  `~/.local/share/ferrite`). New `just setup-all` (real Servo + Laya) and
+  `just run-all`. Downloads still go to the OS Downloads folder on purpose.
+
+**Verified:** `cargo build`/`fmt --check`/`clippy --workspace --all-targets
+-D warnings`/`test` — 972 tests, 0 failures; `clippy -p ferrite-servo
+--features servo --all-targets -D warnings` clean; `cargo check -p
+ferrite-shell --features ferrite-servo/servo` compiles; `cargo machete`,
+`cargo deny check`, purge/archive-link scripts clean; script tests 18 + 40
+pass.
+
+**Not verified:** typing has not been run or seen — there is no display here,
+so the key mapping against a real Servo page (IME, dead keys, layouts other
+than US, key repeat) is unobserved (T-236 widened to cover it). The page
+script still has not run on real Servo (T-235).

@@ -6,7 +6,7 @@
 # Shared, portable target dir (see .cargo/config.toml's comment for why this
 # lives here and not in a hardcoded `build.target-dir`). Override per-
 # contributor with a real CARGO_TARGET_DIR env var; this is only the default.
-export CARGO_TARGET_DIR := env_var_or_default("CARGO_TARGET_DIR", home_directory() / ".cache" / "ferrite-target")
+export CARGO_TARGET_DIR := env_var_or_default("CARGO_TARGET_DIR", justfile_directory() / "target")
 
 # List all recipes (default).
 default:
@@ -150,7 +150,7 @@ install-hooks:
 
 # ── Local setup + run toolchain ──────────────────────────────────────────
 # Scripts under scripts/ (bash 3.2-compatible, macOS-first). State lives
-# outside the repo in $FERRITE_HOME (default ~/.local/share/ferrite); every
+# in $FERRITE_HOME (default <repo>/.ferrite, gitignored); every
 # recipe is safe to re-run. `just setup --dry-run --yes` prints the plan.
 # (`just --list` shows only the last comment line of each recipe, so that
 # line is the one-sentence summary.)
@@ -165,11 +165,22 @@ setup *ARGS:
 setup-servo *ARGS:
     ./scripts/setup-local.sh --with-servo {{ARGS}}
 
+# The whole project in one go: the real Servo build (20-60 min, 10+ GB the
+# first time) plus the Laya venv and browser checkpoint, all inside this folder.
+# Everything: real Servo + local Laya, set up in one command.
+setup-all *ARGS:
+    ./scripts/setup-local.sh --with-servo --laya {{ARGS}}
+
 # Flags: --no-laya, --servo/--no-servo, --wait N, --dry-run; arguments after
 # `--` go to ferrite-shell instead of `ui`.
 # Run the browser with env.local, starting the local Laya server if set up.
 run-local *ARGS:
     ./scripts/run-local.sh {{ARGS}}
+
+# Starts the Laya server (if set up), then the real-Servo browser with it.
+# Run everything: real Servo browser + local Laya server.
+run-all *ARGS:
+    ./scripts/run-local.sh --servo {{ARGS}}
 
 # `just models` needs both tags set before it can list anything; this loads
 # env.local and supplies placeholders. Needs OLLAMA_API_KEY or a local Ollama.

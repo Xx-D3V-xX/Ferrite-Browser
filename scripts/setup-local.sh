@@ -41,9 +41,9 @@ Build choices:
                  release build costs more). Needs the gstreamer brew package.
 
 What it may write, and where:
-  \$FERRITE_HOME     (default ~/.local/share/ferrite): the Laya venv, the
+  \$FERRITE_HOME     (default <repo>/.ferrite, gitignored): the Laya venv, the
                     checkpoint, env.local, pid/log files, build.mode
-  \$CARGO_TARGET_DIR (default ~/.cache/ferrite-target): build output
+  \$CARGO_TARGET_DIR (default <repo>/target): build output
   this repo's own files (none are modified by this script)
   Only after an explicit prompt or --yes: rustup (~/.cargo, ~/.rustup, with
   --no-modify-path so your shell profile is untouched), brew packages (never

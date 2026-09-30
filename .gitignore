@@ -45,10 +45,9 @@ Executables/
 staged/
 
 # ── Local run state (scripts/setup-local.sh, scripts/run-local.sh) ────
-# These live OUTSIDE the repo, under $FERRITE_HOME (default
-# ~/.local/share/ferrite). The entries below only catch the case where someone
-# points FERRITE_HOME inside the checkout, so a venv, a multi-GB checkpoint, a
-# pid/log file or an env file with real values can never be staged by accident.
+# These live under $FERRITE_HOME, which defaults to <repo>/.ferrite, so a venv,
+# a multi-GB checkpoint, a pid/log file or an env file with real values can
+# never be staged by accident.
 env.local
 /.ferrite/
 /.ferrite-home/

@@ -215,6 +215,7 @@ use std::sync::Arc;
 mod agent_panel;
 mod agent_run;
 mod icons;
+mod page_input;
 use icons::{icon, Icon};
 
 use ferrite_agent::browser_loop::{
@@ -1750,6 +1751,11 @@ pub enum FerriteBrowserMessage {
     },
     /// Mouse button pressed (position taken from last ServoMouseMove).
     ServoMousePress,
+    /// A key press/release that no widget in the browser chrome consumed,
+    /// destined for the focused element of the active page (see
+    /// `page_input`). Before this existed nothing forwarded the keyboard to
+    /// pages, so text boxes could be clicked into but never typed in.
+    PageKey(ferrite_servo::session::PageKeyEvent),
     /// Mouse button released (position taken from last ServoMouseMove).
     ServoMouseRelease,
     /// Scroll wheel event.
@@ -2167,10 +2173,19 @@ pub fn update(
             }
         }
         FerriteBrowserMessage::ServoMousePress => {
+            // A click on the page takes keyboard focus from the address bar
+            // (the bar's own widget unfocuses itself, but this flag is what
+            // `PageKey` consults).
+            state.address_bar_focused = false;
             let (x, y) = state.cursor_pos;
             let scale = state.scale_factor;
             if let Some(session) = state.servo_sessions.get(&state.active_tab) {
                 session.send_mouse_down(x * scale, y * scale);
+            }
+        }
+        FerriteBrowserMessage::PageKey(event) => {
+            if let Some(session) = page_key_target(state) {
+                session.send_key(&event);
             }
         }
         FerriteBrowserMessage::ServoMouseRelease => {
@@ -4010,12 +4025,12 @@ fn resolve_url(input: &str) -> String {
 /// feature degrades (bookmarks stay in-memory-only for the session) rather
 /// than panicking.
 fn default_bookmarks_path() -> Option<PathBuf> {
-    let home = dirs::home_dir()?;
     Some(
-        home.join(".local")
-            .join("share")
-            .join("ferrite")
-            .join("bookmarks.json"),
+        ferrite_agent::chat::ferrite_data_dir(
+            std::env::var("FERRITE_HOME").ok().as_deref(),
+            dirs::home_dir(),
+        )?
+        .join("bookmarks.json"),
     )
 }
 
@@ -4490,8 +4505,20 @@ fn favicon_host(url: &str) -> Option<String> {
 /// the session, the same "degrade, don't panic" shape every other real-path
 /// resolver in this file already follows.
 fn favicon_cache_dir() -> Option<PathBuf> {
-    let home = dirs::home_dir()?;
-    Some(home.join(".cache").join("ferrite-ui").join("favicons"))
+    // Inside `$FERRITE_HOME` when the local setup set one (everything stays
+    // in the project folder); otherwise the conventional per-user cache.
+    match std::env::var("FERRITE_HOME")
+        .ok()
+        .filter(|h| !h.trim().is_empty())
+    {
+        Some(home) => Some(PathBuf::from(home).join("cache").join("favicons")),
+        None => Some(
+            dirs::home_dir()?
+                .join(".cache")
+                .join("ferrite-ui")
+                .join("favicons"),
+        ),
+    }
 }
 
 /// Where `host`'s favicon is cached under `cache_dir` — pure and fully
@@ -6471,8 +6498,54 @@ fn handle_key_press(
     }
 }
 
+/// The session a forwarded key should go to, or `None` when the keyboard
+/// belongs to browser chrome or there is no real page to type into: the
+/// address bar or find bar has focus, or the active tab is showing the
+/// new-tab page (which has its own search box, a widget that consumes typed
+/// keys itself).
+fn page_key_target(state: &FerriteBrowser) -> Option<&HeadlessServoSession> {
+    if state.address_bar_focused || state.show_find_bar {
+        return None;
+    }
+    let showing_page = state
+        .tab_urls
+        .get(state.active_tab)
+        .is_some_and(|u| !u.is_empty() && u != "about:blank");
+    if !showing_page {
+        return None;
+    }
+    state.servo_sessions.get(&state.active_tab)
+}
+
+/// `event::listen_with` filter for [`FerriteBrowserMessage::PageKey`]. Only
+/// events no widget captured (a focused `text_input` captures what it types,
+/// which is exactly how "typing in the address bar" never reaches the page)
+/// and that are not one of the browser's own shortcuts.
+fn page_key_from_event(
+    event: iced::Event,
+    status: iced::event::Status,
+    _window: window::Id,
+) -> Option<FerriteBrowserMessage> {
+    if status != iced::event::Status::Ignored {
+        return None;
+    }
+    let iced::Event::Keyboard(key_event) = event else {
+        return None;
+    };
+    let (key, modifiers) = match &key_event {
+        keyboard::Event::KeyPressed { key, modifiers, .. }
+        | keyboard::Event::KeyReleased { key, modifiers, .. } => (key.clone(), *modifiers),
+        keyboard::Event::ModifiersChanged(_) => return None,
+    };
+    if handle_key_press(key, modifiers).is_some() {
+        return None;
+    }
+    page_input::page_key_from_iced(&key_event).map(FerriteBrowserMessage::PageKey)
+}
+
 pub fn subscription(state: &FerriteBrowser) -> Subscription<FerriteBrowserMessage> {
     let keyboard_sub = keyboard::on_key_press(handle_key_press);
+    let page_keys = iced::event::listen_with(page_key_from_event);
 
     let servo_tick = if !state.servo_sessions.is_empty() {
         time::every(std::time::Duration::from_millis(16)).map(|_| FerriteBrowserMessage::ServoFrame)
@@ -6527,6 +6600,7 @@ pub fn subscription(state: &FerriteBrowser) -> Subscription<FerriteBrowserMessag
 
     Subscription::batch([
         keyboard_sub,
+        page_keys,
         servo_tick,
         agent_event_sub,
         consent_anim_tick,
@@ -6707,6 +6781,8 @@ pub fn launch() -> iced::Result {
 mod chat_tests;
 #[cfg(test)]
 mod fast_lane_tests;
+#[cfg(test)]
+mod page_key_tests;
 
 #[cfg(test)]
 mod tests {

@@ -47,6 +47,114 @@ pub enum LoadStatus {
     Failed(String),
 }
 
+/// A named (non-character) key a page can receive. A deliberately small set:
+/// everything a text field, form or page shortcut actually needs.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PageNamedKey {
+    /// Enter / Return.
+    Enter,
+    /// Backspace.
+    Backspace,
+    /// Forward delete.
+    Delete,
+    /// Tab.
+    Tab,
+    /// Escape.
+    Escape,
+    /// Arrow up.
+    ArrowUp,
+    /// Arrow down.
+    ArrowDown,
+    /// Arrow left.
+    ArrowLeft,
+    /// Arrow right.
+    ArrowRight,
+    /// Home.
+    Home,
+    /// End.
+    End,
+    /// Page up.
+    PageUp,
+    /// Page down.
+    PageDown,
+    /// Insert.
+    Insert,
+    /// Function key `F1`..=`F12`.
+    F(u8),
+}
+
+/// The key of a [`PageKeyEvent`]: the text it types, or a named key.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum PageKey {
+    /// The character(s) the key produces with modifiers applied (`"a"`,
+    /// `"A"`, `"@"`, `" "`).
+    Character(String),
+    /// A non-character key.
+    Named(PageNamedKey),
+}
+
+/// A clipboard editing action Servo handles itself (it owns the clipboard).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PageEdit {
+    /// Copy the page's selection.
+    Copy,
+    /// Cut the focused field's selection.
+    Cut,
+    /// Paste into the focused field.
+    Paste,
+}
+
+/// One key press or release destined for the focused element of the page.
+///
+/// Plain data, independent of both `iced` and `libservo`, so the UI can build
+/// it and test the conversion without a Servo build; only the real session
+/// turns it into a Servo `InputEvent`. Before this existed, nothing
+/// forwarded keyboard input to pages at all — mouse events were forwarded, so
+/// a text box could be clicked into but never typed in.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PageKeyEvent {
+    /// `true` for key-down, `false` for key-up.
+    pub down: bool,
+    /// The key.
+    pub key: PageKey,
+    /// Shift is held.
+    pub shift: bool,
+    /// Control is held.
+    pub ctrl: bool,
+    /// Alt/Option is held.
+    pub alt: bool,
+    /// Command (macOS) / Windows key is held.
+    pub meta: bool,
+}
+
+impl PageKeyEvent {
+    /// Whether the platform's copy/paste modifier (Cmd on macOS, Ctrl
+    /// elsewhere) is held without Alt.
+    fn command_held(&self) -> bool {
+        #[cfg(target_os = "macos")]
+        let held = self.meta;
+        #[cfg(not(target_os = "macos"))]
+        let held = self.ctrl;
+        held && !self.alt
+    }
+
+    /// The clipboard action this key combination means (`Cmd/Ctrl + C/X/V`),
+    /// regardless of press/release. Servo performs these itself via
+    /// `EditingActionEvent`; the raw key events for them are not forwarded.
+    #[must_use]
+    pub fn edit_combo(&self) -> Option<PageEdit> {
+        if !self.command_held() {
+            return None;
+        }
+        match &self.key {
+            PageKey::Character(c) if c.eq_ignore_ascii_case("c") => Some(PageEdit::Copy),
+            PageKey::Character(c) if c.eq_ignore_ascii_case("x") => Some(PageEdit::Cut),
+            PageKey::Character(c) if c.eq_ignore_ascii_case("v") => Some(PageEdit::Paste),
+            _ => None,
+        }
+    }
+}
+
 #[cfg(feature = "servo")]
 pub use inner::HeadlessServoSession;
 
@@ -57,12 +165,105 @@ mod inner {
 
     use rustls::crypto::aws_lc_rs;
     use servo::{
-        DevicePoint, DeviceVector2D, InputEvent, MouseButton, MouseButtonAction, MouseButtonEvent,
-        MouseMoveEvent, RenderingContext, Scroll, Servo, ServoBuilder, ServoDelegate,
+        Code, DevicePoint, DeviceVector2D, EditingActionEvent, InputEvent, Key, KeyState,
+        KeyboardEvent, Location, Modifiers, MouseButton, MouseButtonAction, MouseButtonEvent,
+        MouseMoveEvent, NamedKey, RenderingContext, Scroll, Servo, ServoBuilder, ServoDelegate,
         SoftwareRenderingContext, WebViewBuilder, WebViewDelegate, WebViewPoint, WheelDelta,
         WheelEvent, WheelMode,
     };
     use winit::dpi::PhysicalSize;
+
+    /// The `Code` (physical key) that best matches a typed character. Pages
+    /// mostly read `key`; `code` matters for shortcuts and games, so an
+    /// unmapped character honestly reports `Unidentified` rather than a wrong
+    /// physical key.
+    fn code_for_char(c: char) -> Code {
+        match c.to_ascii_lowercase() {
+            'a' => Code::KeyA,
+            'b' => Code::KeyB,
+            'c' => Code::KeyC,
+            'd' => Code::KeyD,
+            'e' => Code::KeyE,
+            'f' => Code::KeyF,
+            'g' => Code::KeyG,
+            'h' => Code::KeyH,
+            'i' => Code::KeyI,
+            'j' => Code::KeyJ,
+            'k' => Code::KeyK,
+            'l' => Code::KeyL,
+            'm' => Code::KeyM,
+            'n' => Code::KeyN,
+            'o' => Code::KeyO,
+            'p' => Code::KeyP,
+            'q' => Code::KeyQ,
+            'r' => Code::KeyR,
+            's' => Code::KeyS,
+            't' => Code::KeyT,
+            'u' => Code::KeyU,
+            'v' => Code::KeyV,
+            'w' => Code::KeyW,
+            'x' => Code::KeyX,
+            'y' => Code::KeyY,
+            'z' => Code::KeyZ,
+            '0' => Code::Digit0,
+            '1' => Code::Digit1,
+            '2' => Code::Digit2,
+            '3' => Code::Digit3,
+            '4' => Code::Digit4,
+            '5' => Code::Digit5,
+            '6' => Code::Digit6,
+            '7' => Code::Digit7,
+            '8' => Code::Digit8,
+            '9' => Code::Digit9,
+            ' ' => Code::Space,
+            '-' => Code::Minus,
+            '=' => Code::Equal,
+            '[' => Code::BracketLeft,
+            ']' => Code::BracketRight,
+            '\\' => Code::Backslash,
+            ';' => Code::Semicolon,
+            '\'' => Code::Quote,
+            '`' => Code::Backquote,
+            ',' => Code::Comma,
+            '.' => Code::Period,
+            '/' => Code::Slash,
+            _ => Code::Unidentified,
+        }
+    }
+
+    fn named_key(key: PageNamedKey) -> (NamedKey, Code) {
+        match key {
+            PageNamedKey::Enter => (NamedKey::Enter, Code::Enter),
+            PageNamedKey::Backspace => (NamedKey::Backspace, Code::Backspace),
+            PageNamedKey::Delete => (NamedKey::Delete, Code::Delete),
+            PageNamedKey::Tab => (NamedKey::Tab, Code::Tab),
+            PageNamedKey::Escape => (NamedKey::Escape, Code::Escape),
+            PageNamedKey::ArrowUp => (NamedKey::ArrowUp, Code::ArrowUp),
+            PageNamedKey::ArrowDown => (NamedKey::ArrowDown, Code::ArrowDown),
+            PageNamedKey::ArrowLeft => (NamedKey::ArrowLeft, Code::ArrowLeft),
+            PageNamedKey::ArrowRight => (NamedKey::ArrowRight, Code::ArrowRight),
+            PageNamedKey::Home => (NamedKey::Home, Code::Home),
+            PageNamedKey::End => (NamedKey::End, Code::End),
+            PageNamedKey::PageUp => (NamedKey::PageUp, Code::PageUp),
+            PageNamedKey::PageDown => (NamedKey::PageDown, Code::PageDown),
+            PageNamedKey::Insert => (NamedKey::Insert, Code::Insert),
+            PageNamedKey::F(n) => match n {
+                1 => (NamedKey::F1, Code::F1),
+                2 => (NamedKey::F2, Code::F2),
+                3 => (NamedKey::F3, Code::F3),
+                4 => (NamedKey::F4, Code::F4),
+                5 => (NamedKey::F5, Code::F5),
+                6 => (NamedKey::F6, Code::F6),
+                7 => (NamedKey::F7, Code::F7),
+                8 => (NamedKey::F8, Code::F8),
+                9 => (NamedKey::F9, Code::F9),
+                10 => (NamedKey::F10, Code::F10),
+                11 => (NamedKey::F11, Code::F11),
+                12 => (NamedKey::F12, Code::F12),
+                _ => (NamedKey::Unidentified, Code::Unidentified),
+            },
+        }
+    }
 
     // Servo's `opts` module uses a global singleton that panics if initialised
     // more than once per process.  We therefore create the `Servo` engine once
@@ -87,7 +288,7 @@ mod inner {
 
     use ferrite_audit_log::{AuditEventKind, PersistentAuditLog};
 
-    use super::LoadStatus;
+    use super::{LoadStatus, PageEdit, PageKey, PageKeyEvent, PageNamedKey};
 
     /// Converts a Servo-decoded favicon [`servo::Image`] to raw, straight
     /// (non-premultiplied) RGBA8 bytes — the format
@@ -100,6 +301,7 @@ mod inner {
     /// grayscale frame, a plain PNG, ...), not just RGBA8 — this is the one
     /// place in `ferrite-servo` that has to handle the full set rather than
     /// assuming a single decoder output format.
+    #[allow(clippy::chunks_exact_to_as_chunks)] // chunks_exact reads clearer here and works on older toolchains
     fn favicon_to_rgba8(
         width: u32,
         height: u32,
@@ -139,6 +341,9 @@ mod inner {
     // Servo delegate (global browser-level callbacks — all no-ops)
     // -------------------------------------------------------------------------
 
+    /// Latest favicon (width, height, RGBA8) shared between Servo's delegate and the session.
+    type SharedFavicon = Rc<std::cell::RefCell<Option<(u32, u32, Vec<u8>)>>>;
+
     struct HeadlessServoDelegate;
     impl ServoDelegate for HeadlessServoDelegate {}
 
@@ -173,7 +378,7 @@ mod inner {
         /// `sync_and_read()`. `(width, height, rgba_bytes)`, already
         /// converted from whatever `servo::PixelFormat` the page's icon
         /// decoded to.
-        favicon: Rc<std::cell::RefCell<Option<(u32, u32, Vec<u8>)>>>,
+        favicon: SharedFavicon,
     }
 
     impl WebViewDelegate for HeadlessDelegate {
@@ -298,7 +503,7 @@ mod inner {
         /// JS console errors shared with `HeadlessDelegate` — accumulated until drained.
         shared_console_errors: Rc<std::cell::RefCell<Vec<String>>>,
         /// Shared favicon cell — written by `HeadlessDelegate`, read in `sync_and_read()`.
-        shared_favicon: Rc<std::cell::RefCell<Option<(u32, u32, Vec<u8>)>>>,
+        shared_favicon: SharedFavicon,
         /// Most recently synced favicon (updated in `sync_and_read()`).
         last_favicon: Option<(u32, u32, Vec<u8>)>,
     }
@@ -355,8 +560,7 @@ mod inner {
                 Rc::new(std::cell::RefCell::new(None));
             let shared_console_errors: Rc<std::cell::RefCell<Vec<String>>> =
                 Rc::new(std::cell::RefCell::new(Vec::new()));
-            let shared_favicon: Rc<std::cell::RefCell<Option<(u32, u32, Vec<u8>)>>> =
-                Rc::new(std::cell::RefCell::new(None));
+            let shared_favicon: SharedFavicon = Rc::new(std::cell::RefCell::new(None));
 
             // ── Rendering context ──────────────────────────────────────────
             let rendering_context = Rc::new(
@@ -514,6 +718,11 @@ mod inner {
             self.current_url = self.shared_url.borrow().clone();
             self.last_page_title = self.shared_page_title.borrow().clone();
             self.last_favicon = self.shared_favicon.borrow().clone();
+            // Without this the delegate's history was written and never read, so
+            // `can_go_back()`/`can_go_forward()`/`history()` always reported an
+            // empty history in a real Servo build (found by the first real
+            // `--features servo` compile, as a dead-code warning on this field).
+            self.last_history = self.shared_history.borrow().clone();
 
             // Read back the current frame after paint.
             //
@@ -758,6 +967,71 @@ mod inner {
                 .notify_scroll_event(Scroll::Delta(scroll_vec.into()), point);
         }
 
+        /// Forwards a key press/release to the page's focused element.
+        ///
+        /// Mirrors what `servoshell` does for a real window
+        /// (`keyboard_event_from_winit`): a `KeyboardEvent` with the typed
+        /// character as `Key::Character`, a best-effort physical `Code`, and
+        /// the modifier state. `Cmd/Ctrl + C/X/V` become Servo
+        /// `EditingActionEvent`s instead (Servo owns the clipboard), and the
+        /// raw key events for those combinations are not sent.
+        pub fn send_key(&self, event: &PageKeyEvent) {
+            if let Some(edit) = event.edit_combo() {
+                if event.down {
+                    let action = match edit {
+                        PageEdit::Copy => EditingActionEvent::Copy,
+                        PageEdit::Cut => EditingActionEvent::Cut,
+                        PageEdit::Paste => EditingActionEvent::Paste,
+                    };
+                    self.webview
+                        .notify_input_event(InputEvent::EditingAction(action));
+                }
+                return;
+            }
+            let (key, code) = match &event.key {
+                PageKey::Character(text) => (
+                    Key::Character(text.clone()),
+                    text.chars()
+                        .next()
+                        .filter(|_| text.chars().count() == 1)
+                        .map_or(Code::Unidentified, code_for_char),
+                ),
+                PageKey::Named(named) => {
+                    let (named, code) = named_key(*named);
+                    (Key::Named(named), code)
+                }
+            };
+            let mut modifiers = Modifiers::empty();
+            if event.shift {
+                modifiers |= Modifiers::SHIFT;
+            }
+            if event.ctrl {
+                modifiers |= Modifiers::CONTROL;
+            }
+            if event.alt {
+                modifiers |= Modifiers::ALT;
+            }
+            if event.meta {
+                modifiers |= Modifiers::META;
+            }
+            let state = if event.down {
+                KeyState::Down
+            } else {
+                KeyState::Up
+            };
+            self.webview.notify_input_event(InputEvent::Keyboard(
+                KeyboardEvent::new_without_event(
+                    state,
+                    key,
+                    code,
+                    Location::Standard,
+                    modifiers,
+                    false,
+                    false,
+                ),
+            ));
+        }
+
         /// Send a mouse-down event (without the subsequent up) — for drag start.
         pub fn send_mouse_down(&self, x: f32, y: f32) {
             let point = WebViewPoint::Device(DevicePoint::new(x, y));
@@ -921,10 +1195,97 @@ impl HeadlessServoSession {
         }
     }
 
+    pub fn send_key(&self, _event: &PageKeyEvent) {}
     pub fn send_mouse_move(&self, _x: f32, _y: f32) {}
     pub fn send_mouse_click(&self, _x: f32, _y: f32) {}
     pub fn send_right_click(&self, _x: f32, _y: f32) {}
     pub fn send_scroll(&self, _x: f32, _y: f32, _dx: f64, _dy: f64) {}
     pub fn send_mouse_down(&self, _x: f32, _y: f32) {}
     pub fn send_mouse_up(&self, _x: f32, _y: f32) {}
+}
+
+#[cfg(test)]
+mod page_key_tests {
+    use super::*;
+
+    fn ev(down: bool, key: PageKey, ctrl: bool, meta: bool, alt: bool) -> PageKeyEvent {
+        PageKeyEvent {
+            down,
+            key,
+            shift: false,
+            ctrl,
+            alt,
+            meta,
+        }
+    }
+
+    fn ch(s: &str) -> PageKey {
+        PageKey::Character(s.to_string())
+    }
+
+    #[test]
+    fn a_plain_character_is_never_a_clipboard_combo() {
+        assert_eq!(ev(true, ch("v"), false, false, false).edit_combo(), None);
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn cmd_c_x_v_are_the_edit_combos_on_macos_and_ctrl_is_not() {
+        assert_eq!(
+            ev(true, ch("c"), false, true, false).edit_combo(),
+            Some(PageEdit::Copy)
+        );
+        assert_eq!(
+            ev(false, ch("X"), false, true, false).edit_combo(),
+            Some(PageEdit::Cut)
+        );
+        assert_eq!(
+            ev(true, ch("v"), false, true, false).edit_combo(),
+            Some(PageEdit::Paste)
+        );
+        assert_eq!(ev(true, ch("v"), true, false, false).edit_combo(), None);
+    }
+
+    #[cfg(not(target_os = "macos"))]
+    #[test]
+    fn ctrl_c_x_v_are_the_edit_combos_off_macos_and_cmd_is_not() {
+        assert_eq!(
+            ev(true, ch("c"), true, false, false).edit_combo(),
+            Some(PageEdit::Copy)
+        );
+        assert_eq!(
+            ev(false, ch("X"), true, false, false).edit_combo(),
+            Some(PageEdit::Cut)
+        );
+        assert_eq!(
+            ev(true, ch("v"), true, false, false).edit_combo(),
+            Some(PageEdit::Paste)
+        );
+        assert_eq!(ev(true, ch("v"), false, true, false).edit_combo(), None);
+    }
+
+    #[test]
+    fn alt_with_the_command_key_is_not_a_clipboard_combo() {
+        let ctrl_or_meta = cfg!(target_os = "macos");
+        assert_eq!(
+            ev(true, ch("v"), !ctrl_or_meta, ctrl_or_meta, true).edit_combo(),
+            None
+        );
+    }
+
+    #[test]
+    fn named_keys_are_never_clipboard_combos() {
+        let ctrl_or_meta = cfg!(target_os = "macos");
+        assert_eq!(
+            ev(
+                true,
+                PageKey::Named(PageNamedKey::Enter),
+                !ctrl_or_meta,
+                ctrl_or_meta,
+                false
+            )
+            .edit_combo(),
+            None
+        );
+    }
 }

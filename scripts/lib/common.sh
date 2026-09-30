@@ -8,14 +8,16 @@
 # ${arr[@]+"${arr[@]}"} idiom because `set -u` treats a bare "${arr[@]}" of an
 # empty array as an error there.
 #
-# Everything this toolchain writes outside the repo lives under $FERRITE_HOME
-# (default ~/.local/share/ferrite), so `rm -rf "$FERRITE_HOME"` removes all of
-# the local state and nothing else on the machine is touched.
+# Everything this toolchain writes lives under $FERRITE_HOME (default: the
+# repo's own gitignored `.ferrite/` directory), so `rm -rf "$FERRITE_HOME"`
+# removes all of the local state and nothing else on the machine is touched.
+# The whole project — sources, build output, Python venv, Laya checkpoints,
+# settings — therefore lives in one folder.
 
 FERRITE_SCRIPTS_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
 FERRITE_REPO_ROOT=$(cd "$FERRITE_SCRIPTS_DIR/.." && pwd)
 
-FERRITE_HOME=${FERRITE_HOME:-$HOME/.local/share/ferrite}
+FERRITE_HOME=${FERRITE_HOME:-$FERRITE_REPO_ROOT/.ferrite}
 FERRITE_ENV_FILE=$FERRITE_HOME/env.local
 FERRITE_LAYA_DIR=$FERRITE_HOME/laya
 FERRITE_LAYA_VENV=$FERRITE_LAYA_DIR/venv
@@ -36,7 +38,7 @@ FERRITE_LAYA_PIP_SPEC_DEFAULT='laya[serve]>=0.3.21,<0.4'
 # The Cargo target dir. The justfile exports the same default for `just`
 # recipes; repeating it here keeps a direct `scripts/run-local.sh` and
 # `just run-local` building into ONE directory instead of two.
-export CARGO_TARGET_DIR=${CARGO_TARGET_DIR:-$HOME/.cache/ferrite-target}
+export CARGO_TARGET_DIR=${CARGO_TARGET_DIR:-$FERRITE_REPO_ROOT/target}
 
 # ── output ────────────────────────────────────────────────────────────────
 if [ -t 1 ] && [ -z "${NO_COLOR:-}" ] && [ "${TERM:-dumb}" != dumb ]; then

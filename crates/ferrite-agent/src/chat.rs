@@ -457,17 +457,33 @@ pub struct ChatSummary {
 // Storage
 // ---------------------------------------------------------------------------
 
-/// `~/.local/share/ferrite/chats` — same location convention (and same
-/// graceful `None` when no home directory can be resolved) as the bookmarks
+/// The root directory for Ferrite's own user data (chats, bookmarks).
+///
+/// `$FERRITE_HOME` when it is set and non-empty — the local setup scripts
+/// (`scripts/run-local.sh`) point it at the project's own gitignored
+/// `.ferrite/` folder so everything lives in the checkout — otherwise
+/// `~/.local/share/ferrite`. Pure (both inputs are injected) so the rule is
+/// testable without touching the environment; `None` only when neither a
+/// `FERRITE_HOME` nor a home directory can be resolved.
+#[must_use]
+pub fn ferrite_data_dir(ferrite_home: Option<&str>, home: Option<PathBuf>) -> Option<PathBuf> {
+    match ferrite_home.map(str::trim).filter(|h| !h.is_empty()) {
+        Some(dir) => Some(PathBuf::from(dir)),
+        None => Some(home?.join(".local").join("share").join("ferrite")),
+    }
+}
+
+/// `<data dir>/chats` (see [`ferrite_data_dir`]) — same location convention
+/// (and same graceful `None` when nothing can be resolved) as the bookmarks
 /// file. Callers that get `None` simply run without persistence.
 #[must_use]
 pub fn default_chats_dir() -> Option<PathBuf> {
-    let home = dirs::home_dir()?;
     Some(
-        home.join(".local")
-            .join("share")
-            .join("ferrite")
-            .join("chats"),
+        ferrite_data_dir(
+            std::env::var("FERRITE_HOME").ok().as_deref(),
+            dirs::home_dir(),
+        )?
+        .join("chats"),
     )
 }
 
@@ -612,6 +628,38 @@ impl ChatStore {
 #[must_use]
 pub fn chat_file_path(dir: &Path, id: &ChatId) -> PathBuf {
     dir.join(format!("{id}.json"))
+}
+
+#[cfg(test)]
+mod data_dir_tests {
+    use super::*;
+
+    #[test]
+    fn ferrite_home_wins_when_set() {
+        assert_eq!(
+            ferrite_data_dir(Some("/proj/.ferrite"), Some(PathBuf::from("/home/u"))),
+            Some(PathBuf::from("/proj/.ferrite"))
+        );
+    }
+
+    #[test]
+    fn a_blank_ferrite_home_falls_back_to_the_home_directory() {
+        for blank in [Some(""), Some("   "), None] {
+            assert_eq!(
+                ferrite_data_dir(blank, Some(PathBuf::from("/home/u"))),
+                Some(PathBuf::from("/home/u/.local/share/ferrite"))
+            );
+        }
+    }
+
+    #[test]
+    fn nothing_resolvable_is_none_not_a_panic() {
+        assert_eq!(ferrite_data_dir(None, None), None);
+        assert_eq!(
+            ferrite_data_dir(Some("/x"), None),
+            Some(PathBuf::from("/x"))
+        );
+    }
 }
 
 #[cfg(test)]

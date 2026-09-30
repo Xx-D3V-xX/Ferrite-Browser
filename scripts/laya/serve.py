@@ -6,7 +6,7 @@ by ``scripts/setup-local.sh``) over Laya's own ``POST /v1/systemone`` route,
 plus Laya's own ``GET /health``. Run it with the interpreter from the Laya
 venv (``scripts/run-local.sh`` and ``just laya-serve`` do):
 
-    ~/.local/share/ferrite/laya/venv/bin/python scripts/laya/serve.py
+    .ferrite/laya/venv/bin/python scripts/laya/serve.py
 
 Everything is configured through ``FERRITE_LAYA_*`` environment variables
 (the same names ``scripts/local.env.example`` documents); nothing is read from
@@ -23,7 +23,7 @@ built, so an ambient ``LAYA_API_KEY`` cannot silently change behaviour.
     FERRITE_LAYA_HEAD_MAX_LEN    override the served head length     (see below)
     FERRITE_LAYA_LOG_LEVEL       uvicorn log level                  info
     FERRITE_LAYA_OFFLINE         1 = set HF_HUB_OFFLINE             0
-    FERRITE_HOME                 state root                         ~/.local/share/ferrite
+    FERRITE_HOME                 state root                         <repo>/.ferrite
 
 Two deliberate behaviours worth knowing about:
 
@@ -85,7 +85,7 @@ def _env(name: str, default: Optional[str] = None) -> Optional[str]:
 
 
 def ferrite_home() -> Path:
-    return Path(_env("FERRITE_HOME", str(Path.home() / ".local" / "share" / "ferrite")))
+    return Path(_env("FERRITE_HOME", str(Path(__file__).resolve().parents[2] / ".ferrite")))
 
 
 def checkpoint_dir() -> Path:

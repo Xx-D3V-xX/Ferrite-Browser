@@ -133,14 +133,25 @@ cargo install cargo-machete --locked
 ## Running locally
 
 macOS first; Linux is best-effort. Every step is idempotent, so run the same
-commands again whenever you like. Nothing is written outside this checkout,
-`$CARGO_TARGET_DIR` (default `~/.cache/ferrite-target`) and `$FERRITE_HOME`
-(default `~/.local/share/ferrite`); `rm -rf` the latter to remove all local
-state.
+commands again whenever you like. Everything lives inside this checkout: build
+output in `target/` and all local state (Laya venv and checkpoint, `env.local`,
+logs) in the gitignored `.ferrite/` (override with `$CARGO_TARGET_DIR` /
+`$FERRITE_HOME`); `rm -rf .ferrite` removes all local state.
+
+The whole project (real Servo + Laya) in one go, then every day:
+
+```
+just setup-all        # real Servo build + Laya venv/checkpoint, all inside this folder
+$EDITOR .ferrite/env.local     # set FERRITE_MODEL_SMALL and FERRITE_MODEL_MAIN
+export OLLAMA_API_KEY=...      # or store it in the keychain, see below
+just run-all          # local Laya server + the real-Servo browser
+```
+
+Step by step (`just setup` is the quick Servo-free variant):
 
 ```
 just setup            # or: ./scripts/setup-local.sh   (add --dry-run --yes to see the plan)
-$EDITOR ~/.local/share/ferrite/env.local     # set FERRITE_MODEL_SMALL and FERRITE_MODEL_MAIN
+$EDITOR .ferrite/env.local     # set FERRITE_MODEL_SMALL and FERRITE_MODEL_MAIN
 security add-generic-password -U -s ferrite -a OLLAMA_API_KEY -w     # prompts; or: export OLLAMA_API_KEY=...
 just run-local        # or: ./scripts/run-local.sh
 ```
