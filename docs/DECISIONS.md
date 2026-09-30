@@ -359,3 +359,33 @@ closing the real window. Whether a given site's login works is a different
 question: Google in particular may refuse an embedded engine or a user-agent
 that names Servo (`FERRITE_USER_AGENT` overrides it), and needs web-platform
 features this Servo version may lack.
+
+## ADR-013 — Servo 0.6.0 from crates.io, replacing the git tag v0.0.5
+
+**Date:** 2026-10-01. **Status:** live once the probes in `docs/PROGRESS.md` pass.
+
+The owner's macOS crash report for a Google Form put the fault in
+`JS::GetScriptPrivate(JSScript*)`, called from
+`GlobalScope::run_a_classic_script` ← `HTMLScriptElement::execute` ←
+`ServoParser::resume_with_pending_parsing_blocking_script` ← stylesheet
+`do_post_parse_tasks`, at address `0x4b4b4b4b4b4b4b7b` (SpiderMonkey's
+freed-memory fill). In v0.0.5, `ClassicScript.record` holds the compiled
+script as an untraced `NonNull<JSScript>` for as long as a parser-blocking
+script waits for its stylesheet; a garbage collection in that window frees it
+and the later run reads freed memory. That is a bug in the engine, not in
+Ferrite, and it is timing-dependent, which is why simple local pages never hit
+it. Upstream's `ClassicScript.record` is a `RootedTraceableBox<Heap<*mut
+JSScript>>` by 0.6.0.
+
+- Patching a vendored v0.0.5 was rejected (the engine is hundreds of crates
+  and the patch would have to be carried forever); moving to the released
+  crate gets this fix and six releases of others.
+- `libservo` (git) becomes `servo = "=0.6.0"` (crates.io); the library name is
+  unchanged, so `use servo::…` is too. The only source change needed was
+  `MouseButton::{Left,Right}` → `{Primary,Secondary}`.
+- Servo 0.6.0 pins `rusqlite 0.38` with `bundled`, and Cargo allows one
+  `libsqlite3-sys` per graph, so the workspace `rusqlite` moved from 0.37 to
+  0.38. It is still one version, workspace-wide, bundled.
+- The default features (`bundled`, `clipboard`, `js_jit`) no longer include a
+  media backend, so the gstreamer brew package is no longer required; audio
+  and video playback are not built in.

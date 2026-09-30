@@ -1119,13 +1119,13 @@ mod inner {
             self.webview
                 .notify_input_event(InputEvent::MouseButton(MouseButtonEvent::new(
                     MouseButtonAction::Down,
-                    MouseButton::Right,
+                    MouseButton::Secondary,
                     point,
                 )));
             self.webview
                 .notify_input_event(InputEvent::MouseButton(MouseButtonEvent::new(
                     MouseButtonAction::Up,
-                    MouseButton::Right,
+                    MouseButton::Secondary,
                     point,
                 )));
         }
@@ -1222,7 +1222,7 @@ mod inner {
             self.webview
                 .notify_input_event(InputEvent::MouseButton(MouseButtonEvent::new(
                     MouseButtonAction::Down,
-                    MouseButton::Left,
+                    MouseButton::Primary,
                     point,
                 )));
         }
@@ -1233,7 +1233,7 @@ mod inner {
             self.webview
                 .notify_input_event(InputEvent::MouseButton(MouseButtonEvent::new(
                     MouseButtonAction::Up,
-                    MouseButton::Left,
+                    MouseButton::Primary,
                     point,
                 )));
         }

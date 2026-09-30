@@ -170,7 +170,8 @@ it; a rebuilt binary can trigger that prompt again.
 **Servo or not.** The default build is Servo-free: quick (about two minutes
 cold, per `docs/BUILD_BUDGET.md`), but it has **no real web rendering**. For
 real pages run `just setup-servo` (`cargo build -p ferrite-shell
---features ferrite-servo/servo`, plus `brew install gstreamer`): plan on 20 to
+--features ferrite-servo/servo`; audio and video playback are not built in, so no
+extra brew package is needed): plan on 20 to
 60 minutes and 10+ GB of disk the first time. `just run-local` uses whichever
 build setup made last; force one with `--servo` / `--no-servo`.
 

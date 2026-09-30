@@ -9,7 +9,7 @@ publish = false
 # Enable Servo engine integration:
 #   cargo build -p ferrite-servo --features servo
 #   cargo build -p ferrite-shell --features ferrite-servo/servo
-servo = ["dep:libservo"]
+servo = ["dep:servo"]
 
 [dependencies]
 ferrite-audit-log = { workspace = true }
@@ -24,13 +24,12 @@ rustls = { workspace = true }
 url = { workspace = true }
 
 # Optional — only resolved when the `servo` feature is enabled.
-# Package name in the repo is `libservo`; the lib is named `servo` internally
-# so Rust imports use `use servo::...`.
-libservo = { workspace = true, optional = true }
+# The crates.io package `servo`; Rust imports use `use servo::...`.
+servo = { workspace = true, optional = true }
 
 # cargo-machete can't see the `use servo::...` imports inside
 # #[cfg(feature = "servo")] blocks without building with that feature
 # enabled (it does static analysis without --with-metadata by default) —
 # false-positive "unused dependency" without this.
 [package.metadata.cargo-machete]
-ignored = ["libservo"]
+ignored = ["servo"]

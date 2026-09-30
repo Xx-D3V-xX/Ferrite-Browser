@@ -4610,3 +4610,37 @@ printed as `[page console error] tab N: …` (they were silently dropped), and
 `just crash-report` / `scripts/crash_report.py` prints the exception and the
 crashing thread's stack from the newest macOS crash report (tested on a
 synthetic report only). Verified: fmt, clippy, 1000 tests.
+
+## 2026-10-01 — coordinator — the crash was a use-after-free in Servo; moved to 0.6.0
+
+**Reported by the owner:** the Google Form still crashed after the native-zoom
+change, and `just crash-report` (added last round) produced a real stack.
+
+**What it showed.** `EXC_BAD_ACCESS`, address `0x4b4b4b4b4b4b4b7b` (SpiderMonkey
+fills freed memory with `0x4b`), in `JS::GetScriptPrivate(JSScript*)` ←
+`evaluate_script` ← `GlobalScope::run_a_classic_script` ←
+`HTMLScriptElement::execute` ← `ServoParser::resume_with_pending_parsing_blocking_script`
+← stylesheet `do_post_parse_tasks`. In the pinned v0.0.5 source,
+`ClassicScript.record` is an untraced raw `NonNull<JSScript>`; the script is
+compiled when it is fetched and kept until the stylesheet it is waiting on
+has loaded, and a garbage collection in between frees it. The 0.6.0 source
+holds a `RootedTraceableBox<Heap<*mut JSScript>>` there. (So: not zoom, not
+reload, not Ferrite; a timing-dependent engine bug that a heavy real page
+hits and local test pages do not. The earlier zoom and reload hypotheses
+were wrong and are recorded as such above.)
+
+**Done.** `libservo` git tag v0.0.5 → crates.io `servo = "=0.6.0"` (ADR-013).
+Source changes: `MouseButton::{Left,Right}` → `{Primary,Secondary}`; workspace
+`rusqlite` 0.37 → 0.38 (Servo's pin; one `libsqlite3-sys` per graph), which
+dropped implicit `u64` SQL conversion, so the audit log now converts sequence
+numbers explicitly; `deny.toml` skips a second `synstructure`; the gstreamer
+brew package is no longer needed (no media backend in the default features).
+
+**Verified (Linux, headless, release):** `input_probe` (scroll, typing, click,
+checkbox, reload, native zoom, two tabs), `digest_probe` (digest and
+`@ref` actions), `profile_probe` (cookie and localStorage survive a restart),
+and the app itself (page loads, typing, Security log). fmt; clippy (workspace
+and servo feature); 1000 tests, 0 failures; machete; deny; purge scripts.
+**Not verified:** that the Google Form no longer crashes, and what "File
+unavailable" is — no internet here; macOS; Servo 0.6.0 on his machine (first
+build will recompile SpiderMonkey, ~20-60 min).

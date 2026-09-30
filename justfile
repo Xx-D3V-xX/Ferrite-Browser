@@ -178,7 +178,7 @@ install-hooks:
 setup *ARGS:
     ./scripts/setup-local.sh {{ARGS}}
 
-# First build: 20-60 min and 10+ GB. Needs `brew install gstreamer` (offered).
+# First build: 20-60 min and 10+ GB.
 # Local setup with the REAL Servo engine (real web rendering).
 setup-servo *ARGS:
     ./scripts/setup-local.sh --with-servo {{ARGS}}

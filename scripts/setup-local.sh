@@ -37,8 +37,9 @@ Build choices:
   --with-servo   cargo build -p ferrite-shell --features ferrite-servo/servo
                  First build: plan on 20-60 minutes and 10+ GB of disk in the
                  target dir (docs/BUILD_BUDGET.md measured 15m31s and 6.4 GB for
-                 a DEBUG Servo build added to an existing build). Needs the gstreamer
-                 brew package. FERRITE_PROFILE=release builds the release
+                 a DEBUG Servo build added to an existing build). No extra brew
+                 package is needed (audio/video playback is not built in).
+                 FERRITE_PROFILE=release builds the release
                  profile instead (slower to build).
 
 What it may write, and where:
@@ -171,7 +172,6 @@ brew_has() {
 step_system_packages() {
   step "system packages"
   local pkgs="cmake pkg-config openssl sqlite"
-  [ "$WITH_SERVO" = 1 ] && pkgs="$pkgs gstreamer"
   if [ "$OS" = Darwin ]; then
     if ! have brew; then
       fail_step "Homebrew not found. Install it from https://brew.sh (its installer needs sudo, so this script will not run it), then re-run."
