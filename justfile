@@ -147,3 +147,54 @@ disk:
 # fmt/clippy gate). Idempotent — safe to re-run.
 install-hooks:
     ./scripts/hooks/install.sh
+
+# ── Local setup + run toolchain ──────────────────────────────────────────
+# Scripts under scripts/ (bash 3.2-compatible, macOS-first). State lives
+# outside the repo in $FERRITE_HOME (default ~/.local/share/ferrite); every
+# recipe is safe to re-run. `just setup --dry-run --yes` prints the plan.
+# (`just --list` shows only the last comment line of each recipe, so that
+# line is the one-sentence summary.)
+
+# Flags pass through: --no-laya, --yes, --dry-run, --laya-checkpoint v10, ...
+# Local setup, every time: toolchain checks, Servo-free build, optional Laya.
+setup *ARGS:
+    ./scripts/setup-local.sh {{ARGS}}
+
+# First build: 20-60 min and 10+ GB. Needs `brew install gstreamer` (offered).
+# Local setup with the REAL Servo engine (real web rendering).
+setup-servo *ARGS:
+    ./scripts/setup-local.sh --with-servo {{ARGS}}
+
+# Flags: --no-laya, --servo/--no-servo, --wait N, --dry-run; arguments after
+# `--` go to ferrite-shell instead of `ui`.
+# Run the browser with env.local, starting the local Laya server if set up.
+run-local *ARGS:
+    ./scripts/run-local.sh {{ARGS}}
+
+# `just models` needs both tags set before it can list anything; this loads
+# env.local and supplies placeholders. Needs OLLAMA_API_KEY or a local Ollama.
+# List the model tags your Ollama endpoint serves.
+models-local:
+    ./scripts/run-local.sh --list-models
+
+# Run ONLY the Laya server, in the foreground (Ctrl-C stops it).
+laya-serve:
+    ./scripts/run-local.sh --laya-only
+
+# Stdlib-only; exits non-zero with a suggested fix if the server is unreachable.
+# Send one recorded browser step to Laya; prints its decision and latency.
+laya-verify:
+    ./scripts/run-local.sh --verify
+
+# Exit 1 only if something FAILs. `just doctor --fix-hints` says how to fix.
+# Checklist of what is ready: tools, build, env, keys, Laya, disk.
+doctor *ARGS:
+    ./scripts/doctor.sh {{ARGS}}
+
+# No network, no cargo build; the Python server tests skip themselves unless
+# fastapi, uvicorn and laya are importable.
+# Tests for the local toolchain scripts themselves.
+test-local:
+    bash scripts/tests/test_env_parser.sh
+    bash scripts/tests/test_run_local.sh
+    python3 scripts/tests/test_laya_serve.py
