@@ -122,7 +122,7 @@
 // - **Zoom** is a per-tab `Vec<f32>` (`tab_zoom`, indexed exactly like
 //   `tab_titles`/`tab_urls`/`tab_favicons`/`tab_favicons`), applied via a
 //   CSS `transform: scale(...)` injected through `execute_js` (Servo has no
-//   native zoom API at this pinned version — see `zoom_script`'s doc
+//   native zoom API at this pinned version — see the session's `set_zoom`
 //   comment) and surfaced in the toolbar only when it isn't 100% (see
 //   `view()`'s toolbar composition comment for the information-architecture
 //   reasoning), plus a `default_zoom` setting for new tabs in the Settings
@@ -1558,8 +1558,8 @@ pub struct FerriteBrowser {
     // ── C3d: zoom ─────────────────────────────────────────────────────────
     /// Per-tab zoom level, `1.0` = 100% — same indexing convention as
     /// `tab_titles`/`tab_urls`/`tab_favicons`, kept in sync on
-    /// `AddTab`/`CloseTab`. Applied via `zoom_script` through `execute_js`
-    /// (Servo has no native zoom API at this pinned version).
+    /// `AddTab`/`CloseTab`. Applied through the engine's native page
+    /// zoom (`HeadlessServoSession::set_zoom`).
     pub tab_zoom: Vec<f32>,
     /// The zoom level a freshly-added tab starts at — a genuinely-settable
     /// preference (Settings tab, `SetDefaultZoom`), distinct from `1.0`
@@ -2090,17 +2090,13 @@ pub fn update(
                         .filter(|t| !t.is_empty() && t != "New Tab")
                         .unwrap_or_else(|| url.clone());
                     record_history_visit(&mut state.history, url.clone(), title);
-                    // Re-apply the active tab's zoom on every real
-                    // navigation — a fresh document has no memory of the
-                    // CSS transform a previous page's `zoom_script` call
-                    // injected, so without this every navigation would
-                    // silently reset to 100%.
-                    if tab == state.active_tab {
-                        let level = state.tab_zoom.get(tab).copied().unwrap_or(1.0);
-                        if (level - 1.0).abs() > f32::EPSILON {
-                            if let Some(session) = state.servo_sessions.get_mut(&tab) {
-                                let _ = session.execute_js(&zoom_script(level));
-                            }
+                    // A new tab's (or a fresh document's) page zoom may not be
+                    // the level this tab is meant to have; set it through the
+                    // engine when it differs. No script runs in the page.
+                    let level = state.tab_zoom.get(tab).copied().unwrap_or(1.0);
+                    if let Some(session) = state.servo_sessions.get(&tab) {
+                        if (session.zoom() - level).abs() > 0.001 {
+                            session.set_zoom(level);
                         }
                     }
                 }
@@ -3400,19 +3396,16 @@ fn persist_bookmarks(state: &FerriteBrowser) {
     }
 }
 
-/// Sets the active tab's zoom level and (re)applies it to the live page via
-/// `zoom_script`, if a session exists for that tab — the one path both
-/// `ZoomIn`/`ZoomOut`/`ZoomReset` and `LoadStatusChanged`'s re-apply-on-
-/// navigate logic ultimately go through for the interactive case (the
-/// navigate case calls `execute_js` directly since it has no reason to
-/// re-clamp/look up a level that's already known-valid).
+/// Sets the active tab's zoom level and applies it to the live page through
+/// the engine's page zoom, if a session exists for that tab — the path
+/// `ZoomIn`/`ZoomOut`/`ZoomReset` go through.
 fn apply_zoom(state: &mut FerriteBrowser, level: f32) {
     let active = state.active_tab;
     if active < state.tab_zoom.len() {
         state.tab_zoom[active] = level;
     }
-    if let Some(session) = state.servo_sessions.get_mut(&active) {
-        let _ = session.execute_js(&zoom_script(level));
+    if let Some(session) = state.servo_sessions.get(&active) {
+        session.set_zoom(level);
     }
 }
 
@@ -4324,44 +4317,6 @@ fn prev_zoom_level(current: f32) -> f32 {
         .unwrap_or(ZOOM_LEVELS[0])
 }
 
-/// The CSS-transform-based zoom script — Servo has no native zoom API at
-/// this pinned version (verified directly against the pinned `libservo`
-/// source, per this charter's own research brief), so zoom is applied the
-/// same way find-in-page is: injected JS via `execute_js`. `transform:
-/// scale(...)` (core CSS) is used rather than the nonstandard, legacy
-/// WebKit `zoom` property, which is not certain to exist in a real,
-/// standards-focused engine like Servo. The compensating `width:
-/// (100/level)%` keeps a `level < 1.0` page from leaving a visible gap on
-/// the right/bottom of the viewport (a scaled-down element's layout box
-/// shrinks with it unless its width is grown back out to compensate) and
-/// keeps a `level > 1.0` page's content reachable by scrolling rather than
-/// clipped at the original viewport width.
-fn zoom_script(level: f32) -> String {
-    // At 100% the inline styles are removed rather than set to `scale(1)`: a
-    // non-`none` transform on the root element makes it a containing block and
-    // stacking context, which can change scrolling and hit-testing for the
-    // whole page, so "reset" must leave no trace.
-    if (level - 1.0).abs() <= f32::EPSILON {
-        return "(function(){\
-                  var el = document.documentElement;\
-                  el.style.removeProperty('transform');\
-                  el.style.removeProperty('transform-origin');\
-                  el.style.removeProperty('width');\
-                })()"
-            .to_string();
-    }
-    format!(
-        "(function(){{\
-           var el = document.documentElement;\
-           el.style.transformOrigin = '0 0';\
-           el.style.transform = 'scale({level:.4})';\
-           el.style.width = '{compensated:.4}%';\
-         }})()",
-        level = level,
-        compensated = 100.0 / level,
-    )
-}
-
 // ---------------------------------------------------------------------------
 // C3d: find-in-page — standards-based DOM search script
 // ---------------------------------------------------------------------------
@@ -4369,8 +4324,7 @@ fn zoom_script(level: f32) -> String {
 // Both scripts below are standards-based (`document.createTreeWalker`,
 // `Range`, `NodeFilter`) rather than the legacy, nonstandard
 // `window.find()`, which is not certain to exist in Servo's JS/DOM
-// implementation (same reasoning as `zoom_script` avoiding the nonstandard
-// `zoom` CSS property) — per this charter's own research brief. Each script
+// implementation — per this charter's own research brief. Each script
 // returns `JSON.stringify(...)` as its final expression; `execute_js`
 // returns whatever `HeadlessServoSession`'s underlying `evaluate_javascript`
 // callback hands back, `Debug`-formatted from Servo's own JS-value type —
@@ -8555,27 +8509,6 @@ mod tests {
     fn prev_zoom_level_clamps_at_the_bottom_of_the_range() {
         assert_eq!(prev_zoom_level(0.5), 0.5);
         assert_eq!(prev_zoom_level(0.1), 0.5);
-    }
-
-    #[test]
-    fn zoom_script_contains_the_scale_and_compensating_width() {
-        let script = zoom_script(1.25);
-        assert!(script.contains("scale(1.2500)"), "{script}");
-        assert!(script.contains("80.0000%"), "{script}"); // 100 / 1.25 = 80
-        assert!(
-            !script.contains("window.find"),
-            "must not use the nonstandard `zoom` CSS property either — checked its absence \
-             by grepping for a telltale unrelated API instead of the property name, which \
-             this script's own `transform`/`width` keywords would otherwise false-positive on"
-        );
-        assert!(!script.contains("el.style.zoom"));
-    }
-
-    #[test]
-    fn zoom_script_at_100_percent_removes_the_root_transform() {
-        let script = zoom_script(1.0);
-        assert!(script.contains("removeProperty('transform')"), "{script}");
-        assert!(!script.contains("scale("), "{script}");
     }
 
     #[test]

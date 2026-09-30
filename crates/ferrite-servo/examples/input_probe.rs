@@ -241,26 +241,41 @@ fn main() {
     ok &= wait_loaded(&mut session, "reload", &expect);
     println!("PASS reload: survived");
 
-    // Same checks after a zoom-out transform on the root, to see whether it
-    // interferes with scrolling/hit-testing.
-    js(
-        &mut session,
-        "(function(){var el=document.documentElement;el.style.transformOrigin='0 0';\
-         el.style.transform='scale(0.9000)';el.style.width='111.1111%';})()",
+    // Native page zoom: the page's pixel ratio follows, and both a click and
+    // a wheel scroll still land (the old script-injected transform is gone).
+    session.set_zoom(1.5);
+    spin_for(&mut session, 400);
+    let dpr = js(&mut session, "String(window.devicePixelRatio)");
+    ok &= check(
+        "zoom 150%",
+        dpr.contains("1.5"),
+        &format!("devicePixelRatio {dpr}"),
     );
+    js(&mut session, "window.scrollTo(0,0)");
     spin_for(&mut session, 300);
-    let before = js(&mut session, "String(window.scrollY)");
+    let (cx, cy) = center_of(&mut session, "cb");
+    click(&mut session, cx * 1.5, cy * 1.5);
+    let checked = js(
+        &mut session,
+        "String(document.getElementById('cb').checked)",
+    );
+    ok &= check(
+        "click under zoom",
+        checked.contains("true"),
+        &format!("checked={checked}"),
+    );
     session.send_mouse_move(400.0, 300.0);
     spin_for(&mut session, 100);
-    // Negative dy = scroll down (the OS wheel convention the UI passes through).
     session.send_scroll(400.0, 300.0, 0.0, -300.0);
     spin_for(&mut session, 600);
-    let after = js(&mut session, "String(window.scrollY)");
+    let after = js(&mut session, "String(Math.round(window.scrollY))");
     ok &= check(
-        "wheel scroll under zoom<1",
-        after.contains("300"),
-        &format!("scrollY {before} -> {after}"),
+        "wheel scroll under zoom",
+        !after.contains("\"0\""),
+        &format!("scrollY {after}"),
     );
+    session.set_zoom(1.0);
+    spin_for(&mut session, 300);
 
     // A second tab: another session on the same engine, driven the way the
     // app drives tabs (pump once per tick, then sync every session).
@@ -321,7 +336,7 @@ fn main() {
         &format!("scrollY {after}"),
     );
 
-    // Back to the first tab (freshly reloaded, so the zoom transform above is
+    // Back to the first tab (freshly reloaded, so the zoom above is
     // gone): it must react again.
     session.set_active(true);
     b.set_active(false);

@@ -4565,3 +4565,27 @@ failures; machete; deny; all of the above seen in the rendered app.
 **Not verified:** macOS; real favicon downloads (the cache was seeded with
 generated icons, the network path is covered only by the link-parsing tests);
 Google sign-in (no internet); Cmd+Q still skips the clean shutdown.
+
+## 2026-09-30 — coordinator — native page zoom
+
+**Reported by the owner:** a Google Form showed "File unavailable", sign-in
+with Google showed the same, and clicking reload crashed the app (exit 139).
+His log had a dozen `[ferrite-js] execute: 148 chars` lines: the zoom script
+at 110% (width `90.9091%`), re-injected by JavaScript into the page on every
+load. His earlier screenshots show the same form failing in the 110% tab and
+loading fine in a tab at 100%.
+
+**Changed.** Zoom now uses Servo's own page zoom (`WebView::set_page_zoom`,
+`HeadlessServoSession::set_zoom`/`zoom`) — layout and hit-testing follow it
+and no script is injected into any page. The earlier note that Servo has no
+native zoom API at this version was wrong. `zoom_script` and its tests are
+gone; the load handler only sets the engine zoom when it differs. Probe
+`input_probe` checks devicePixelRatio, a click and a wheel scroll under zoom;
+in the real app 125% relays the page out, survives F5, and logs no
+`[ferrite-js]` lines.
+
+**Not established:** that this fixes Google Forms or the reload crash. It is
+the best-supported cause in his evidence (the only failing form was the zoomed
+one; every `execute_js` runs a nested event loop on the UI thread inside a
+heavy page), but nothing here reaches Google, so it is unproven (T-239).
+Verified: fmt, clippy (workspace and servo feature), 1000 tests, 0 failures.

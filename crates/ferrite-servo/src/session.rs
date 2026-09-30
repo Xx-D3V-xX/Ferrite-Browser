@@ -1079,6 +1079,19 @@ mod inner {
             self.webview.resize(PhysicalSize { width, height });
         }
 
+        /// Sets the page zoom (1.0 = 100%) natively, through the engine: layout
+        /// and pointer hit-testing follow it, and no script runs in the page.
+        /// (An earlier version injected a CSS transform with JavaScript, which
+        /// ran inside heavy pages on every load and could interfere with them.)
+        pub fn set_zoom(&self, level: f32) {
+            self.webview.set_page_zoom(level);
+        }
+
+        /// The page zoom currently in effect.
+        pub fn zoom(&self) -> f32 {
+            self.webview.page_zoom()
+        }
+
         /// Marks this tab as the one the user is looking at (`true`) or as a
         /// background tab (`false`). Servo routes keyboard input to the focused
         /// WebView and hit-tests pointer input only against shown WebViews, so a
@@ -1384,6 +1397,10 @@ impl HeadlessServoSession {
 
     pub fn send_key(&self, _event: &PageKeyEvent) {}
     pub fn set_active(&self, _active: bool) {}
+    pub fn set_zoom(&self, _level: f32) {}
+    pub fn zoom(&self) -> f32 {
+        1.0
+    }
     pub fn send_mouse_move(&self, _x: f32, _y: f32) {}
     pub fn send_right_click(&self, _x: f32, _y: f32) {}
     pub fn send_scroll(&self, _x: f32, _y: f32, _dx: f64, _dy: f64) {}
