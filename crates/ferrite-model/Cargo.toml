@@ -22,6 +22,10 @@ dirs = { workspace = true }
 
 [dev-dependencies]
 ferrite-core = { workspace = true, features = ["test-util"] }
+# `laya.rs`'s tests run a loopback-only HTTP responder on `tokio::net::TcpListener`
+# (nothing leaves the machine, R7). The workspace tokio omits "net" on purpose
+# (T-207); it is enabled here for tests only, so no shipped crate gains it.
+tokio = { workspace = true, features = ["net"] }
 
 [features]
 # Live-provider smoke tests (`just test-live`). Off by default so `just test`
