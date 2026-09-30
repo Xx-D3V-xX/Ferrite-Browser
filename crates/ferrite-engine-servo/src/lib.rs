@@ -65,15 +65,29 @@
 //! purpose. Documented plainly here, once, rather than scattered as
 //! per-method surprises:
 //!
-//! - **`dom_snapshot` / `query` / `read_text` / `click` / `type_text` /
-//!   `select_option`** are all implemented by injecting a small JavaScript
-//!   snippet via `execute_js` that itself calls `JSON.stringify(...)`, and
-//!   parsing the returned JSON. This depends on the page's JS engine being
+//! - **Every DOM operation** — `page_digest`, `query`, `read_text`, `click`,
+//!   `type_text`, `fill_form`, `select_option`, `set_checked`, `press_key`,
+//!   `hover`, `scroll_to`, `find_text`, `extract_links`, `submit_form` — is one
+//!   operation of a single page script (`src/page_ops.js`, assembled and
+//!   checked by the private `script` module) run via `execute_js`, which
+//!   returns JSON. Every selector-taking operation first rewrites an `@12` ref
+//!   with [`ferrite_engine::normalize_selector`]; a ref that no longer
+//!   resolves is [`EngineError::ElementNotFound`] telling the model to
+//!   `read_page` again. `page_digest` stamps `data-ferrite-ref` on the live
+//!   DOM so those refs resolve. This depends on the page's JS engine being
 //!   available and reflects only what page JS can see — it will not see
 //!   content a page's own script could not see either (e.g. cross-origin
-//!   iframe internals), and it fails if the page has disabled or not yet
-//!   initialized its JS context. There is no separate, JS-independent
-//!   accessibility-tree accessor exposed by `HeadlessServoSession` today.
+//!   iframe internals; open shadow roots *are* walked), and it fails if the
+//!   page has disabled or not yet initialized its JS context. There is no
+//!   separate, JS-independent accessibility-tree accessor exposed by
+//!   `HeadlessServoSession` today. **The page script cannot run under
+//!   `cargo test`**: `scripts/page-script-check` runs it against HTML under
+//!   jsdom, and the real Servo path is unverified in an environment that
+//!   cannot build Servo. Its input events are synthetic (untrusted), so CSS
+//!   `:hover` styling and pages that require trusted events do not respond.
+//! - **`dom_snapshot`** predates the digest and stays as it was: an
+//!   accessibility-tree-shaped snapshot with a selector only for elements that
+//!   have an `id`. The agent reads pages with `page_digest` instead.
 //! - **`execute_js`'s `Ok` branch is a `Debug` rendering** of whatever
 //!   value type Servo's `evaluate_javascript` callback produces, not the
 //!   raw JS value (see `HeadlessServoSession::execute_js`'s own doc
@@ -130,12 +144,17 @@ use std::time::{Duration, Instant};
 
 use ferrite_core::Origin;
 use ferrite_engine::{
-    BrowserEngine, Cookie, DomSnapshot, ElementHandle, EngineError, Frame, TabId, WaitCondition,
+    BrowserEngine, Cookie, DomSnapshot, ElementHandle, EngineError, Frame, LinkInfo, PageDigest,
+    TabId, TabInfo, TextMatches, WaitCondition,
 };
 use ferrite_servo::session::{HeadlessServoSession, LoadStatus};
 
+mod script;
+
 const NAV_TIMEOUT: Duration = Duration::from_secs(10);
 const POLL_INTERVAL: Duration = Duration::from_millis(16);
+/// How long an action that might start a navigation waits for it to begin.
+const SETTLE_WINDOW: Duration = Duration::from_millis(150);
 
 // ---------------------------------------------------------------------------
 // ops: the one implementation of every BrowserEngine method, over a borrowed
@@ -143,11 +162,15 @@ const POLL_INTERVAL: Duration = Duration::from_millis(16);
 // call into this — see the module docs above for why.
 // ---------------------------------------------------------------------------
 mod ops {
+    use super::script::{build_script, check};
     use super::{
         Cookie, ElementHandle, EngineError, HeadlessServoSession, Instant, LoadStatus, Origin,
-        WaitCondition, NAV_TIMEOUT, POLL_INTERVAL,
+        WaitCondition, NAV_TIMEOUT, POLL_INTERVAL, SETTLE_WINDOW,
     };
-    use ferrite_engine::DomSnapshot;
+    use ferrite_engine::{
+        normalize_selector, DomSnapshot, LinkInfo, PageDigest, TabId, TabInfo, TextMatches,
+    };
+    use serde_json::{json, Value};
 
     pub(crate) fn current_origin(session: &HeadlessServoSession) -> Result<Origin, EngineError> {
         let url = session.current_url().to_string();
@@ -174,6 +197,26 @@ mod ops {
         }
     }
 
+    /// After an action that may have *started* a navigation (a link click,
+    /// Enter in a form, a `change` handler that submits): give the engine a
+    /// brief window to begin loading and, if it does, wait for the load to
+    /// settle — so the observation that follows describes the new page, not
+    /// the one being torn down. A no-navigation action costs `SETTLE_WINDOW`.
+    pub(crate) fn settle(session: &mut HeadlessServoSession) {
+        let deadline = Instant::now() + SETTLE_WINDOW;
+        loop {
+            session.spin();
+            if matches!(session.load_status(), LoadStatus::Loading) {
+                let _ = drive_until_loaded(session);
+                return;
+            }
+            if Instant::now() >= deadline {
+                return;
+            }
+            std::thread::sleep(POLL_INTERVAL);
+        }
+    }
+
     /// Runs `script` (which must itself call `JSON.stringify(...)`) and
     /// returns the unwrapped, unescaped JSON text it produced.
     pub(crate) fn run_json_js(
@@ -182,6 +225,33 @@ mod ops {
     ) -> Result<String, EngineError> {
         let raw = session.execute_js(script).map_err(EngineError::Internal)?;
         super::unwrap_js_string_result(&raw)
+    }
+
+    /// Runs one operation of the page script (`page_ops.js`) and parses its
+    /// JSON answer. Failures the *script* reports (`{ok:false,...}`) are
+    /// left in the value for [`check`] to type; only transport/parse
+    /// failures are errors here.
+    fn run_op(
+        session: &mut HeadlessServoSession,
+        op: &str,
+        args: &Value,
+    ) -> Result<Value, EngineError> {
+        let json = run_json_js(session, &build_script(op, args))?;
+        serde_json::from_str(&json).map_err(|e| {
+            EngineError::Internal(format!("{op}: malformed JSON from page script: {e}"))
+        })
+    }
+
+    /// `run_op` + [`check`] against the selector as the model wrote it.
+    fn run_checked(
+        session: &mut HeadlessServoSession,
+        op: &str,
+        selector: &str,
+        args: &Value,
+    ) -> Result<Value, EngineError> {
+        let v = run_op(session, op, args)?;
+        check(op, selector, &v)?;
+        Ok(v)
     }
 
     pub(crate) fn navigate(
@@ -232,20 +302,30 @@ mod ops {
         Ok((snapshot, current_origin(session)?))
     }
 
+    /// The numbered, ref-addressable view of the page. Stamps
+    /// `data-ferrite-ref` on the live DOM as a side effect (see
+    /// `page_ops.js`), then re-bounds everything the script returned.
+    pub(crate) fn page_digest(
+        session: &mut HeadlessServoSession,
+    ) -> Result<(PageDigest, Origin), EngineError> {
+        let v = run_op(session, "digest", &json!({}))?;
+        check("read_page", "", &v)?;
+        let digest: PageDigest = serde_json::from_value(v).map_err(|e| {
+            EngineError::Internal(format!("read_page: malformed digest from page script: {e}"))
+        })?;
+        Ok((digest.sanitized(), current_origin(session)?))
+    }
+
     pub(crate) fn query(
         session: &mut HeadlessServoSession,
         selector: &str,
     ) -> Result<(Vec<ElementHandle>, Origin), EngineError> {
-        let script = format!(
-            "(function(sel){{ var out=[]; document.querySelectorAll(sel).forEach(function(el,i){{ \
-             out.push({{selector: sel+':nth-match('+i+')', role: el.getAttribute('role')||el.tagName.toLowerCase(), \
-             text: el.textContent?el.textContent.trim():null}}); }}); return JSON.stringify(out); }})({})",
-            super::js_string_literal(selector)
-        );
-        let json = run_json_js(session, &script)?;
-        let handles: Vec<ElementHandle> = serde_json::from_str(&json).map_err(|e| {
-            EngineError::Internal(format!("query: malformed JSON from page script: {e}"))
-        })?;
+        let args = json!({ "sel": normalize_selector(selector) });
+        let v = run_checked(session, "query", selector, &args)?;
+        let handles: Vec<ElementHandle> =
+            serde_json::from_value(v.get("items").cloned().unwrap_or(Value::Null)).map_err(
+                |e| EngineError::Internal(format!("query: malformed JSON from page script: {e}")),
+            )?;
         Ok((handles, current_origin(session)?))
     }
 
@@ -253,33 +333,43 @@ mod ops {
         session: &mut HeadlessServoSession,
         selector: &str,
     ) -> Result<(String, Origin), EngineError> {
-        let script = format!(
-            "(function(sel){{ var el=document.querySelector(sel); return JSON.stringify(el ? (el.textContent||'').trim() : null); }})({})",
-            super::js_string_literal(selector)
-        );
-        let json = run_json_js(session, &script)?;
-        let text: Option<String> = serde_json::from_str(&json).map_err(|e| {
-            EngineError::Internal(format!("read_text: malformed JSON from page script: {e}"))
-        })?;
-        match text {
-            Some(t) => Ok((t, current_origin(session)?)),
-            None => Err(EngineError::ElementNotFound(selector.to_string())),
-        }
+        let args = json!({ "sel": normalize_selector(selector) });
+        let v = run_checked(session, "read_text", selector, &args)?;
+        let text = v
+            .get("text")
+            .and_then(Value::as_str)
+            .unwrap_or_default()
+            .to_string();
+        Ok((text, current_origin(session)?))
     }
 
     pub(crate) fn click(
         session: &mut HeadlessServoSession,
         selector: &str,
     ) -> Result<((), Origin), EngineError> {
-        let script = format!(
-            "(function(sel){{ var el=document.querySelector(sel); if(!el) return JSON.stringify(false); el.click(); return JSON.stringify(true); }})({})",
-            super::js_string_literal(selector)
-        );
-        let json = run_json_js(session, &script)?;
-        let found: bool = serde_json::from_str(&json).unwrap_or(false);
-        if !found {
-            return Err(EngineError::ElementNotFound(selector.to_string()));
-        }
+        let args = json!({ "sel": normalize_selector(selector) });
+        run_checked(session, "click", selector, &args)?;
+        settle(session);
+        Ok(((), current_origin(session)?))
+    }
+
+    pub(crate) fn hover(
+        session: &mut HeadlessServoSession,
+        selector: &str,
+    ) -> Result<((), Origin), EngineError> {
+        let args = json!({ "sel": normalize_selector(selector) });
+        run_checked(session, "hover", selector, &args)?;
+        session.spin();
+        Ok(((), current_origin(session)?))
+    }
+
+    pub(crate) fn scroll_to(
+        session: &mut HeadlessServoSession,
+        selector: &str,
+    ) -> Result<((), Origin), EngineError> {
+        let args = json!({ "sel": normalize_selector(selector) });
+        run_checked(session, "scroll_to", selector, &args)?;
+        session.spin();
         Ok(((), current_origin(session)?))
     }
 
@@ -288,27 +378,34 @@ mod ops {
         selector: &str,
         text: &str,
     ) -> Result<((), Origin), EngineError> {
-        let script = format!(
-            "(function(sel,val){{ var el=document.querySelector(sel); if(!el) return JSON.stringify(false); \
-             el.value=val; el.dispatchEvent(new Event('input',{{bubbles:true}})); return JSON.stringify(true); }})({},{})",
-            super::js_string_literal(selector),
-            super::js_string_literal(text)
-        );
-        let json = run_json_js(session, &script)?;
-        let found: bool = serde_json::from_str(&json).unwrap_or(false);
-        if !found {
-            return Err(EngineError::ElementNotFound(selector.to_string()));
-        }
+        let args = json!({ "sel": normalize_selector(selector), "text": text });
+        run_checked(session, "type_text", selector, &args)?;
         Ok(((), current_origin(session)?))
     }
 
+    /// One script call for the whole form: each field is filled however its
+    /// control takes a value (text, `<select>`, checkbox/radio), stopping at
+    /// the first failure, which is reported against *that* field's selector.
     pub(crate) fn fill_form(
         session: &mut HeadlessServoSession,
         fields: &[(String, String)],
     ) -> Result<((), Origin), EngineError> {
-        for (selector, value) in fields {
-            type_text(session, selector, value)?;
+        if fields.is_empty() {
+            return Ok(((), current_origin(session)?));
         }
+        let normalized: Vec<[String; 2]> = fields
+            .iter()
+            .map(|(sel, value)| [normalize_selector(sel), value.clone()])
+            .collect();
+        let v = run_op(session, "fill_form", &json!({ "fields": normalized }))?;
+        let failed = v
+            .get("index")
+            .and_then(Value::as_u64)
+            .and_then(|i| usize::try_from(i).ok())
+            .and_then(|i| fields.get(i))
+            .map_or("", |(sel, _)| sel.as_str());
+        check("fill_form", failed, &v)?;
+        settle(session);
         Ok(((), current_origin(session)?))
     }
 
@@ -317,18 +414,95 @@ mod ops {
         selector: &str,
         value: &str,
     ) -> Result<((), Origin), EngineError> {
-        let script = format!(
-            "(function(sel,val){{ var el=document.querySelector(sel); if(!el) return JSON.stringify(false); \
-             el.value=val; el.dispatchEvent(new Event('change',{{bubbles:true}})); return JSON.stringify(true); }})({},{})",
-            super::js_string_literal(selector),
-            super::js_string_literal(value)
-        );
-        let json = run_json_js(session, &script)?;
-        let found: bool = serde_json::from_str(&json).unwrap_or(false);
-        if !found {
-            return Err(EngineError::ElementNotFound(selector.to_string()));
-        }
+        let args = json!({ "sel": normalize_selector(selector), "value": value });
+        run_checked(session, "select_option", selector, &args)?;
+        settle(session);
         Ok(((), current_origin(session)?))
+    }
+
+    pub(crate) fn set_checked(
+        session: &mut HeadlessServoSession,
+        selector: &str,
+        checked: bool,
+    ) -> Result<((), Origin), EngineError> {
+        let args = json!({ "sel": normalize_selector(selector), "checked": checked });
+        run_checked(session, "set_checked", selector, &args)?;
+        settle(session);
+        Ok(((), current_origin(session)?))
+    }
+
+    pub(crate) fn press_key(
+        session: &mut HeadlessServoSession,
+        selector: Option<&str>,
+        key: &str,
+    ) -> Result<((), Origin), EngineError> {
+        let args = json!({ "sel": selector.map(normalize_selector), "key": key });
+        run_checked(
+            session,
+            "press_key",
+            selector.unwrap_or("the focused element"),
+            &args,
+        )?;
+        settle(session);
+        Ok(((), current_origin(session)?))
+    }
+
+    pub(crate) fn submit_form(
+        session: &mut HeadlessServoSession,
+        selector: Option<&str>,
+    ) -> Result<((), Origin), EngineError> {
+        let args = json!({ "sel": selector.map(normalize_selector) });
+        run_checked(
+            session,
+            "submit_form",
+            selector.unwrap_or("the form"),
+            &args,
+        )?;
+        settle(session);
+        Ok(((), current_origin(session)?))
+    }
+
+    pub(crate) fn find_text(
+        session: &mut HeadlessServoSession,
+        text: &str,
+    ) -> Result<(TextMatches, Origin), EngineError> {
+        let v = run_checked(session, "find_text", "", &json!({ "text": text }))?;
+        let matches: TextMatches = serde_json::from_value(v).map_err(|e| {
+            EngineError::Internal(format!("find_text: malformed JSON from page script: {e}"))
+        })?;
+        Ok((matches, current_origin(session)?))
+    }
+
+    pub(crate) fn extract_links(
+        session: &mut HeadlessServoSession,
+        selector: Option<&str>,
+    ) -> Result<(Vec<LinkInfo>, Origin), EngineError> {
+        let args = json!({ "sel": selector.map(normalize_selector) });
+        let v = run_checked(
+            session,
+            "extract_links",
+            selector.unwrap_or("the page"),
+            &args,
+        )?;
+        let links: Vec<LinkInfo> = serde_json::from_value(
+            v.get("links").cloned().unwrap_or(Value::Null),
+        )
+        .map_err(|e| {
+            EngineError::Internal(format!(
+                "extract_links: malformed JSON from page script: {e}"
+            ))
+        })?;
+        Ok((links, current_origin(session)?))
+    }
+
+    /// The one tab of a session, as [`TabInfo`].
+    pub(crate) fn tab_info(id: TabId, session: &HeadlessServoSession, active: bool) -> TabInfo {
+        TabInfo {
+            id,
+            url: session.current_url().to_string(),
+            title: session.page_title().unwrap_or_default().to_string(),
+            active,
+        }
     }
 
     pub(crate) fn scroll(
@@ -659,6 +833,55 @@ impl BrowserEngine for ServoEngine {
     fn js_execute(&mut self, script: &str) -> Result<(String, Origin), EngineError> {
         ops::js_execute(&mut self.active_tab_mut()?.session, script)
     }
+
+    fn page_digest(&mut self) -> Result<(PageDigest, Origin), EngineError> {
+        ops::page_digest(&mut self.active_tab_mut()?.session)
+    }
+
+    fn press_key(
+        &mut self,
+        selector: Option<&str>,
+        key: &str,
+    ) -> Result<((), Origin), EngineError> {
+        ops::press_key(&mut self.active_tab_mut()?.session, selector, key)
+    }
+
+    fn hover(&mut self, selector: &str) -> Result<((), Origin), EngineError> {
+        ops::hover(&mut self.active_tab_mut()?.session, selector)
+    }
+
+    fn set_checked(&mut self, selector: &str, checked: bool) -> Result<((), Origin), EngineError> {
+        ops::set_checked(&mut self.active_tab_mut()?.session, selector, checked)
+    }
+
+    fn scroll_to(&mut self, selector: &str) -> Result<((), Origin), EngineError> {
+        ops::scroll_to(&mut self.active_tab_mut()?.session, selector)
+    }
+
+    fn find_text(&mut self, text: &str) -> Result<(TextMatches, Origin), EngineError> {
+        ops::find_text(&mut self.active_tab_mut()?.session, text)
+    }
+
+    fn extract_links(
+        &mut self,
+        selector: Option<&str>,
+    ) -> Result<(Vec<LinkInfo>, Origin), EngineError> {
+        ops::extract_links(&mut self.active_tab_mut()?.session, selector)
+    }
+
+    fn submit_form(&mut self, selector: Option<&str>) -> Result<((), Origin), EngineError> {
+        ops::submit_form(&mut self.active_tab_mut()?.session, selector)
+    }
+
+    fn list_tabs(&mut self) -> Result<(Vec<TabInfo>, Origin), EngineError> {
+        let active = self.active;
+        let tabs = self
+            .tabs
+            .iter()
+            .map(|(id, tab)| ops::tab_info(*id, &tab.session, *id == active))
+            .collect();
+        Ok((tabs, ops::current_origin(&self.active_tab()?.session)?))
+    }
 }
 
 /// A [`BrowserEngine`] face over a single, **externally-owned**
@@ -814,6 +1037,53 @@ impl<'a> BrowserEngine for BorrowedServoEngine<'a> {
     fn js_execute(&mut self, script: &str) -> Result<(String, Origin), EngineError> {
         ops::js_execute(self.session, script)
     }
+
+    fn page_digest(&mut self) -> Result<(PageDigest, Origin), EngineError> {
+        ops::page_digest(self.session)
+    }
+
+    fn press_key(
+        &mut self,
+        selector: Option<&str>,
+        key: &str,
+    ) -> Result<((), Origin), EngineError> {
+        ops::press_key(self.session, selector, key)
+    }
+
+    fn hover(&mut self, selector: &str) -> Result<((), Origin), EngineError> {
+        ops::hover(self.session, selector)
+    }
+
+    fn set_checked(&mut self, selector: &str, checked: bool) -> Result<((), Origin), EngineError> {
+        ops::set_checked(self.session, selector, checked)
+    }
+
+    fn scroll_to(&mut self, selector: &str) -> Result<((), Origin), EngineError> {
+        ops::scroll_to(self.session, selector)
+    }
+
+    fn find_text(&mut self, text: &str) -> Result<(TextMatches, Origin), EngineError> {
+        ops::find_text(self.session, text)
+    }
+
+    fn extract_links(
+        &mut self,
+        selector: Option<&str>,
+    ) -> Result<(Vec<LinkInfo>, Origin), EngineError> {
+        ops::extract_links(self.session, selector)
+    }
+
+    fn submit_form(&mut self, selector: Option<&str>) -> Result<((), Origin), EngineError> {
+        ops::submit_form(self.session, selector)
+    }
+
+    /// The single tab this engine wraps. The host application owns the real
+    /// tab list (and intercepts the tab actions); this reports only the page
+    /// the borrowed session is showing, as tab `0`.
+    fn list_tabs(&mut self) -> Result<(Vec<TabInfo>, Origin), EngineError> {
+        let origin = ops::current_origin(self.session)?;
+        Ok((vec![ops::tab_info(TabId(0), self.session, true)], origin))
+    }
 }
 
 /// Best-effort unwrap of [`HeadlessServoSession::execute_js`]'s
@@ -829,10 +1099,6 @@ fn unwrap_js_string_result(raw: &str) -> Result<String, EngineError> {
     serde_json::from_str::<String>(quoted).map_err(|e| {
         EngineError::Internal(format!("could not unwrap execute_js result {raw:?}: {e}"))
     })
-}
-
-fn js_string_literal(value: &str) -> String {
-    serde_json::to_string(value).unwrap_or_else(|_| "\"\"".to_string())
 }
 
 const SNAPSHOT_SCRIPT: &str = r#"(function(){
@@ -893,8 +1159,11 @@ mod tests {
     }
 
     #[test]
-    fn js_string_literal_escapes_quotes_and_backslashes() {
-        assert_eq!(js_string_literal("a\"b\\c"), "\"a\\\"b\\\\c\"");
+    fn json_literal_escapes_quotes_and_backslashes() {
+        assert_eq!(
+            script::json_literal(&serde_json::Value::String("a\"b\\c".into())),
+            "\"a\\\"b\\\\c\""
+        );
     }
 
     // ── Engine construction without the `servo` feature ──

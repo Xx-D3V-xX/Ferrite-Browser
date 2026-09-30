@@ -129,3 +129,104 @@ cargo install cargo-machete --locked
 ```
 
 `just install-hooks` wires the commit-msg/pre-commit git hooks after that.
+
+## Running locally
+
+macOS first; Linux is best-effort. Every step is idempotent, so run the same
+commands again whenever you like. Everything lives inside this checkout: build
+output in `target/` and all local state (Laya venv and checkpoint, `env.local`,
+logs) in the gitignored `.ferrite/` (override with `$CARGO_TARGET_DIR` /
+`$FERRITE_HOME`); `rm -rf .ferrite` removes all local state.
+
+The whole project (real Servo + Laya) in one go, then every day:
+
+```
+just setup-all        # real Servo build + Laya venv/checkpoint, all inside this folder
+$EDITOR .ferrite/env.local     # set FERRITE_MODEL_SMALL and FERRITE_MODEL_MAIN
+export OLLAMA_API_KEY=...      # or store it in the keychain, see below
+just run-all          # local Laya server + the real-Servo browser
+```
+
+Step by step (`just setup` is the quick Servo-free variant):
+
+```
+just setup            # or: ./scripts/setup-local.sh   (add --dry-run --yes to see the plan)
+$EDITOR .ferrite/env.local     # set FERRITE_MODEL_SMALL and FERRITE_MODEL_MAIN
+security add-generic-password -U -s ferrite -a OLLAMA_API_KEY -w     # prompts; or: export OLLAMA_API_KEY=...
+just run-local        # or: ./scripts/run-local.sh
+```
+
+`just setup` checks git, Xcode command line tools, Homebrew and the brew
+packages CI installs (`cmake pkg-config openssl sqlite`), and rustup. It offers
+to install what is missing but only after you say yes (or pass `--yes`), and it
+never uses `sudo`. It then builds `ferrite-shell` and sets up Laya (below). API
+keys are never written by these scripts: they come from your environment or the
+OS keychain, as `crates/ferrite-model/src/secret.rs` requires. No model name is
+a default, so `FERRITE_MODEL_SMALL` and `FERRITE_MODEL_MAIN` must be set in
+`env.local` (`just models-local` lists the tags your endpoint serves). A key
+stored with `security` may make macOS ask once whether `ferrite-shell` may read
+it; a rebuilt binary can trigger that prompt again.
+
+**Servo or not.** The default build is Servo-free: quick (about two minutes
+cold, per `docs/BUILD_BUDGET.md`), but it has **no real web rendering**. For
+real pages run `just setup-servo` (`cargo build -p ferrite-shell
+--features ferrite-servo/servo`; audio and video playback are not built in, so no
+extra brew package is needed): plan on 20 to
+60 minutes and 10+ GB of disk the first time. `just run-local` uses whichever
+build setup made last; force one with `--servo` / `--no-servo`.
+
+**Laya (optional).** [Laya](https://github.com/NandhaKishorM/laya) is a small
+local decision model. Given the page state and the candidate elements it scores
+"which operation, which element" for the next browser step (its model card
+reports tens of milliseconds on a GPU; `just laya-verify` measures yours).
+Ferrite talks to it over HTTP only when `FERRITE_LAYA_URL` is
+set; with it unset the app runs exactly as before, LLM only. `just setup`
+creates a Python venv under `$FERRITE_HOME/laya`, installs `laya[serve]`, and
+downloads the `cklxx/laya-browser` checkpoint from Hugging Face (`v10s`, the
+faster 322M one, by default; `--laya-checkpoint v10` for the 421M one; skip all
+of it with `--no-laya`). `just run-local` then starts a local server on
+`127.0.0.1:8765` for the session, waits for `/health`, sets `FERRITE_LAYA_URL`,
+and stops the server when the app exits. Apple silicon uses the Metal (`mps`)
+backend automatically. Two honest notes: the browser checkpoint is mounted in
+Laya's `typed-decisions` router slot because Laya has no other slot for a local
+model (`scripts/laya/serve.py` explains), and the server serves the
+checkpoint's training `head_max_len` (768) as the default, as its model card
+requires.
+
+| Command | What it does |
+|---|---|
+| `just doctor` | checklist: tools, build, env file, model tags, keys (never printed), Laya venv/checkpoint/server with a latency probe, disk. `--fix-hints` says how to fix each item |
+| `just laya-serve` | only the Laya server, in the foreground |
+| `just laya-verify` | sends one recorded browser step to the running server, prints its decision and latency |
+| `just probe-input` / `just probe-engine` / `just probe-profile` | drive a real headless Servo session against a built-in page and report what works: scrolling, clicks, typing, reload, two tabs; the page digest and `@ref` actions; cookies and storage surviving a restart (real Servo build only; on Linux run under `xvfb-run`) |
+| `just crash-report` | after a crash (exit 139): prints the exception and the crashing thread's stack from the newest macOS crash report, for bug reports |
+| `just test-local` | tests for these scripts (no network; the Python ones skip unless `fastapi`, `uvicorn` and `laya` import) |
+
+Settings live in `$FERRITE_HOME/env.local` (plain `KEY=VALUE`, read as data,
+never sourced; only `FERRITE_*`, `OLLAMA_*`, `GEMINI_*` and `RUST_LOG` are
+honoured; anything already exported in your shell wins). `scripts/local.env.example`
+documents every knob, including `FERRITE_LAYA_URL` (use a Laya server you run
+yourself), `FERRITE_LAYA_HOST`/`PORT`, `FERRITE_LAYA_CHECKPOINT`,
+`FERRITE_LAYA_DEVICE` and `FERRITE_LAYA_API_KEY`. The Laya server binds
+loopback only and refuses any other address unless an API key is set.
+
+## Watching what the agent, the LLM and Laya do
+
+Open **Audit** (toolbar, or `F12`). The **Model calls** view is a timeline of
+every call: what the agent ran, every LLM request with its full prompt and
+answer, every Laya request, and whether Laya's answer was used or sent back to
+the LLM, each with how long it took. Click a row to see what was sent and what
+came back. A one-line summary at the top answers "is Laya making it faster?"
+from the timings it has seen. The same events are appended to
+`$FERRITE_HOME/logs/model-activity.jsonl` (prompts and page text included, so
+treat it like the pages themselves; it never leaves your machine). The
+**Security log** view is the hash-chained record of network requests.
+
+## Logins and cookies
+
+The browser profile (cookies, HSTS, saved HTTP credentials, web storage) lives
+in `$FERRITE_HOME/profile` and survives restarts. It is written when the window
+is closed normally; a crash, `kill` or macOS Cmd+Q loses that run's new
+cookies. Whether a particular site lets you sign in is a separate question:
+Google in particular may refuse an embedded engine. `FERRITE_USER_AGENT`
+overrides the user-agent string.

@@ -306,6 +306,18 @@ impl AuditLog {
     }
 }
 
+/// SQLite stores integers as signed 64-bit; rusqlite 0.38 no longer converts
+/// `u64` implicitly. A sequence number never comes near `i64::MAX`, so saturating
+/// on write and rejecting a negative value on read are both only ever
+/// defensive.
+fn sequence_to_sql(sequence: u64) -> i64 {
+    i64::try_from(sequence).unwrap_or(i64::MAX)
+}
+
+fn sequence_from_sql(value: i64, column: usize) -> rusqlite::Result<u64> {
+    u64::try_from(value).map_err(|_| rusqlite::Error::IntegralValueOutOfRange(column, value))
+}
+
 pub struct PersistentAuditLog {
     pub log: AuditLog,
     pub conn: Connection,
@@ -379,7 +391,7 @@ impl PersistentAuditLog {
             params![
                 entry.entry_id.to_string(),
                 entry.schema_version,
-                entry.sequence,
+                sequence_to_sql(entry.sequence),
                 entry.timestamp.to_rfc3339(),
                 kind_str,
                 entry.principal_id.to_string(),
@@ -397,7 +409,7 @@ impl PersistentAuditLog {
         tx.execute(
             "INSERT INTO audit_chain_head (id, next_sequence, last_entry_hash) VALUES (0, ?1, ?2)
              ON CONFLICT(id) DO UPDATE SET next_sequence = excluded.next_sequence, last_entry_hash = excluded.last_entry_hash",
-            params![entry.sequence + 1, entry.entry_hash],
+            params![sequence_to_sql(entry.sequence + 1), entry.entry_hash],
         ).map_err(|e| AuditError::Sql(e.to_string()))?;
 
         tx.commit().map_err(|e| AuditError::Sql(e.to_string()))?;
@@ -415,7 +427,7 @@ impl PersistentAuditLog {
                 .query_map([], |row| {
                     let entry_id_str: String = row.get(0)?;
                     let schema_version: u8 = row.get(1)?;
-                    let sequence: u64 = row.get(2)?;
+                    let sequence = sequence_from_sql(row.get(2)?, 2)?;
                     let timestamp_str: String = row.get(3)?;
                     let kind_str: String = row.get(4)?;
                     let principal_id_str: String = row.get(5)?;
@@ -498,7 +510,7 @@ impl PersistentAuditLog {
             .query_row(
                 "SELECT next_sequence, last_entry_hash FROM audit_chain_head WHERE id = 0",
                 [],
-                |row| Ok((row.get(0)?, row.get(1)?)),
+                |row| Ok((sequence_from_sql(row.get(0)?, 0)?, row.get(1)?)),
             )
             .optional()
             .map_err(|e| AuditError::Sql(e.to_string()))?;

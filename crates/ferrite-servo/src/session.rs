@@ -47,8 +47,150 @@ pub enum LoadStatus {
     Failed(String),
 }
 
+/// A named (non-character) key a page can receive. A deliberately small set:
+/// everything a text field, form or page shortcut actually needs.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PageNamedKey {
+    /// Enter / Return.
+    Enter,
+    /// Backspace.
+    Backspace,
+    /// Forward delete.
+    Delete,
+    /// Tab.
+    Tab,
+    /// Escape.
+    Escape,
+    /// Arrow up.
+    ArrowUp,
+    /// Arrow down.
+    ArrowDown,
+    /// Arrow left.
+    ArrowLeft,
+    /// Arrow right.
+    ArrowRight,
+    /// Home.
+    Home,
+    /// End.
+    End,
+    /// Page up.
+    PageUp,
+    /// Page down.
+    PageDown,
+    /// Insert.
+    Insert,
+    /// Function key `F1`..=`F12`.
+    F(u8),
+}
+
+/// The key of a [`PageKeyEvent`]: the text it types, or a named key.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum PageKey {
+    /// The character(s) the key produces with modifiers applied (`"a"`,
+    /// `"A"`, `"@"`, `" "`).
+    Character(String),
+    /// A non-character key.
+    Named(PageNamedKey),
+}
+
+/// A clipboard editing action Servo handles itself (it owns the clipboard).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PageEdit {
+    /// Copy the page's selection.
+    Copy,
+    /// Cut the focused field's selection.
+    Cut,
+    /// Paste into the focused field.
+    Paste,
+}
+
+/// One key press or release destined for the focused element of the page.
+///
+/// Plain data, independent of both `iced` and `libservo`, so the UI can build
+/// it and test the conversion without a Servo build; only the real session
+/// turns it into a Servo `InputEvent`. Before this existed, nothing
+/// forwarded keyboard input to pages at all — mouse events were forwarded, so
+/// a text box could be clicked into but never typed in.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PageKeyEvent {
+    /// `true` for key-down, `false` for key-up.
+    pub down: bool,
+    /// The key.
+    pub key: PageKey,
+    /// Shift is held.
+    pub shift: bool,
+    /// Control is held.
+    pub ctrl: bool,
+    /// Alt/Option is held.
+    pub alt: bool,
+    /// Command (macOS) / Windows key is held.
+    pub meta: bool,
+}
+
+impl PageKeyEvent {
+    /// Whether the platform's copy/paste modifier (Cmd on macOS, Ctrl
+    /// elsewhere) is held without Alt.
+    fn command_held(&self) -> bool {
+        #[cfg(target_os = "macos")]
+        let held = self.meta;
+        #[cfg(not(target_os = "macos"))]
+        let held = self.ctrl;
+        held && !self.alt
+    }
+
+    /// The clipboard action this key combination means (`Cmd/Ctrl + C/X/V`),
+    /// regardless of press/release. Servo performs these itself via
+    /// `EditingActionEvent`; the raw key events for them are not forwarded.
+    #[must_use]
+    pub fn edit_combo(&self) -> Option<PageEdit> {
+        if !self.command_held() {
+            return None;
+        }
+        match &self.key {
+            PageKey::Character(c) if c.eq_ignore_ascii_case("c") => Some(PageEdit::Copy),
+            PageKey::Character(c) if c.eq_ignore_ascii_case("x") => Some(PageEdit::Cut),
+            PageKey::Character(c) if c.eq_ignore_ascii_case("v") => Some(PageEdit::Paste),
+            _ => None,
+        }
+    }
+}
+
+/// Where Ferrite keeps its data: `$FERRITE_HOME`, else `~/.local/share/ferrite`
+/// (`None` when neither can be resolved).
+fn data_dir() -> Option<std::path::PathBuf> {
+    match std::env::var_os("FERRITE_HOME").filter(|h| !h.is_empty()) {
+        Some(home) => Some(std::path::PathBuf::from(home)),
+        None => std::env::var_os("HOME")
+            .filter(|h| !h.is_empty())
+            .map(|home| {
+                std::path::PathBuf::from(home)
+                    .join(".local")
+                    .join("share")
+                    .join("ferrite")
+            }),
+    }
+}
+
+/// The browser profile directory: cookies, HSTS and cached HTTP credentials
+/// (written by Servo when it shuts down cleanly) and web storage live here, so
+/// a login survives a restart. `None` runs with an in-memory profile.
+#[must_use]
+pub fn profile_dir() -> Option<std::path::PathBuf> {
+    data_dir().map(|dir| dir.join("profile"))
+}
+
+/// The hash-chained network audit log every tab writes to (`$FERRITE_HOME/
+/// audit/network.db`; the temp directory when no data directory resolves).
+#[must_use]
+pub fn audit_db_path() -> std::path::PathBuf {
+    data_dir()
+        .unwrap_or_else(std::env::temp_dir)
+        .join("audit")
+        .join("network.db")
+}
+
 #[cfg(feature = "servo")]
-pub use inner::HeadlessServoSession;
+pub use inner::{shutdown_engine, take_popup_sessions, HeadlessServoSession};
 
 #[cfg(feature = "servo")]
 mod inner {
@@ -57,18 +199,157 @@ mod inner {
 
     use rustls::crypto::aws_lc_rs;
     use servo::{
-        DevicePoint, DeviceVector2D, InputEvent, MouseButton, MouseButtonAction, MouseButtonEvent,
-        MouseMoveEvent, RenderingContext, Scroll, Servo, ServoBuilder, ServoDelegate,
-        SoftwareRenderingContext, WebViewBuilder, WebViewDelegate, WebViewPoint, WheelDelta,
-        WheelEvent, WheelMode,
+        Code, DevicePoint, EditingActionEvent, InputEvent, Key, KeyState, KeyboardEvent, Location,
+        Modifiers, MouseButton, MouseButtonAction, MouseButtonEvent, MouseMoveEvent, NamedKey,
+        RenderingContext, Servo, ServoBuilder, ServoDelegate, SoftwareRenderingContext,
+        WebViewBuilder, WebViewDelegate, WebViewPoint, WheelDelta, WheelEvent, WheelMode,
     };
     use winit::dpi::PhysicalSize;
+
+    /// The `Code` (physical key) that best matches a typed character. Pages
+    /// mostly read `key`; `code` matters for shortcuts and games, so an
+    /// unmapped character honestly reports `Unidentified` rather than a wrong
+    /// physical key.
+    fn code_for_char(c: char) -> Code {
+        match c.to_ascii_lowercase() {
+            'a' => Code::KeyA,
+            'b' => Code::KeyB,
+            'c' => Code::KeyC,
+            'd' => Code::KeyD,
+            'e' => Code::KeyE,
+            'f' => Code::KeyF,
+            'g' => Code::KeyG,
+            'h' => Code::KeyH,
+            'i' => Code::KeyI,
+            'j' => Code::KeyJ,
+            'k' => Code::KeyK,
+            'l' => Code::KeyL,
+            'm' => Code::KeyM,
+            'n' => Code::KeyN,
+            'o' => Code::KeyO,
+            'p' => Code::KeyP,
+            'q' => Code::KeyQ,
+            'r' => Code::KeyR,
+            's' => Code::KeyS,
+            't' => Code::KeyT,
+            'u' => Code::KeyU,
+            'v' => Code::KeyV,
+            'w' => Code::KeyW,
+            'x' => Code::KeyX,
+            'y' => Code::KeyY,
+            'z' => Code::KeyZ,
+            '0' => Code::Digit0,
+            '1' => Code::Digit1,
+            '2' => Code::Digit2,
+            '3' => Code::Digit3,
+            '4' => Code::Digit4,
+            '5' => Code::Digit5,
+            '6' => Code::Digit6,
+            '7' => Code::Digit7,
+            '8' => Code::Digit8,
+            '9' => Code::Digit9,
+            ' ' => Code::Space,
+            '-' => Code::Minus,
+            '=' => Code::Equal,
+            '[' => Code::BracketLeft,
+            ']' => Code::BracketRight,
+            '\\' => Code::Backslash,
+            ';' => Code::Semicolon,
+            '\'' => Code::Quote,
+            '`' => Code::Backquote,
+            ',' => Code::Comma,
+            '.' => Code::Period,
+            '/' => Code::Slash,
+            _ => Code::Unidentified,
+        }
+    }
+
+    fn named_key(key: PageNamedKey) -> (NamedKey, Code) {
+        match key {
+            PageNamedKey::Enter => (NamedKey::Enter, Code::Enter),
+            PageNamedKey::Backspace => (NamedKey::Backspace, Code::Backspace),
+            PageNamedKey::Delete => (NamedKey::Delete, Code::Delete),
+            PageNamedKey::Tab => (NamedKey::Tab, Code::Tab),
+            PageNamedKey::Escape => (NamedKey::Escape, Code::Escape),
+            PageNamedKey::ArrowUp => (NamedKey::ArrowUp, Code::ArrowUp),
+            PageNamedKey::ArrowDown => (NamedKey::ArrowDown, Code::ArrowDown),
+            PageNamedKey::ArrowLeft => (NamedKey::ArrowLeft, Code::ArrowLeft),
+            PageNamedKey::ArrowRight => (NamedKey::ArrowRight, Code::ArrowRight),
+            PageNamedKey::Home => (NamedKey::Home, Code::Home),
+            PageNamedKey::End => (NamedKey::End, Code::End),
+            PageNamedKey::PageUp => (NamedKey::PageUp, Code::PageUp),
+            PageNamedKey::PageDown => (NamedKey::PageDown, Code::PageDown),
+            PageNamedKey::Insert => (NamedKey::Insert, Code::Insert),
+            PageNamedKey::F(n) => match n {
+                1 => (NamedKey::F1, Code::F1),
+                2 => (NamedKey::F2, Code::F2),
+                3 => (NamedKey::F3, Code::F3),
+                4 => (NamedKey::F4, Code::F4),
+                5 => (NamedKey::F5, Code::F5),
+                6 => (NamedKey::F6, Code::F6),
+                7 => (NamedKey::F7, Code::F7),
+                8 => (NamedKey::F8, Code::F8),
+                9 => (NamedKey::F9, Code::F9),
+                10 => (NamedKey::F10, Code::F10),
+                11 => (NamedKey::F11, Code::F11),
+                12 => (NamedKey::F12, Code::F12),
+                _ => (NamedKey::Unidentified, Code::Unidentified),
+            },
+        }
+    }
 
     // Servo's `opts` module uses a global singleton that panics if initialised
     // more than once per process.  We therefore create the `Servo` engine once
     // and share it (via `Clone`, which is a cheap `Rc` bump) across all tabs.
     thread_local! {
         static SERVO_ENGINE: RefCell<Option<Servo>> = const { RefCell::new(None) };
+    }
+
+    thread_local! {
+        /// Tabs that pages opened (`window.open`, `target="_blank"`), waiting
+        /// for the UI to adopt them.
+        static POPUP_SESSIONS: RefCell<Vec<HeadlessServoSession>> = const { RefCell::new(Vec::new()) };
+    }
+
+    /// Takes the tabs pages have opened since the last call, oldest first.
+    pub fn take_popup_sessions() -> Vec<HeadlessServoSession> {
+        POPUP_SESSIONS.with(|q| std::mem::take(&mut *q.borrow_mut()))
+    }
+
+    thread_local! {
+        static AUDIT_LOG: RefCell<Option<Rc<RefCell<PersistentAuditLog>>>> =
+            const { RefCell::new(None) };
+    }
+
+    /// The one audit log every tab appends to. Tabs used to open (and delete)
+    /// their own file each, so each tab's chain overwrote the last and nothing
+    /// could read them back; one chain per process, at [`super::audit_db_path`],
+    /// starts fresh on each launch.
+    fn shared_audit_log() -> Result<Rc<RefCell<PersistentAuditLog>>, String> {
+        AUDIT_LOG.with(|cell| {
+            let mut slot = cell.borrow_mut();
+            if let Some(log) = slot.as_ref() {
+                return Ok(log.clone());
+            }
+            let path = super::audit_db_path();
+            if let Some(parent) = path.parent() {
+                let _ = std::fs::create_dir_all(parent);
+            }
+            let _ = std::fs::remove_file(&path);
+            let log =
+                PersistentAuditLog::new(&path.to_string_lossy()).map_err(|e| e.to_string())?;
+            let log = Rc::new(RefCell::new(log));
+            *slot = Some(log.clone());
+            Ok(log)
+        })
+    }
+
+    /// Shuts the process-wide engine down cleanly, which is what makes Servo
+    /// write the profile (cookies, HSTS, credentials) to disk. Every
+    /// [`HeadlessServoSession`] must have been dropped first: each holds a
+    /// handle to the engine, and shutdown happens when the last one goes.
+    pub fn shutdown_engine() {
+        SERVO_ENGINE.with(|cell| drop(cell.borrow_mut().take()));
     }
 
     /// Return (or lazily create) the process-wide `Servo` engine.
@@ -79,7 +360,38 @@ mod inner {
         SERVO_ENGINE.with(|cell| {
             let mut guard = cell.borrow_mut();
             if guard.is_none() {
-                *guard = Some(ServoBuilder::default().build());
+                let mut opts = servo::Opts::default();
+                if let Some(dir) = super::profile_dir() {
+                    match std::fs::create_dir_all(&dir) {
+                        Ok(()) => opts.config_dir = Some(dir),
+                        Err(e) => eprintln!(
+                            "[ferrite-session] cannot create the profile directory {dir:?}: {e}; \
+                             logins will not survive a restart"
+                        ),
+                    }
+                }
+                // Sites that keep a login in IndexedDB or the async cookie API
+                // (Google's sign-in among them) need both.
+                let mut prefs = servo::Preferences {
+                    dom_indexeddb_enabled: true,
+                    dom_cookiestore_enabled: true,
+                    ..servo::Preferences::default()
+                };
+                // Some sites (Google's sign-in among them) decide whether a
+                // browser is acceptable from its user-agent string. Servo's own
+                // default names Servo; set FERRITE_USER_AGENT to present another.
+                if let Some(ua) = std::env::var("FERRITE_USER_AGENT")
+                    .ok()
+                    .filter(|ua| !ua.trim().is_empty())
+                {
+                    prefs.user_agent = ua;
+                }
+                *guard = Some(
+                    ServoBuilder::default()
+                        .opts(opts)
+                        .preferences(prefs)
+                        .build(),
+                );
             }
             guard.as_ref().unwrap().clone()
         })
@@ -87,7 +399,7 @@ mod inner {
 
     use ferrite_audit_log::{AuditEventKind, PersistentAuditLog};
 
-    use super::LoadStatus;
+    use super::{LoadStatus, PageEdit, PageKey, PageKeyEvent, PageNamedKey};
 
     /// Converts a Servo-decoded favicon [`servo::Image`] to raw, straight
     /// (non-premultiplied) RGBA8 bytes — the format
@@ -100,6 +412,7 @@ mod inner {
     /// grayscale frame, a plain PNG, ...), not just RGBA8 — this is the one
     /// place in `ferrite-servo` that has to handle the full set rather than
     /// assuming a single decoder output format.
+    #[allow(clippy::chunks_exact_to_as_chunks)] // chunks_exact reads clearer here and works on older toolchains
     fn favicon_to_rgba8(
         width: u32,
         height: u32,
@@ -139,6 +452,9 @@ mod inner {
     // Servo delegate (global browser-level callbacks — all no-ops)
     // -------------------------------------------------------------------------
 
+    /// Latest favicon (width, height, RGBA8) shared between Servo's delegate and the session.
+    type SharedFavicon = Rc<std::cell::RefCell<Option<(u32, u32, Vec<u8>)>>>;
+
     struct HeadlessServoDelegate;
     impl ServoDelegate for HeadlessServoDelegate {}
 
@@ -173,7 +489,7 @@ mod inner {
         /// `sync_and_read()`. `(width, height, rgba_bytes)`, already
         /// converted from whatever `servo::PixelFormat` the page's icon
         /// decoded to.
-        favicon: Rc<std::cell::RefCell<Option<(u32, u32, Vec<u8>)>>>,
+        favicon: SharedFavicon,
     }
 
     impl WebViewDelegate for HeadlessDelegate {
@@ -242,6 +558,30 @@ mod inner {
             }
         }
 
+        /// A page asked for a new WebView (`window.open`, `target="_blank"`,
+        /// a sign-in popup). Build it as a tab of its own and queue it for the
+        /// UI to adopt (`take_popup_sessions`); ignoring the request would
+        /// silently break every such link and most "Sign in with ..." flows.
+        fn request_create_new(
+            &self,
+            _parent: servo::WebView,
+            request: servo::CreateNewWebViewRequest,
+        ) {
+            match HeadlessServoSession::assemble(
+                1280,
+                700,
+                |_servo, rendering_context, delegate| {
+                    request
+                        .builder(rendering_context)
+                        .delegate(delegate)
+                        .build()
+                },
+            ) {
+                Ok(session) => POPUP_SESSIONS.with(|q| q.borrow_mut().push(session)),
+                Err(e) => eprintln!("[ferrite-session] cannot open a page-requested tab: {e}"),
+            }
+        }
+
         fn load_web_resource(&self, _webview: servo::WebView, load: servo::WebResourceLoad) {
             let url = load.request().url.to_string();
             if let Err(e) = self.audit_log.borrow_mut().append(
@@ -298,7 +638,7 @@ mod inner {
         /// JS console errors shared with `HeadlessDelegate` — accumulated until drained.
         shared_console_errors: Rc<std::cell::RefCell<Vec<String>>>,
         /// Shared favicon cell — written by `HeadlessDelegate`, read in `sync_and_read()`.
-        shared_favicon: Rc<std::cell::RefCell<Option<(u32, u32, Vec<u8>)>>>,
+        shared_favicon: SharedFavicon,
         /// Most recently synced favicon (updated in `sync_and_read()`).
         last_favicon: Option<(u32, u32, Vec<u8>)>,
     }
@@ -333,18 +673,45 @@ mod inner {
         }
 
         fn new_inner(width: u32, height: u32) -> Result<Self, String> {
+            let session = Self::assemble(width, height, |servo, rendering_context, delegate| {
+                WebViewBuilder::new(servo, rendering_context)
+                    .delegate(delegate)
+                    .url(url::Url::parse("about:blank").unwrap())
+                    .build()
+            })?;
+            // Let the tab's initial about:blank finish loading before handing
+            // the session out: a `navigate` issued while it is still in flight
+            // is lost to it (the tab stays blank), which is what a tab opened
+            // and immediately pointed somewhere — by the agent's `open_tab`,
+            // say — would hit.
+            let settle_deadline =
+                std::time::Instant::now() + std::time::Duration::from_millis(1500);
+            while *session.shared_load_status.borrow() != LoadStatus::Complete
+                && std::time::Instant::now() < settle_deadline
+            {
+                session.servo.spin_event_loop();
+                std::thread::sleep(std::time::Duration::from_millis(5));
+            }
+            Ok(session)
+        }
+
+        /// Builds a session around a WebView made by `make` — the shared part
+        /// of opening a fresh tab and of accepting a page-opened one
+        /// (`window.open`, `target="_blank"`).
+        fn assemble(
+            width: u32,
+            height: u32,
+            make: impl FnOnce(
+                &Servo,
+                Rc<SoftwareRenderingContext>,
+                Rc<HeadlessDelegate>,
+            ) -> servo::WebView,
+        ) -> Result<Self, String> {
             // ── rustls crypto provider ─────────────────────────────────────
             let _ = aws_lc_rs::default_provider().install_default();
 
             // ── Audit log ──────────────────────────────────────────────────
-            let db_path = std::env::temp_dir()
-                .join("ferrite_servo_session.db")
-                .to_string_lossy()
-                .into_owned();
-            let _ = std::fs::remove_file(&db_path);
-            let audit_log = PersistentAuditLog::new(&db_path).map_err(|e| e.to_string())?;
-
-            let audit_log = Rc::new(std::cell::RefCell::new(audit_log));
+            let audit_log = shared_audit_log()?;
 
             // ── Shared delegate ↔ session state ────────────────────────────
             let shared_load_status = Rc::new(std::cell::RefCell::new(LoadStatus::Loading));
@@ -355,8 +722,7 @@ mod inner {
                 Rc::new(std::cell::RefCell::new(None));
             let shared_console_errors: Rc<std::cell::RefCell<Vec<String>>> =
                 Rc::new(std::cell::RefCell::new(Vec::new()));
-            let shared_favicon: Rc<std::cell::RefCell<Option<(u32, u32, Vec<u8>)>>> =
-                Rc::new(std::cell::RefCell::new(None));
+            let shared_favicon: SharedFavicon = Rc::new(std::cell::RefCell::new(None));
 
             // ── Rendering context ──────────────────────────────────────────
             let rendering_context = Rc::new(
@@ -383,10 +749,7 @@ mod inner {
                 console_errors: shared_console_errors.clone(),
                 favicon: shared_favicon.clone(),
             });
-            let webview = WebViewBuilder::new(&servo, rendering_context.clone())
-                .delegate(delegate)
-                .url(url::Url::parse("about:blank").unwrap())
-                .build();
+            let webview = make(&servo, rendering_context.clone(), delegate);
 
             webview.resize(PhysicalSize { width, height });
             servo.spin_event_loop();
@@ -509,12 +872,33 @@ mod inner {
         ///
         /// Call this on **every** session after one `pump_engine()` call.
         pub fn sync_and_read(&mut self) {
+            self.sync_state();
+            self.read_frame();
+        }
+
+        /// Sync per-tab state from delegate callbacks without reading pixels —
+        /// what a background tab needs each tick (title, URL, load status),
+        /// without the cost of copying a full frame nobody is looking at.
+        pub fn sync_state(&mut self) {
             // Sync load status, URL, and page title from delegate callbacks.
             self.last_load_status = self.shared_load_status.borrow().clone();
             self.current_url = self.shared_url.borrow().clone();
             self.last_page_title = self.shared_page_title.borrow().clone();
             self.last_favicon = self.shared_favicon.borrow().clone();
+            // Without this the delegate's history was written and never read, so
+            // `can_go_back()`/`can_go_forward()`/`history()` always reported an
+            // empty history in a real Servo build (found by the first real
+            // `--features servo` compile, as a dead-code warning on this field).
+            self.last_history = self.shared_history.borrow().clone();
+        }
 
+        /// The render-surface size this session was last asked to have,
+        /// `(width, height)` in physical pixels.
+        pub fn size(&self) -> (u32, u32) {
+            (self.width, self.height)
+        }
+
+        fn read_frame(&mut self) {
             // Read back the current frame after paint.
             //
             // `pump_engine()` may have called `make_current()` on another
@@ -695,28 +1079,38 @@ mod inner {
             self.webview.resize(PhysicalSize { width, height });
         }
 
+        /// Sets the page zoom (1.0 = 100%) natively, through the engine: layout
+        /// and pointer hit-testing follow it, and no script runs in the page.
+        /// (An earlier version injected a CSS transform with JavaScript, which
+        /// ran inside heavy pages on every load and could interfere with them.)
+        pub fn set_zoom(&self, level: f32) {
+            self.webview.set_page_zoom(level);
+        }
+
+        /// The page zoom currently in effect.
+        pub fn zoom(&self) -> f32 {
+            self.webview.page_zoom()
+        }
+
+        /// Marks this tab as the one the user is looking at (`true`) or as a
+        /// background tab (`false`). Servo routes keyboard input to the focused
+        /// WebView and hit-tests pointer input only against shown WebViews, so a
+        /// tab that was never focused/shown does not react to input.
+        pub fn set_active(&self, active: bool) {
+            if active {
+                self.webview.show();
+                self.webview.focus();
+            } else {
+                self.webview.blur();
+                self.webview.hide();
+            }
+        }
+
         /// Send a mouse-move event to the WebView at pixel coordinates `(x, y)`.
         pub fn send_mouse_move(&self, x: f32, y: f32) {
             let point = WebViewPoint::Device(DevicePoint::new(x, y));
             self.webview
                 .notify_input_event(InputEvent::MouseMove(MouseMoveEvent::new(point)));
-        }
-
-        /// Send a mouse-button down+up (click) at pixel coordinates `(x, y)`.
-        pub fn send_mouse_click(&self, x: f32, y: f32) {
-            let point = WebViewPoint::Device(DevicePoint::new(x, y));
-            self.webview
-                .notify_input_event(InputEvent::MouseButton(MouseButtonEvent::new(
-                    MouseButtonAction::Down,
-                    MouseButton::Left,
-                    point,
-                )));
-            self.webview
-                .notify_input_event(InputEvent::MouseButton(MouseButtonEvent::new(
-                    MouseButtonAction::Up,
-                    MouseButton::Left,
-                    point,
-                )));
         }
 
         /// Send a right mouse-button click at pixel coordinates `(x, y)`.
@@ -725,20 +1119,24 @@ mod inner {
             self.webview
                 .notify_input_event(InputEvent::MouseButton(MouseButtonEvent::new(
                     MouseButtonAction::Down,
-                    MouseButton::Right,
+                    MouseButton::Secondary,
                     point,
                 )));
             self.webview
                 .notify_input_event(InputEvent::MouseButton(MouseButtonEvent::new(
                     MouseButtonAction::Up,
-                    MouseButton::Right,
+                    MouseButton::Secondary,
                     point,
                 )));
         }
 
         /// Send a scroll (wheel) event at pixel coordinates `(x, y)`.
         ///
-        /// `delta_x` and `delta_y` are in CSS pixels; positive `delta_y` scrolls down.
+        /// `delta_x`/`delta_y` follow the OS wheel convention the UI passes through
+        /// unchanged: positive `delta_y` scrolls the page up (content moves down).
+        /// The wheel event alone scrolls the page; an extra legacy `Scroll` call
+        /// used to be sent as well, which made every scroll travel twice as far
+        /// (measured with `examples/input_probe.rs`).
         pub fn send_scroll(&self, x: f32, y: f32, delta_x: f64, delta_y: f64) {
             let point = WebViewPoint::Device(DevicePoint::new(x, y));
             self.webview
@@ -751,11 +1149,71 @@ mod inner {
                     },
                     point,
                 )));
-            // Also drive the scroll via the legacy Scroll API so Servo's
-            // compositor can recomposite the page without waiting for a paint.
-            let scroll_vec = DeviceVector2D::new(-delta_x as f32, -delta_y as f32);
-            self.webview
-                .notify_scroll_event(Scroll::Delta(scroll_vec.into()), point);
+        }
+
+        /// Forwards a key press/release to the page's focused element.
+        ///
+        /// Mirrors what `servoshell` does for a real window
+        /// (`keyboard_event_from_winit`): a `KeyboardEvent` with the typed
+        /// character as `Key::Character`, a best-effort physical `Code`, and
+        /// the modifier state. `Cmd/Ctrl + C/X/V` become Servo
+        /// `EditingActionEvent`s instead (Servo owns the clipboard), and the
+        /// raw key events for those combinations are not sent.
+        pub fn send_key(&self, event: &PageKeyEvent) {
+            if let Some(edit) = event.edit_combo() {
+                if event.down {
+                    let action = match edit {
+                        PageEdit::Copy => EditingActionEvent::Copy,
+                        PageEdit::Cut => EditingActionEvent::Cut,
+                        PageEdit::Paste => EditingActionEvent::Paste,
+                    };
+                    self.webview
+                        .notify_input_event(InputEvent::EditingAction(action));
+                }
+                return;
+            }
+            let (key, code) = match &event.key {
+                PageKey::Character(text) => (
+                    Key::Character(text.clone()),
+                    text.chars()
+                        .next()
+                        .filter(|_| text.chars().count() == 1)
+                        .map_or(Code::Unidentified, code_for_char),
+                ),
+                PageKey::Named(named) => {
+                    let (named, code) = named_key(*named);
+                    (Key::Named(named), code)
+                }
+            };
+            let mut modifiers = Modifiers::empty();
+            if event.shift {
+                modifiers |= Modifiers::SHIFT;
+            }
+            if event.ctrl {
+                modifiers |= Modifiers::CONTROL;
+            }
+            if event.alt {
+                modifiers |= Modifiers::ALT;
+            }
+            if event.meta {
+                modifiers |= Modifiers::META;
+            }
+            let state = if event.down {
+                KeyState::Down
+            } else {
+                KeyState::Up
+            };
+            self.webview.notify_input_event(InputEvent::Keyboard(
+                KeyboardEvent::new_without_event(
+                    state,
+                    key,
+                    code,
+                    Location::Standard,
+                    modifiers,
+                    false,
+                    false,
+                ),
+            ));
         }
 
         /// Send a mouse-down event (without the subsequent up) — for drag start.
@@ -764,7 +1222,7 @@ mod inner {
             self.webview
                 .notify_input_event(InputEvent::MouseButton(MouseButtonEvent::new(
                     MouseButtonAction::Down,
-                    MouseButton::Left,
+                    MouseButton::Primary,
                     point,
                 )));
         }
@@ -775,7 +1233,7 @@ mod inner {
             self.webview
                 .notify_input_event(InputEvent::MouseButton(MouseButtonEvent::new(
                     MouseButtonAction::Up,
-                    MouseButton::Left,
+                    MouseButton::Primary,
                     point,
                 )));
         }
@@ -844,6 +1302,16 @@ mod inner {
 }
 
 // Stub for non-servo builds so the type name is always resolvable.
+/// Without the `servo` feature there is no engine to shut down.
+#[cfg(not(feature = "servo"))]
+pub fn shutdown_engine() {}
+
+/// Without the `servo` feature no page can open a tab.
+#[cfg(not(feature = "servo"))]
+pub fn take_popup_sessions() -> Vec<HeadlessServoSession> {
+    Vec::new()
+}
+
 #[cfg(not(feature = "servo"))]
 pub struct HeadlessServoSession;
 
@@ -866,6 +1334,12 @@ impl HeadlessServoSession {
     pub fn pump_engine(&self) {}
 
     pub fn sync_and_read(&mut self) {}
+
+    pub fn sync_state(&mut self) {}
+
+    pub fn size(&self) -> (u32, u32) {
+        (0, 0)
+    }
 
     pub fn spin(&mut self) {}
 
@@ -921,10 +1395,101 @@ impl HeadlessServoSession {
         }
     }
 
+    pub fn send_key(&self, _event: &PageKeyEvent) {}
+    pub fn set_active(&self, _active: bool) {}
+    pub fn set_zoom(&self, _level: f32) {}
+    pub fn zoom(&self) -> f32 {
+        1.0
+    }
     pub fn send_mouse_move(&self, _x: f32, _y: f32) {}
-    pub fn send_mouse_click(&self, _x: f32, _y: f32) {}
     pub fn send_right_click(&self, _x: f32, _y: f32) {}
     pub fn send_scroll(&self, _x: f32, _y: f32, _dx: f64, _dy: f64) {}
     pub fn send_mouse_down(&self, _x: f32, _y: f32) {}
     pub fn send_mouse_up(&self, _x: f32, _y: f32) {}
+}
+
+#[cfg(test)]
+mod page_key_tests {
+    use super::*;
+
+    fn ev(down: bool, key: PageKey, ctrl: bool, meta: bool, alt: bool) -> PageKeyEvent {
+        PageKeyEvent {
+            down,
+            key,
+            shift: false,
+            ctrl,
+            alt,
+            meta,
+        }
+    }
+
+    fn ch(s: &str) -> PageKey {
+        PageKey::Character(s.to_string())
+    }
+
+    #[test]
+    fn a_plain_character_is_never_a_clipboard_combo() {
+        assert_eq!(ev(true, ch("v"), false, false, false).edit_combo(), None);
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn cmd_c_x_v_are_the_edit_combos_on_macos_and_ctrl_is_not() {
+        assert_eq!(
+            ev(true, ch("c"), false, true, false).edit_combo(),
+            Some(PageEdit::Copy)
+        );
+        assert_eq!(
+            ev(false, ch("X"), false, true, false).edit_combo(),
+            Some(PageEdit::Cut)
+        );
+        assert_eq!(
+            ev(true, ch("v"), false, true, false).edit_combo(),
+            Some(PageEdit::Paste)
+        );
+        assert_eq!(ev(true, ch("v"), true, false, false).edit_combo(), None);
+    }
+
+    #[cfg(not(target_os = "macos"))]
+    #[test]
+    fn ctrl_c_x_v_are_the_edit_combos_off_macos_and_cmd_is_not() {
+        assert_eq!(
+            ev(true, ch("c"), true, false, false).edit_combo(),
+            Some(PageEdit::Copy)
+        );
+        assert_eq!(
+            ev(false, ch("X"), true, false, false).edit_combo(),
+            Some(PageEdit::Cut)
+        );
+        assert_eq!(
+            ev(true, ch("v"), true, false, false).edit_combo(),
+            Some(PageEdit::Paste)
+        );
+        assert_eq!(ev(true, ch("v"), false, true, false).edit_combo(), None);
+    }
+
+    #[test]
+    fn alt_with_the_command_key_is_not_a_clipboard_combo() {
+        let ctrl_or_meta = cfg!(target_os = "macos");
+        assert_eq!(
+            ev(true, ch("v"), !ctrl_or_meta, ctrl_or_meta, true).edit_combo(),
+            None
+        );
+    }
+
+    #[test]
+    fn named_keys_are_never_clipboard_combos() {
+        let ctrl_or_meta = cfg!(target_os = "macos");
+        assert_eq!(
+            ev(
+                true,
+                PageKey::Named(PageNamedKey::Enter),
+                !ctrl_or_meta,
+                ctrl_or_meta,
+                false
+            )
+            .edit_combo(),
+            None
+        );
+    }
 }

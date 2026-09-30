@@ -127,6 +127,11 @@ pub struct CompletionRequest {
     /// A JSON schema for structured output (§10.4). Sent as Ollama's
     /// `format` / Gemini's `responseSchema`.
     pub format_schema: Option<serde_json::Value>,
+    /// What this call is for (`"agent step"`, `"fingerprint"`, ...). Purely a
+    /// label for the activity trace: it is not sent to any backend and is not
+    /// part of the cache key, so setting it never changes a response.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub label: String,
 }
 
 impl CompletionRequest {
@@ -141,7 +146,15 @@ impl CompletionRequest {
             messages,
             options: SamplingOptions::default(),
             format_schema: None,
+            label: String::new(),
         }
+    }
+
+    /// Names what this call is for, for the activity trace only.
+    #[must_use]
+    pub fn with_label(mut self, label: impl Into<String>) -> Self {
+        self.label = label.into();
+        self
     }
 
     /// Sets the system prompt and its version together, because a prompt

@@ -81,8 +81,8 @@ wildcards = "deny"
 allow-wildcard-paths = true
 
 # Every entry below traces to ONE structural cause, not 30 individually
-# unrelated problems: this workspace depends on Servo pinned to an old git
-# tag (v0.0.5, frozen in time) AND on the current iced/winit graphics stack
+# unrelated problems: this workspace depends on a pinned Servo release
+# (0.6.0 from crates.io; it was the git tag v0.0.5 before ADR-013) AND on the current iced/winit graphics stack
 # in the same build — two dependency trees from different eras that
 # inevitably disagree on transitive versions of foundational crates
 # (syn, windows-sys, parking_lot, hashbrown, etc.). This is the same
@@ -118,6 +118,9 @@ skip = [
   { name = "siphasher" },
   { name = "smithay-client-toolkit" },
   { name = "syn" },
+  # Added at the Servo 0.6.0 bump (ADR-013): zerofrom-derive (icu) and servo's
+  # own stack resolve different synstructure versions; proc-macro support crate.
+  { name = "synstructure" },
   { name = "thiserror" },
   { name = "thiserror-impl" },
   { name = "ttf-parser" },

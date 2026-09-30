@@ -242,3 +242,150 @@ grandfathered in as already-valid: they get re-labelled under the ADR-006
 type-level carrier partition (D6), and count toward the 10%
 double-authoring / Cohen's κ ≥ 0.8 requirement in directive §13.3 like any
 newly authored case.
+
+
+---
+
+## ADR-009 — Laya is an optional, confidence-gated accelerator for ordinary browsing steps; never part of the security boundary
+
+**Date:** 2026-09-30, implemented by `7ba6d00`/`08152bb` (client + step decider), `ac1c872` (live-loop fast lane). **Status:** live, **off by default** (`FERRITE_LAYA_URL` unset = behaviour identical to before).
+
+Laya ([NandhaKishorM/laya](https://github.com/NandhaKishorM/laya)) is a
+non-autoregressive "System 1" decision model: typed `choice`/`score`/`noul`
+answers in one forward pass (the authors report ~33 ms), no generation, so
+nothing to parse or hallucinate. The question this ADR answers is *where in
+this agent's pipeline that is, and is not, the right tool*.
+
+| Stage | Decider | Why |
+| --- | --- | --- |
+| Fingerprint prediction, comparator, consent (the IPI defense) | LLM (small tier) + deterministic code — **never Laya** | ADR-000: the defense's premise is fail-to-empty on any model doubt. Laya's own "Honest limits" say base checkpoints are ~chance zero-shot on new label sets (0.362 vs 0.318 random on typed-decisions), are confidently wrong off-distribution, and can select the negated option (issue #377). A confident-but-wrong classifier in this position is a bypass, not an accelerator. |
+| "Should the current page be context?" | Deterministic heuristic (`context::decide_page_use`) | Microseconds, auditable, 88-prompt table test. `decider::refine_page_use` exists but is deliberately **unwired**: it asks a question no head was trained on. |
+| Next operation + target element on ordinary pages | **Laya browser head** (`cklxx/laya-browser`) as a gated fast lane, LLM fallback | The one documented fit: the authors report element top-1 0.66 among ~45 candidates, operation accuracy 0.88, 62% on 16 live tasks at 17–23 ms/step (their pages, their measurements; not reproduced here). Gated on operation *and* target probability, refuses to repeat the previous fast action, and any error/timeout/abstention falls through to the normal LLM step. |
+| Text to type, final answers, summaries, extraction, planning, `ask_user` | LLM | Laya cannot generate text (its own browser-agent write-up uses a small LLM for `TYPE_TEXT` too). `TYPE_TEXT` = Laya picks the field, the small-tier model writes the value; a declined value falls back to the full LLM step. |
+| `DONE` / `BLOCKED` | LLM | Laya's write-up states a `DONE` still needs independent outcome verification; the LLM writes the final answer anyway. |
+
+**Consequences.** Fast-lane actions use the same vocabulary as LLM actions and
+go through the identical rejection/consent/step-budget/repeat-stop path, so
+Laya can steer *which* element a page-controlled label leads to but cannot
+widen what is allowed. A request sends page URL, title, visible text and
+element labels to `FERRITE_LAYA_URL`; the default is a loopback server and a
+non-loopback URL logs a warning at startup. The locally served browser head
+occupies laya-serve's `typed-decisions` router slot (only three names exist) —
+a workaround documented in `scripts/laya/serve.py`. Gates (0.80 op / 0.60
+target) are conservative **untuned** defaults; the authors also report that
+confidence-gated escalation to a bigger LLM did *not* help on their pages, so
+no claim is made here that gating improves outcomes. A real-trace A/B (fast
+lane on vs off) must precede any default-on (T-234).
+
+---
+
+## ADR-010 — Agent memory and page context are untrusted data; only user-authored text may feed the fingerprint
+
+**Date:** 2026-09-30, implemented by `d2f7454` (`context.rs`) and `b4157f5` (wiring). **Status:** live.
+
+Multi-turn chats and page digests give the live loop far more context — and
+far more attack surface: earlier agent answers and page text can carry
+injected instructions, and persisting them into later prompts would let one
+poisoned page shape every future run in the chat.
+
+- The live loop's first message (`build_seed`) delimits **CONVERSATION SO
+  FAR**, **OPEN TABS** and **CURRENT PAGE** as untrusted data, sanitizes and
+  bounds every page-/agent-derived string, and never truncates the user
+  request. Password values are never read into a digest.
+- The IPI defense (`IpiTask`, sanitizer input, fingerprint prediction, the
+  dry-run driver's prompt) receives **`trusted_task_text`** only: the new
+  prompt plus up to five earlier *user* messages. Never the seed, page text,
+  agent output or steps. A test enforces this structurally on the spawned
+  defense task and another feeds it a hostile chat.
+- The harness's per-step page observation (`observe_page`) is not an
+  agent-initiated primitive: `DryRunEngine` implements it without logging a
+  call. Logging it would put `dom.read` in nearly every dry-run record, flag a
+  deviation on almost every task and train users to click through consent.
+  The agent-initiated `read_page` goes through the logged `page_digest`.
+- Typed text is not persisted in chat files (`@3 -> 7 chars`): they are plain
+  text on disk and are re-read into later seeds.
+
+**Known cost:** the dry run sees no page content and only prior user text, so
+follow-ups such as "do the same for the second one" predict a looser
+fingerprint and may raise more consent prompts. That is the fail-safe
+direction and is accepted.
+
+## ADR-011 — A separate model-activity trace, not the hash-chained audit log
+
+**Date:** 2026-09-30. **Status:** live (`ferrite_model::trace`, the Audit panel's "Model calls" view).
+
+The owner needs to see exactly what was sent to the LLM and to Laya, what came
+back, and how long each took, to judge whether Laya is worth having. That is
+a different record from the hash-chained audit log, which exists so the
+*containment decision* is verifiable (capability granted/denied/exercised).
+
+- **Where it is written.** One process-wide `TraceLog` (bounded ring of 500
+  events, plus a JSON-lines file at `$FERRITE_HOME/logs/model-activity.jsonl`,
+  rotated at 20 MB). LLM calls are recorded by the `Trace` provider decorator
+  (outermost, so it sees what the caller waited for, cache hits included);
+  every Laya request is recorded inside `LayaClient::systemone`; the UI adds
+  the agent's own events (run start/finish, each executed action with its
+  result and timing, consent requested/decided) and the Laya fast-lane
+  *verdict* (accepted, or which gate sent it back to the LLM).
+- **Why not the audit chain.** Prompts and page text are large, free-form and
+  private, and do not fit the chain's fixed fields; putting them there would
+  also make a log meant to be verifiable and shareable carry page content. The
+  trace is explicitly local and every text field is cut to 6 000 characters.
+- **Not in the security path.** Recording is best-effort (a write failure is
+  ignored) and never influences a decision, admission or fingerprint. Nothing
+  reads the trace back except the UI.
+- **Labels.** `CompletionRequest::label` names a call's purpose (`agent step`,
+  `fingerprint`, `field text`); it is not sent to any backend and not part of
+  the cache key.
+- **The "is Laya faster" answer** is computed from the events held
+  (`activity::laya_effect_summary`): Laya round-trip mean vs LLM agent-step
+  mean, times the number of steps whose Laya answer was actually used. It
+  reports "no time saved" rather than a negative number when Laya is slower.
+
+## ADR-012 — The browser profile persists under the data directory
+
+**Date:** 2026-09-30. **Status:** live; Google sign-in specifically **unverified**.
+
+`ServoBuilder` now gets `Opts::config_dir = $FERRITE_HOME/profile` (default
+`~/.local/share/ferrite/profile`), so cookies, HSTS, cached HTTP credentials and
+web storage survive a restart, and `dom_indexeddb_enabled` /
+`dom_cookiestore_enabled` are on. Servo writes the cookie jar only when it
+shuts down cleanly, so closing the window now drops every session and calls
+`ferrite_servo::session::shutdown_engine()` before exiting; a crash, `kill`
+or macOS Cmd+Q that bypasses the window close loses that run's new cookies.
+Verified with `ferrite-servo/examples/profile_probe.rs` (a cookie set by a
+response and a `localStorage` value both visible to a fresh process) and by
+closing the real window. Whether a given site's login works is a different
+question: Google in particular may refuse an embedded engine or a user-agent
+that names Servo (`FERRITE_USER_AGENT` overrides it), and needs web-platform
+features this Servo version may lack.
+
+## ADR-013 — Servo 0.6.0 from crates.io, replacing the git tag v0.0.5
+
+**Date:** 2026-10-01. **Status:** live once the probes in `docs/PROGRESS.md` pass.
+
+The owner's macOS crash report for a Google Form put the fault in
+`JS::GetScriptPrivate(JSScript*)`, called from
+`GlobalScope::run_a_classic_script` ← `HTMLScriptElement::execute` ←
+`ServoParser::resume_with_pending_parsing_blocking_script` ← stylesheet
+`do_post_parse_tasks`, at address `0x4b4b4b4b4b4b4b7b` (SpiderMonkey's
+freed-memory fill). In v0.0.5, `ClassicScript.record` holds the compiled
+script as an untraced `NonNull<JSScript>` for as long as a parser-blocking
+script waits for its stylesheet; a garbage collection in that window frees it
+and the later run reads freed memory. That is a bug in the engine, not in
+Ferrite, and it is timing-dependent, which is why simple local pages never hit
+it. Upstream's `ClassicScript.record` is a `RootedTraceableBox<Heap<*mut
+JSScript>>` by 0.6.0.
+
+- Patching a vendored v0.0.5 was rejected (the engine is hundreds of crates
+  and the patch would have to be carried forever); moving to the released
+  crate gets this fix and six releases of others.
+- `libservo` (git) becomes `servo = "=0.6.0"` (crates.io); the library name is
+  unchanged, so `use servo::…` is too. The only source change needed was
+  `MouseButton::{Left,Right}` → `{Primary,Secondary}`.
+- Servo 0.6.0 pins `rusqlite 0.38` with `bundled`, and Cargo allows one
+  `libsqlite3-sys` per graph, so the workspace `rusqlite` moved from 0.37 to
+  0.38. It is still one version, workspace-wide, bundled.
+- The default features (`bundled`, `clipboard`, `js_jit`) no longer include a
+  media backend, so the gstreamer brew package is no longer required; audio
+  and video playback are not built in.

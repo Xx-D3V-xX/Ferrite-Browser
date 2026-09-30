@@ -49,7 +49,7 @@ reqwest = { version = "0.12", features = ["json", "rustls-tls", "stream"], defau
 # (needs "serde"). Default features pull in more (e.g. "wasmbind") that
 # nothing here touches.
 chrono = { version = "0.4", default-features = false, features = ["clock", "serde"] }
-rusqlite = { version = "0.37", features = ["bundled"] }
+rusqlite = { version = "0.38", features = ["bundled"] }
 sha2 = "0.10"
 hex = "0.4"
 url = "2"
@@ -78,7 +78,11 @@ raw-window-handle = "0.6"
 winit = "0.30"
 log = "0.4"
 rustls = { version = "0.23", features = ["aws_lc_rs"] }
-libservo = { git = "https://github.com/servo/servo", tag = "v0.0.5" }
+# The crates.io release of Servo (package `servo`, library `servo`). 0.6.0 replaces
+# the git tag v0.0.5, whose script engine could free a compiled script that a
+# stylesheet-blocked <script> was still waiting to run (a use-after-free that
+# crashed Google pages); upstream traces that script now.
+servo = { version = "=0.6.0" }
 
 # ── ferrite-ui ───────────────────────────────────────────────────────────
 # C1 (docs/handoffs/c01.md): "svg" adds the hand-authored icon set
@@ -106,7 +110,7 @@ urlencoding = "2"
 # a fetched `.ico`/PNG itself, so a real image-decoding crate is needed for
 # the first time in this workspace. `image` is small, extremely standard and
 # widely audited, and already resolves to exactly this version (0.25.10) as a
-# transitive dependency of `libservo` (`arboard`/`embedder_traits`, gated
+# transitive dependency of `servo` (`arboard`/`embedder_traits`, gated
 # behind the `servo` feature nothing here enables by default — confirmed via
 # `cargo tree -p ferrite-ui -i image@0.25.10`), so pinning it here as a direct
 # dependency does not add a new version to the graph, only a new direct edge

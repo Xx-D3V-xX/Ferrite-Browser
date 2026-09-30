@@ -193,6 +193,11 @@ fn run_agent_smoke() {
             LoopStopReason::Finished(answer) => {
                 println!("[agent-smoke] final_response: {}", answer);
             }
+            // The model stopped to ask rather than guess: a clean stop, and
+            // the question is the result.
+            LoopStopReason::AskedUser(question) => {
+                println!("[agent-smoke] asked_user: {}", question);
+            }
             other => {
                 eprintln!("[agent-smoke] did not finish cleanly: {:?}", other);
                 std::process::exit(1);
