@@ -4409,3 +4409,52 @@ so nothing was reproduced. Filed as T-239.
 **Verified:** `cargo clippy --workspace --all-targets -D warnings` and
 `clippy -p ferrite-servo --features servo` clean; `ferrite-ui` 234 tests pass.
 **Not verified:** none of this has been seen on a real page.
+
+## 2026-09-30 — coordinator — real-Servo probes, dev profile default, new-tab page, agent search
+
+**Reported by the owner (second time):** pages unresponsive in the real-Servo
+app, reload exits (segfault), an agent search on google.com gave a white page,
+and the new-tab page looked poor. His log showed `zoom_script` executions and
+then `Segmentation fault: 11`.
+
+**New: real Servo run here.** The sandbox has no internet, but a full Servo
+dev build (17 min on 4 cores, `CARGO_INCREMENTAL=0`) plus `libegl1`/Mesa and
+`xvfb-run` runs a headless session against local pages. Two probes were added
+and both pass on Linux, dev profile:
+- `crates/ferrite-servo/examples/input_probe.rs` (`just probe-input`):
+  wheel scroll, click + typing + Backspace into a text input, a checkbox
+  (exactly one click event), a button, reload, and scrolling under a
+  zoom-out transform.
+- `crates/ferrite-engine-servo/examples/digest_probe.rs`: the real page
+  script — an 8-element digest with the password value withheld, then
+  `type_text`/`set_checked`/`select_option`/`click`/`scroll_to` by `@ref`,
+  the page state confirming each. This is the first time `page_ops.js` ran on
+  real Servo (T-235 moved to in-progress).
+
+**Bugs found and fixed by those probes:** each wheel event scrolled twice as
+far (a legacy `Scroll` call was sent as well as the wheel event; measured 600
+px vs 300 px). Earlier this round: every click sent twice; zoom reset left
+`transform: scale(1)` on `<html>`.
+
+**Cause of the owner's failure: not established.** The one variable that
+differs between his working and failing runs is the Cargo profile: the setup
+scripts built and ran `--release` (opt-level 3, thin LTO, codegen-units 1),
+his earlier runs were dev builds, and every probe above ran in dev. So
+`FERRITE_PROFILE` now defaults to `dev` in `setup-local.sh`/`run-local.sh`/
+`doctor.sh` (`FERRITE_PROFILE=release` opts back in). This is a hypothesis
+and a safer default, not a demonstrated fix. Google Forms itself could not be
+loaded (no internet). Tracked as T-239.
+
+**Also changed.** Agent prompt v3: search with DuckDuckGo Lite, never Google
+(Google's results page does not render in this engine), and go elsewhere
+when a page stays blank. New-tab page redesigned: flat background, wordmark,
+one search field, an "Ask the agent instead" entry, a quick-access grid
+aligned to the search width, a quiet shortcut footer; the pulsing badge,
+gradient, per-tile hue rotation and its HSL helpers are gone.
+
+**Verified:** `cargo fmt --check`, `clippy --workspace --all-targets -D
+warnings` and `clippy -p ferrite-servo --features servo --all-targets`
+clean; 970 tests pass; both probes pass; script tests pass. **Not verified:**
+the new-tab page has not been rendered (no display for iced here) — only
+compiled and covered by the existing widget-tree tests; the release profile;
+macOS; any real website.

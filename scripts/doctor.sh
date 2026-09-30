@@ -86,18 +86,18 @@ fi
 
 # ── build ─────────────────────────────────────────────────────────────────
 step "Build"
-BIN=$CARGO_TARGET_DIR/release/ferrite-shell
+BIN=$CARGO_TARGET_DIR/$FERRITE_PROFILE_DIR/ferrite-shell
 MODE=unknown
 [ -f "$FERRITE_BUILD_MODE_FILE" ] && MODE=$(cat "$FERRITE_BUILD_MODE_FILE")
 if [ -x "$BIN" ]; then
-  p_ok "release binary present: $BIN"
+  p_ok "$FERRITE_PROFILE binary present: $BIN"
   case $MODE in
     servo) p_ok "last recorded build: WITH Servo (real web rendering)" ;;
     plain) p_warn "last recorded build: Servo-free (NO real web rendering)"; hint "just setup-servo" ;;
     *) p_warn "no build mode recorded (built outside setup-local.sh?): cannot tell whether Servo is in it"; hint "just setup-servo   (or just setup for the Servo-free build)" ;;
   esac
 else
-  p_warn "no release binary at $BIN (run-local builds it on first use, or run setup)"; hint "just setup"
+  p_warn "no $FERRITE_PROFILE binary at $BIN (run-local builds it on first use, or run setup)"; hint "just setup"
 fi
 
 # ── configuration ─────────────────────────────────────────────────────────

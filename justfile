@@ -105,6 +105,12 @@ run *ARGS:
 build-servo:
     cargo build -p ferrite-shell --features ferrite-servo/servo
 
+# Drives a real headless Servo session against a built-in page and checks
+# scrolling, clicking, typing and reload (no network or window needed).
+# Pass a URL to probe another page. Needs the real Servo build.
+probe-input *ARGS:
+    cargo run -p ferrite-servo --features servo --example input_probe -- {{ARGS}}
+
 # Dependency-bloat report. Requires `cargo install cargo-bloat` (not
 # bundled — it's a diagnostic tool you reach for before adding a
 # dependency, per §7.3, not a gate every run needs).

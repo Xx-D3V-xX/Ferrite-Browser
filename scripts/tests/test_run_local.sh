@@ -119,7 +119,7 @@ mv "$TMP/home/env.local.bak" "$TMP/home/env.local"
 reset_log
 rc=0; "$RUN" --wait 20 > "$TMP/o2" 2>&1 || rc=$?
 [ "$rc" -eq 0 ] && ok_ || fail_ "happy path: exit 0 (got $rc)"; [ "$rc" -eq 0 ] || sed 's/^/    /' "$TMP/o2"
-[ "$(last_args)" = "ARGS: run --release -p ferrite-shell -- ui" ] && ok_ || fail_ "happy path: cargo args: $(last_args)"
+[ "$(last_args)" = "ARGS: run -p ferrite-shell -- ui" ] && ok_ || fail_ "happy path: cargo args: $(last_args)"
 contains "$TMP/cargo.log" "LAYA_URL=$URL" && ok_ || fail_ "happy path: FERRITE_LAYA_URL exported"
 contains "$TMP/cargo.log" 'HEALTH={"status":"ok"}' && ok_ || fail_ "happy path: server healthy while the app ran"
 contains "$TMP/cargo.log" "DEFENSE=on" && ok_ || fail_ "happy path: file value loaded"
@@ -186,12 +186,12 @@ contains "$TMP/cargo.log" "LAYA_URL=<unset>" && ok_ || fail_ "start-up failure: 
 reset_log
 echo servo > "$TMP/home/build.mode"
 "$RUN" --no-laya > /dev/null 2>&1 || true
-[ "$(last_args)" = "ARGS: run --release -p ferrite-shell --features ferrite-servo/servo -- ui" ] && ok_ || fail_ "servo auto-detect: $(last_args)"
+[ "$(last_args)" = "ARGS: run -p ferrite-shell --features ferrite-servo/servo -- ui" ] && ok_ || fail_ "servo auto-detect: $(last_args)"
 "$RUN" --no-laya --no-servo -- smoke > /dev/null 2>&1 || true
-[ "$(last_args)" = "ARGS: run --release -p ferrite-shell -- smoke" ] && ok_ || fail_ "--no-servo + passthrough: $(last_args)"
+[ "$(last_args)" = "ARGS: run -p ferrite-shell -- smoke" ] && ok_ || fail_ "--no-servo + passthrough: $(last_args)"
 echo plain > "$TMP/home/build.mode"
 "$RUN" --no-laya --servo > /dev/null 2>&1 || true
-[ "$(last_args)" = "ARGS: run --release -p ferrite-shell --features ferrite-servo/servo -- ui" ] && ok_ || fail_ "--servo: $(last_args)"
+[ "$(last_args)" = "ARGS: run -p ferrite-shell --features ferrite-servo/servo -- ui" ] && ok_ || fail_ "--servo: $(last_args)"
 
 # ── 11. --dry-run starts nothing ───────────────────────────────────────────
 reset_log

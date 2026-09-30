@@ -20,7 +20,7 @@ Usage: scripts/run-local.sh [options] [-- ferrite-shell arguments]
   3. starts the local Laya server in the background if it is set up and not
      already running (pid + log under $FERRITE_HOME/laya/), waits for /health,
      and exports FERRITE_LAYA_URL for the app
-  4. runs the browser:  cargo run --release -p ferrite-shell [--features
+  4. runs the browser:  cargo run -p ferrite-shell [--features
      ferrite-servo/servo] -- ui
   5. on exit / Ctrl-C / TERM, stops the Laya server IT started (never one that
      was already running)
@@ -43,6 +43,8 @@ Options:
   -h, --help          this text
   -- ARGS...          pass ARGS to ferrite-shell instead of `ui`
                       (subcommands: ui, window, jstest, agent-smoke, smoke)
+
+Environment: FERRITE_PROFILE=dev (default) or release picks the Cargo profile.
 
 Laya settings (env or env.local): FERRITE_LAYA_URL (use an external server; we
 will not start one), FERRITE_LAYA_HOST, FERRITE_LAYA_PORT (default
@@ -336,7 +338,7 @@ if [ "$SERVO" = auto ]; then
   SERVO=0
   if [ -f "$FERRITE_BUILD_MODE_FILE" ] && [ "$(cat "$FERRITE_BUILD_MODE_FILE" 2>/dev/null)" = servo ]; then SERVO=1; fi
 fi
-CARGO_CMD=(cargo run --release -p ferrite-shell)
+CARGO_CMD=(cargo run ${FERRITE_PROFILE_FLAGS[@]+"${FERRITE_PROFILE_FLAGS[@]}"} -p ferrite-shell)
 if [ "$SERVO" = 1 ]; then
   CARGO_CMD+=(--features ferrite-servo/servo)
 else

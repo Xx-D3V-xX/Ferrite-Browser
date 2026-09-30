@@ -190,11 +190,11 @@
 //   only once decoding the fetched bytes has actually succeeded, so a
 //   transient bad response (an HTML error page, a truncated body) is never
 //   cached as if it were a real icon and can be retried on the next launch.
-// - **Fallback** (`tile_accent`/monogram tile): a tile with no resolved
+// - **Fallback** (monogram tile): a tile with no resolved
 //   favicon yet — no network, first launch before the fetch completes, the
 //   site's `/favicon.ico` doesn't resolve at all, or a decode failure —
-//   shows a deliberately-designed monogram (the site's first letter over a
-//   palette-derived, per-tile hue-rotated accent colour, see `tile_accent`)
+//   shows a deliberately-designed monogram (the site's first letter in the
+//   palette's dim text colour)
 //   rather than a broken-image glyph or empty space, the same fallback real
 //   browsers' own "top sites" tiles use before a favicon is cached. This is
 //   the *default* rendering path, not an error state the UI has to detect
@@ -4638,105 +4638,6 @@ async fn fetch_tile_favicon(
 }
 
 // ---------------------------------------------------------------------------
-// New-tab hero: monogram fallback colour
-// ---------------------------------------------------------------------------
-//
-// A tile with no resolved favicon (yet, or ever) shows a monogram instead —
-// its label's first letter over a colour derived from `palette.accent`, so
-// every fallback stays inside the C3c palette system rather than
-// introducing a new hardcoded `Color` literal (this file's own established
-// convention — see the `Palette`/C3d doc comments). Each of the six tiles
-// gets a distinct hue so the row doesn't read as six identical grey boxes
-// before any favicon has loaded, without six separately-authored brand
-// colours to keep in sync with `Palette`/`LIGHT_PALETTE`/`DARK_PALETTE`
-// whenever either changes.
-
-/// `color` as `(hue_degrees, saturation, lightness)`, each channel in its
-/// natural range (`0.0..360.0`/`0.0..=1.0`/`0.0..=1.0`) — the standard
-/// colorimetry conversion, alpha passed through unchanged since nothing here
-/// rotates transparency.
-fn rgb_to_hsl(color: Color) -> (f32, f32, f32) {
-    let (r, g, b) = (color.r, color.g, color.b);
-    let max = r.max(g).max(b);
-    let min = r.min(g).min(b);
-    let l = (max + min) / 2.0;
-    let delta = max - min;
-    if delta.abs() < f32::EPSILON {
-        return (0.0, 0.0, l);
-    }
-    let s = if l < 0.5 {
-        delta / (max + min)
-    } else {
-        delta / (2.0 - max - min)
-    };
-    let h = if (max - r).abs() < f32::EPSILON {
-        ((g - b) / delta) % 6.0
-    } else if (max - g).abs() < f32::EPSILON {
-        (b - r) / delta + 2.0
-    } else {
-        (r - g) / delta + 4.0
-    };
-    let mut h_deg = h * 60.0;
-    if h_deg < 0.0 {
-        h_deg += 360.0;
-    }
-    (h_deg, s, l)
-}
-
-/// The inverse of [`rgb_to_hsl`] — `hue_degrees` is wrapped into
-/// `0.0..360.0` first, so a caller can pass an out-of-range rotated hue
-/// (e.g. `370.0`) without pre-normalizing it themselves.
-fn hsl_to_rgb(hue_degrees: f32, s: f32, l: f32) -> Color {
-    let h = hue_degrees.rem_euclid(360.0) / 360.0;
-    if s.abs() < f32::EPSILON {
-        return Color::from_rgb(l, l, l);
-    }
-    let q = if l < 0.5 {
-        l * (1.0 + s)
-    } else {
-        l + s - l * s
-    };
-    let p = 2.0 * l - q;
-    let hue_to_rgb = |p: f32, q: f32, mut t: f32| -> f32 {
-        if t < 0.0 {
-            t += 1.0;
-        }
-        if t > 1.0 {
-            t -= 1.0;
-        }
-        if t < 1.0 / 6.0 {
-            return p + (q - p) * 6.0 * t;
-        }
-        if t < 1.0 / 2.0 {
-            return q;
-        }
-        if t < 2.0 / 3.0 {
-            return p + (q - p) * (2.0 / 3.0 - t) * 6.0;
-        }
-        p
-    };
-    Color::from_rgb(
-        hue_to_rgb(p, q, h + 1.0 / 3.0),
-        hue_to_rgb(p, q, h),
-        hue_to_rgb(p, q, h - 1.0 / 3.0),
-    )
-}
-
-/// A deterministic hue rotation of `base` for tile `index` (0-based),
-/// evenly spaced around the full colour wheel (`360.0 / QUICK_ACCESS_TILES.
-/// len()` degrees apart) — every quick-access tile's monogram fallback gets
-/// a distinct-but-related accent colour, derived from `palette.accent`
-/// itself rather than six new hardcoded literals. Saturation/lightness are
-/// kept from `base` unchanged, only hue rotates, so the result always reads
-/// as "the same accent family, a different tile" rather than an arbitrary
-/// colour.
-fn tile_accent(base: Color, index: usize) -> Color {
-    let (h, s, l) = rgb_to_hsl(base);
-    let rotated = h + (index as f32) * (360.0 / QUICK_ACCESS_TILES.len() as f32);
-    hsl_to_rgb(rotated, s, l)
-}
-
-// ---------------------------------------------------------------------------
 // Live agent loop — message-driven step loop shared by the initial
 // (bypassed/clean-dry-run) run and the post-consent real run.
 //
@@ -6231,149 +6132,126 @@ fn tile_glyph<'a>(
         .into()
 }
 
-/// The new-tab hero's background: a faint top-to-bottom fade from
-/// `palette.base` to `palette.surface` — real `iced_core::gradient::Linear`
-/// API, not a decorative illusion built from stacked containers (confirmed
-/// present/usable on this pinned `iced` 0.13.1: `Background::Gradient`,
-/// `gradient::Linear::new(impl Into<Radians>).add_stop(offset, color)`, and
-/// `f32: Into<Radians>` all exist on the vendored source). Subtle by design
-/// (two adjacent palette depth levels, not an arbitrary new hue) — a hint of
-/// depth behind the centered content, not a pattern competing with it.
-fn hero_background(palette: &Palette) -> Background {
-    Background::Gradient(
-        iced::gradient::Linear::new(std::f32::consts::FRAC_PI_2)
-            .add_stop(0.0, palette.base)
-            .add_stop(1.0, palette.surface)
-            .into(),
-    )
-}
+/// Width shared by the new-tab page's search field and quick-access grid so
+/// the two edges line up (six 84 px tiles with 12 px gaps).
+const NEW_TAB_CONTENT_WIDTH: f32 = 564.0;
 
+/// The new-tab page: a flat, quiet start screen — wordmark, one search field,
+/// an "ask the agent" shortcut, a grid of quick-access sites and a footer of
+/// keyboard hints. No animation and no gradients: the search field is the only
+/// thing that draws the eye, and it is usable from the first frame.
 fn new_tab_page(state: &FerriteBrowser) -> Element<'_, FerriteBrowserMessage> {
     let palette = state.palette();
 
-    // ── Brand mark ───────────────────────────────────────────────────────
-    // A raised, bordered badge housing "Fe" (not bare oversized text, the
-    // pre-redesign look) with a soft breathing glow — `pulse_alpha`, the
-    // same tick-driven helper the tab bar's loading dot and the content
-    // area's own "Fe" loading placeholder already use (C3c), reused here
-    // rather than a fourth, independently-authored animation. Only this
-    // badge's own text alpha animates; nothing below it ever dims or waits
-    // on this tick, per this redesign's own brief (the search bar stays the
-    // clear, immediately-usable primary action from the very first frame).
-    let logo_pulse = pulse_alpha(state.progress_offset, 0.6, 0.80, 0.20);
-    let logo_badge = container(
-        text("Fe")
-            .size(30)
+    // ── Wordmark ─────────────────────────────────────────────────────────
+    let mark = container(
+        text("F")
+            .size(20)
             .font(font_weight(iced::font::Weight::Bold))
-            .color(Color {
-                a: logo_pulse,
-                ..palette.accent
-            }),
+            .color(palette.base),
     )
-    .width(76)
-    .height(76)
+    .width(40)
+    .height(40)
     .center(Length::Fill)
     .style(|_: &Theme| container::Style {
-        background: Some(Background::Color(palette.raised)),
+        background: Some(Background::Color(palette.accent)),
         border: Border {
-            radius: iced::border::Radius::new(22.0),
-            width: 1.0,
-            color: Color {
-                a: 0.40,
-                ..palette.accent
-            },
-        },
-        shadow: iced::Shadow {
-            color: Color {
-                a: 0.20,
-                ..palette.accent
-            },
-            offset: iced::Vector::new(0.0, 6.0),
-            blur_radius: 26.0,
+            radius: iced::border::Radius::new(11.0),
+            ..Border::default()
         },
         ..container::Style::default()
     });
-
-    let brand = column![
-        logo_badge,
-        container(text("")).height(18),
-        text("ferrite")
-            .size(30)
+    let wordmark = row![
+        mark,
+        text("Ferrite")
+            .size(26)
             .font(font_weight(iced::font::Weight::Semibold))
             .color(palette.text),
-        text("capability-governed browser")
-            .size(13)
-            .color(palette.text_dim),
     ]
-    .spacing(6)
-    .align_x(iced::Alignment::Center);
+    .spacing(12)
+    .align_y(iced::Alignment::Center);
 
-    // ── Search bar — the primary action, not a link list's afterthought ──
-    // A leading glyph (`Icon::Search`) sits outside the pill itself rather
-    // than fused into `text_input`'s own background (iced 0.13's
-    // `text_input` has no `on_focus`/`on_unfocus` to drive an outer
-    // container's border the way the input's own `.style` closure already
-    // reacts to `text_input::Status` — see this crate's own `handle_key_
-    // press` doc comment for a similar iced-0.13-API-shape constraint found
-    // elsewhere in this file), so the pill keeps its existing focus-
-    // reactive border/background exactly as before, just wider and paired
-    // with a clearer "type to search or navigate" affordance next to it.
-    let search_bar = text_input("Search or type an address", &state.new_tab_search_input)
-        .width(600)
-        .padding([16, 24])
-        .size(16)
-        .style(|_: &Theme, status| {
-            let focused = matches!(status, text_input::Status::Focused);
-            text_input::Style {
-                background: Background::Color(palette.input),
+    // ── Search ───────────────────────────────────────────────────────────
+    let search_bar = text_input(
+        "Search the web or enter an address",
+        &state.new_tab_search_input,
+    )
+    .width(NEW_TAB_CONTENT_WIDTH)
+    .padding([14, 18])
+    .size(15)
+    .style(|_: &Theme, status| {
+        let focused = matches!(status, text_input::Status::Focused);
+        text_input::Style {
+            background: Background::Color(palette.input),
+            border: Border {
+                radius: iced::border::Radius::new(12.0),
+                width: if focused { 1.5 } else { 1.0 },
+                color: if focused {
+                    palette.accent
+                } else {
+                    palette.divider
+                },
+            },
+            icon: palette.text_dim,
+            placeholder: palette.text_dim,
+            value: palette.text,
+            selection: Color {
+                a: 0.30,
+                ..palette.accent
+            },
+        }
+    })
+    .on_input(FerriteBrowserMessage::NewTabSearchChanged)
+    .on_submit(FerriteBrowserMessage::NavigateRequested(resolve_url(
+        &state.new_tab_search_input,
+    )));
+
+    // A quiet second entry point for the agent; hidden once its panel is open.
+    let agent_hint: Element<'_, FerriteBrowserMessage> = if state.show_agent_sidebar {
+        container(text("")).height(30).into()
+    } else {
+        button(
+            row![
+                icon(Icon::Agent, 14.0, palette.text_dim),
+                text("Ask the agent instead")
+                    .size(13)
+                    .color(palette.text_dim),
+            ]
+            .spacing(8)
+            .align_y(iced::Alignment::Center),
+        )
+        .padding([6, 10])
+        .style(|_: &Theme, s| {
+            let hov = matches!(s, button::Status::Hovered | button::Status::Pressed);
+            button::Style {
+                background: hov.then_some(Background::Color(palette.surface)),
+                text_color: palette.text_dim,
                 border: Border {
-                    radius: iced::border::Radius::new(30.0),
-                    width: if focused { 1.5 } else { 1.0 },
-                    color: if focused {
-                        palette.accent
-                    } else {
-                        palette.divider
-                    },
+                    radius: iced::border::Radius::new(8.0),
+                    ..Border::default()
                 },
-                icon: palette.text_dim,
-                placeholder: palette.text_dim,
-                value: palette.text,
-                selection: Color {
-                    a: 0.30,
-                    ..palette.accent
-                },
+                shadow: iced::Shadow::default(),
             }
         })
-        .on_input(FerriteBrowserMessage::NewTabSearchChanged)
-        .on_submit(FerriteBrowserMessage::NavigateRequested(resolve_url(
-            &state.new_tab_search_input,
-        )));
+        .on_press(FerriteBrowserMessage::ToggleAgentSidebar)
+        .into()
+    };
 
-    let search_row = row![icon(Icon::Search, 18.0, palette.text_dim), search_bar,]
-        .spacing(14)
-        .align_y(iced::Alignment::Center);
-
-    // ── Quick-access tiles ───────────────────────────────────────────────
-    // A small "Quick access" eyebrow label gives the row a real section
-    // identity instead of just trailing the search bar unlabeled — the
-    // secondary-hierarchy signal the pre-redesign page had none of.
-    let tiles_heading = text("QUICK ACCESS").size(11).color(palette.text_dim);
-
+    // ── Quick access ─────────────────────────────────────────────────────
     let tile_row: Vec<Element<FerriteBrowserMessage>> = QUICK_ACCESS_TILES
         .iter()
         .enumerate()
         .map(|(index, tile)| {
-            let accent = tile_accent(palette.accent, index);
             let favicon = state.tile_favicons.get(index).and_then(|f| f.as_ref());
-            let glyph = tile_glyph(favicon, &tile_monogram(tile.label), accent);
+            let glyph = tile_glyph(favicon, &tile_monogram(tile.label), palette.text_dim);
             let url = tile.url.to_string();
             button(
                 column![glyph, text(tile.label).size(12).color(palette.text)]
-                    .spacing(10)
+                    .spacing(8)
                     .align_x(iced::Alignment::Center),
             )
-            .width(108)
-            .padding([16, 10])
+            .width(84)
+            .padding([12, 6])
             .style(|_: &Theme, s| {
                 let hov = matches!(s, button::Status::Hovered | button::Status::Pressed);
                 button::Style {
@@ -6384,29 +6262,11 @@ fn new_tab_page(state: &FerriteBrowser) -> Element<'_, FerriteBrowserMessage> {
                     })),
                     text_color: palette.text,
                     border: Border {
-                        radius: iced::border::Radius::new(14.0),
+                        radius: iced::border::Radius::new(12.0),
                         width: 1.0,
-                        color: if hov {
-                            palette.divider
-                        } else {
-                            Color {
-                                a: 0.35,
-                                ..palette.divider
-                            }
-                        },
+                        color: palette.divider,
                     },
-                    shadow: if hov {
-                        iced::Shadow {
-                            color: Color {
-                                a: 0.15,
-                                ..palette.accent
-                            },
-                            offset: iced::Vector::new(0.0, 3.0),
-                            blur_radius: 10.0,
-                        }
-                    } else {
-                        iced::Shadow::default()
-                    },
+                    shadow: iced::Shadow::default(),
                 }
             })
             .on_press(FerriteBrowserMessage::NavigateRequested(url))
@@ -6414,45 +6274,37 @@ fn new_tab_page(state: &FerriteBrowser) -> Element<'_, FerriteBrowserMessage> {
         })
         .collect();
 
-    // ── Keyboard shortcut reference (platform-aware), unchanged content ──
+    let quick_access = column![
+        text("Quick access").size(12).color(palette.text_dim),
+        row(tile_row).spacing(12).wrap(),
+    ]
+    .spacing(12)
+    .width(NEW_TAB_CONTENT_WIDTH);
+
+    // ── Footer: keyboard hints ───────────────────────────────────────────
     let shortcuts_text = format!(
-        "{M}+T  New tab   {M}+W  Close   {M}+L  Address   {M}+R  Reload   {M}+J  JS Console   {M}+Shift+O  New agent chat   F12  Audit",
+        "{M}+T New tab    {M}+L Address bar    {M}+R Reload    {M}+Shift+O New chat    F12 Audit log",
         M = MOD_LABEL,
     );
 
     container(
         column![
-            brand,
-            container(text("")).height(48),
-            search_row,
+            wordmark,
+            container(text("")).height(36),
+            search_bar,
+            agent_hint,
+            container(text("")).height(28),
+            quick_access,
             container(text("")).height(44),
-            column![
-                tiles_heading,
-                container(text("")).height(14),
-                row(tile_row).spacing(14).wrap(),
-            ]
-            .align_x(iced::Alignment::Center),
-            container(text("")).height(44),
-            container(text(shortcuts_text).size(11).color(palette.text_dim))
-                .padding([9, 18])
-                .style(|_: &Theme| container::Style {
-                    background: Some(Background::Color(palette.surface)),
-                    border: Border {
-                        radius: iced::border::Radius::new(20.0),
-                        width: 1.0,
-                        color: palette.divider,
-                    },
-                    ..container::Style::default()
-                }),
+            text(shortcuts_text).size(11).color(palette.text_dim),
         ]
-        .spacing(0)
         .align_x(iced::Alignment::Center),
     )
     .width(Length::Fill)
     .height(Length::Fill)
     .center(Length::Fill)
     .style(|_: &Theme| container::Style {
-        background: Some(hero_background(palette)),
+        background: Some(Background::Color(palette.base)),
         ..container::Style::default()
     })
     .into()
@@ -8741,45 +8593,6 @@ mod tests {
     #[test]
     fn decode_favicon_rgba_is_none_for_empty_bytes() {
         assert_eq!(decode_favicon_rgba(&[]), None);
-    }
-
-    #[test]
-    fn rgb_to_hsl_then_hsl_to_rgb_round_trips_a_real_colour() {
-        let original = Color::from_rgb(0.44, 0.38, 1.0); // DARK_PALETTE.accent
-        let (h, s, l) = rgb_to_hsl(original);
-        let round_tripped = hsl_to_rgb(h, s, l);
-        assert!((round_tripped.r - original.r).abs() < 0.01);
-        assert!((round_tripped.g - original.g).abs() < 0.01);
-        assert!((round_tripped.b - original.b).abs() < 0.01);
-    }
-
-    #[test]
-    fn rgb_to_hsl_handles_a_grey_with_no_saturation() {
-        let (h, s, l) = rgb_to_hsl(Color::from_rgb(0.5, 0.5, 0.5));
-        assert_eq!(h, 0.0);
-        assert_eq!(s, 0.0);
-        assert!((l - 0.5).abs() < 0.001);
-    }
-
-    #[test]
-    fn tile_accent_rotates_hue_deterministically_and_evenly() {
-        let base = DARK_PALETTE.accent;
-        let a0 = tile_accent(base, 0);
-        let a1 = tile_accent(base, 1);
-        // index 0 is the base colour itself, unrotated (up to the HSL/RGB
-        // round trip's own floating-point error, not exact equality).
-        assert!((a0.r - base.r).abs() < 0.01);
-        assert!((a0.g - base.g).abs() < 0.01);
-        assert!((a0.b - base.b).abs() < 0.01);
-        // A different index produces a different colour...
-        assert!(a0.r != a1.r || a0.g != a1.g || a0.b != a1.b);
-        // ...and calling it again with the same inputs is deterministic.
-        assert_eq!(tile_accent(base, 1), a1);
-        // Rotating all the way around the tile count returns to the start.
-        let full_circle = tile_accent(base, QUICK_ACCESS_TILES.len());
-        assert!((full_circle.r - a0.r).abs() < 0.01);
-        assert!((full_circle.g - a0.g).abs() < 0.01);
-        assert!((full_circle.b - a0.b).abs() < 0.01);
     }
 
     #[test]

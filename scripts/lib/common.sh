@@ -25,6 +25,19 @@ FERRITE_LAYA_CKPT_ROOT=$FERRITE_LAYA_DIR/checkpoints/laya-browser
 FERRITE_LAYA_PIDFILE=$FERRITE_LAYA_DIR/serve.pid
 FERRITE_LAYA_LOG=$FERRITE_LAYA_DIR/serve.log
 FERRITE_BUILD_MODE_FILE=$FERRITE_HOME/build.mode
+
+# Cargo profile for the browser: `dev` (default) or `release`. The default is
+# `dev` on purpose: the real-Servo app was verified in that profile (typing,
+# clicks, scrolling and reload against a real page, examples/input_probe.rs);
+# `release` (opt-level 3, thin LTO, codegen-units 1) has not been. Opt in with
+# FERRITE_PROFILE=release. Servo's dependencies are already optimised in `dev`
+# (see [profile.dev.package."*"] in Cargo.toml).
+FERRITE_PROFILE=${FERRITE_PROFILE:-dev}
+case $FERRITE_PROFILE in
+  dev) FERRITE_PROFILE_FLAGS=(); FERRITE_PROFILE_DIR=debug ;;
+  release) FERRITE_PROFILE_FLAGS=(--release); FERRITE_PROFILE_DIR=release ;;
+  *) echo "FERRITE_PROFILE must be dev or release (got: $FERRITE_PROFILE)" >&2; exit 2 ;;
+esac
 FERRITE_LAYA_CKPT_NAME_FILE=$FERRITE_LAYA_DIR/checkpoint.name
 
 FERRITE_LAYA_DEFAULT_HOST=127.0.0.1

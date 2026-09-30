@@ -30,15 +30,16 @@ Options:
   -h, --help              this text
 
 Build choices:
-  default        cargo build --release -p ferrite-shell
+  default        cargo build -p ferrite-shell
                  ~2 min cold (docs/BUILD_BUDGET.md). The Servo-free build has NO
                  real web rendering: use it to try the UI, the agent loop and
                  the defense, not to browse real sites.
-  --with-servo   cargo build --release -p ferrite-shell --features ferrite-servo/servo
+  --with-servo   cargo build -p ferrite-shell --features ferrite-servo/servo
                  First build: plan on 20-60 minutes and 10+ GB of disk in the
                  target dir (docs/BUILD_BUDGET.md measured 15m31s and 6.4 GB for
-                 a DEBUG Servo build added to an existing build; a from-scratch
-                 release build costs more). Needs the gstreamer brew package.
+                 a DEBUG Servo build added to an existing build). Needs the gstreamer
+                 brew package. FERRITE_PROFILE=release builds the release
+                 profile instead; it is slower to build and not yet verified.
 
 What it may write, and where:
   \$FERRITE_HOME     (default <repo>/.ferrite, gitignored): the Laya venv, the
@@ -273,11 +274,11 @@ step_build() {
   fi
   local -a cmd
   if [ "$WITH_SERVO" = 1 ]; then
-    cmd=(cargo build --release -p ferrite-shell --features ferrite-servo/servo)
+    cmd=(cargo build ${FERRITE_PROFILE_FLAGS[@]+"${FERRITE_PROFILE_FLAGS[@]}"} -p ferrite-shell --features ferrite-servo/servo)
     warn "REAL SERVO build: expect 20-60 minutes and 10+ GB the first time (later builds are incremental)."
     info "Ctrl-C is safe: re-running continues where cargo left off."
   else
-    cmd=(cargo build --release -p ferrite-shell)
+    cmd=(cargo build ${FERRITE_PROFILE_FLAGS[@]+"${FERRITE_PROFILE_FLAGS[@]}"} -p ferrite-shell)
     warn "Servo-FREE build: fast (~2 min cold), but it has NO real web rendering."
     info "For real pages re-run with --with-servo (or: just setup-servo)."
   fi
@@ -285,7 +286,7 @@ step_build() {
     if [ "$DRY_RUN" != 1 ]; then
       mkdir -p "$FERRITE_HOME"
       if [ "$WITH_SERVO" = 1 ]; then echo servo > "$FERRITE_BUILD_MODE_FILE"; else echo plain > "$FERRITE_BUILD_MODE_FILE"; fi
-      ok "built: $CARGO_TARGET_DIR/release/ferrite-shell ($(cat "$FERRITE_BUILD_MODE_FILE"))"
+      ok "built: $CARGO_TARGET_DIR/$FERRITE_PROFILE_DIR/ferrite-shell ($(cat "$FERRITE_BUILD_MODE_FILE"))"
     else
       printf '  %swould:%s record the build mode (%s) in %s\n' "$C_YEL" "$C_OFF" \
         "$([ "$WITH_SERVO" = 1 ] && echo servo || echo plain)" "$FERRITE_BUILD_MODE_FILE"

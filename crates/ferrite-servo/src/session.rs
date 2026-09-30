@@ -165,11 +165,10 @@ mod inner {
 
     use rustls::crypto::aws_lc_rs;
     use servo::{
-        Code, DevicePoint, DeviceVector2D, EditingActionEvent, InputEvent, Key, KeyState,
-        KeyboardEvent, Location, Modifiers, MouseButton, MouseButtonAction, MouseButtonEvent,
-        MouseMoveEvent, NamedKey, RenderingContext, Scroll, Servo, ServoBuilder, ServoDelegate,
-        SoftwareRenderingContext, WebViewBuilder, WebViewDelegate, WebViewPoint, WheelDelta,
-        WheelEvent, WheelMode,
+        Code, DevicePoint, EditingActionEvent, InputEvent, Key, KeyState, KeyboardEvent, Location,
+        Modifiers, MouseButton, MouseButtonAction, MouseButtonEvent, MouseMoveEvent, NamedKey,
+        RenderingContext, Servo, ServoBuilder, ServoDelegate, SoftwareRenderingContext,
+        WebViewBuilder, WebViewDelegate, WebViewPoint, WheelDelta, WheelEvent, WheelMode,
     };
     use winit::dpi::PhysicalSize;
 
@@ -930,7 +929,11 @@ mod inner {
 
         /// Send a scroll (wheel) event at pixel coordinates `(x, y)`.
         ///
-        /// `delta_x` and `delta_y` are in CSS pixels; positive `delta_y` scrolls down.
+        /// `delta_x`/`delta_y` follow the OS wheel convention the UI passes through
+        /// unchanged: positive `delta_y` scrolls the page up (content moves down).
+        /// The wheel event alone scrolls the page; an extra legacy `Scroll` call
+        /// used to be sent as well, which made every scroll travel twice as far
+        /// (measured with `examples/input_probe.rs`).
         pub fn send_scroll(&self, x: f32, y: f32, delta_x: f64, delta_y: f64) {
             let point = WebViewPoint::Device(DevicePoint::new(x, y));
             self.webview
@@ -943,11 +946,6 @@ mod inner {
                     },
                     point,
                 )));
-            // Also drive the scroll via the legacy Scroll API so Servo's
-            // compositor can recomposite the page without waiting for a paint.
-            let scroll_vec = DeviceVector2D::new(-delta_x as f32, -delta_y as f32);
-            self.webview
-                .notify_scroll_event(Scroll::Delta(scroll_vec.into()), point);
         }
 
         /// Forwards a key press/release to the page's focused element.

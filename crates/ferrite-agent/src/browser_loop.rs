@@ -723,6 +723,7 @@ HOW TO WORK:
 - Do what the user asked and nothing else. Do not repeat a step that already succeeded; check the latest table first.
 - Prefer fill_form for several fields at once (text fields, a select's label or value, "true"/"false" for checkboxes). Submit with press_key Enter on a field, by clicking the submit button, or with submit_form.
 - select_option accepts the option's visible label or its value. set_checked is safe to repeat: it only clicks when the state differs.
+- To search the web, navigate to https://lite.duckduckgo.com/lite/?q=URL+ENCODED+QUERY. Do not use google.com for searching: this browser's engine cannot render Google's pages (they stay blank). If a page comes back blank or empty, use read_page once; if it is still empty, go to a different site instead of retrying.
 - Tabs are numbered: use the number from list_tabs or from "opened tab N". wait_ms waits at most 10000 ms.
 - When the task is done, use finish with a complete, well-organized answer for the user (Markdown lists are fine; write line breaks as \n inside the JSON string). Include the facts the user asked for; do not just say "done".
 - If a value or choice you genuinely need is missing (a date, an address, which of several options), use ask_user instead of guessing. NEVER invent personal data: names, emails, phone numbers, addresses, card numbers, passwords.
@@ -745,7 +746,7 @@ IMPORTANT:
 /// alongside [`SYSTEM_PROMPT`] — kept as a named constant so both this
 /// module and any external caller reusing the same prompt text pass the
 /// identical version rather than two independently-chosen literals.
-pub const SYSTEM_PROMPT_VERSION: u32 = 2;
+pub const SYSTEM_PROMPT_VERSION: u32 = 3;
 
 /// `options.num_predict` for every agent-loop step (`ModelTier::Main`).
 ///
