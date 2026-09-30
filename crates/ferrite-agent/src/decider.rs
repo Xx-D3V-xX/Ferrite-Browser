@@ -767,7 +767,10 @@ impl LayaStepDecider {
             return Ok(None);
         }
         let started = Instant::now();
-        let response = self.client.systemone(step.request()).await?;
+        let response = self
+            .client
+            .systemone("browser step", step.request())
+            .await?;
         let latency_ms = u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX);
         step.interpret(&response, latency_ms).map(Some)
     }
@@ -819,7 +822,11 @@ impl LayaStepDecider {
             .with_model(config.model.clone())
             .with_budgets(config.max_len, config.head_max_len)
             .with_question("page_dependence", question.clone());
-        let response = self.client.systemone(&request).await.ok()?;
+        let response = self
+            .client
+            .systemone("page relevance", &request)
+            .await
+            .ok()?;
         let answer = response.choice("page_dependence", &question).ok()?;
         if answer.chosen_probability() < f64::from(config.target_gate) {
             return None;
@@ -1119,6 +1126,7 @@ pub async fn generate_field_text(
         "recent_actions": recent,
     });
     let request = CompletionRequest::new(model_tag, tier, vec![Message::user(context.to_string())])
+        .with_label("field text")
         .with_system_prompt(format!("{TEXT_VALUE}{TEXT_VALUE_UNTRUSTED_NOTE}"), 1)
         .with_format_schema(field_text_schema())
         .with_options(SamplingOptions::default().with_num_predict(FIELD_TEXT_NUM_PREDICT));

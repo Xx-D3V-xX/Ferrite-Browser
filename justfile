@@ -111,6 +111,18 @@ build-servo:
 probe-input *ARGS:
     cargo run -p ferrite-servo --features servo --example input_probe -- {{ARGS}}
 
+# Runs the real page script in a headless Servo session and drives a form by
+# `@ref`: digest, type, tick, select, click, scroll. Needs the real Servo build.
+probe-engine:
+    cargo run -p ferrite-engine-servo --features engine-servo --example digest_probe
+
+# Checks that a cookie and localStorage survive a restart: one run sets them,
+# a fresh process reads them back, in a throwaway profile directory.
+probe-profile:
+    rm -rf target/profile-probe
+    FERRITE_HOME={{justfile_directory()}}/target/profile-probe cargo run -p ferrite-servo --features servo --example profile_probe -- set
+    FERRITE_HOME={{justfile_directory()}}/target/profile-probe cargo run -p ferrite-servo --features servo --example profile_probe -- get
+
 # Dependency-bloat report. Requires `cargo install cargo-bloat` (not
 # bundled — it's a diagnostic tool you reach for before adding a
 # dependency, per §7.3, not a gate every run needs).

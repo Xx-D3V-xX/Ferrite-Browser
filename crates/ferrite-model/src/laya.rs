@@ -55,6 +55,7 @@ use thiserror::Error;
 use crate::config::{DEFAULT_MAX_RESPONSE_BYTES, EnvSource};
 use crate::error::ModelError;
 use crate::secret::Token;
+use crate::trace::{self, TraceBackend, TraceEvent};
 
 /// `FERRITE_LAYA_URL` — enables Laya when set.
 pub const LAYA_URL_VAR: &str = "FERRITE_LAYA_URL";
@@ -782,7 +783,9 @@ impl LayaClient {
         }
     }
 
-    /// Sends one `POST /v1/systemone`.
+    /// Sends one `POST /v1/systemone`. `stage` names what the call is for in
+    /// the [activity trace](crate::trace), which records the request, the
+    /// raw answer and the round-trip time of every call.
     ///
     /// No retries except a single immediate retry of a *connection* error
     /// (latency is the point; a timeout or an HTTP error is never retried).
@@ -793,7 +796,41 @@ impl LayaClient {
     /// [`LayaError::Timeout`], [`LayaError::Connect`], [`LayaError::Http`],
     /// or [`LayaError::InvalidResponse`] (unparsable or over
     /// [`DEFAULT_MAX_RESPONSE_BYTES`]) afterwards.
-    pub async fn systemone(&self, req: &SystemOneRequest) -> Result<SystemOneResponse, LayaError> {
+    pub async fn systemone(
+        &self,
+        stage: &str,
+        req: &SystemOneRequest,
+    ) -> Result<SystemOneResponse, LayaError> {
+        let started = std::time::Instant::now();
+        let result = self.systemone_raw(req).await;
+        let mut event = TraceEvent::new(
+            TraceBackend::Laya,
+            stage,
+            self.config.model.clone().unwrap_or_default(),
+        );
+        event.latency_ms = u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX);
+        event.request = serde_json::to_string(req).unwrap_or_default();
+        match &result {
+            Ok((response, raw)) => {
+                event.response = String::from_utf8_lossy(raw).into_owned();
+                if !response.model.is_empty() {
+                    event.model.clone_from(&response.model);
+                }
+            }
+            Err(e) => {
+                event.ok = false;
+                event.response = e.to_string();
+                event.note = "Laya call failed".to_string();
+            }
+        }
+        trace::global().record(event);
+        result.map(|(response, _)| response)
+    }
+
+    async fn systemone_raw(
+        &self,
+        req: &SystemOneRequest,
+    ) -> Result<(SystemOneResponse, Vec<u8>), LayaError> {
         req.validate()?;
         let body = serde_json::to_vec(req)
             .map_err(|e| LayaError::InvalidRequest(format!("request does not serialize: {e}")))?;
@@ -839,7 +876,7 @@ impl LayaClient {
                 Err(e) => return Err(self.transport_error(e)),
             }
         }
-        SystemOneResponse::from_slice(&bytes)
+        SystemOneResponse::from_slice(&bytes).map(|response| (response, bytes))
     }
 
     fn transport_error(&self, e: reqwest::Error) -> LayaError {
@@ -1301,7 +1338,7 @@ mod tests {
         let server = serve(200, ok_body(), Duration::ZERO).await;
         let client = LayaClient::new(LayaConfig::new(&server.base_url));
         let req = one_question_request();
-        let resp = client.systemone(&req).await.expect("answers");
+        let resp = client.systemone("test", &req).await.expect("answers");
         assert_eq!(resp.model, "typed-decisions");
         let a = resp
             .choice("q", req.question("q").expect("q"))
@@ -1325,7 +1362,7 @@ mod tests {
             let client = LayaClient::new(LayaConfig::new(&server.base_url));
             assert_eq!(
                 client
-                    .systemone(&one_question_request())
+                    .systemone("test", &one_question_request())
                     .await
                     .expect_err("http"),
                 LayaError::Http(status)
@@ -1343,7 +1380,7 @@ mod tests {
         let server = serve(200, "<html>oops</html>".to_string(), Duration::ZERO).await;
         let client = LayaClient::new(LayaConfig::new(&server.base_url));
         assert!(matches!(
-            client.systemone(&one_question_request()).await,
+            client.systemone("test", &one_question_request()).await,
             Err(LayaError::InvalidResponse(_))
         ));
     }
@@ -1362,7 +1399,10 @@ mod tests {
             let server = serve(200, body, Duration::ZERO).await;
             let client = LayaClient::new(LayaConfig::new(&server.base_url));
             let req = one_question_request();
-            let resp = client.systemone(&req).await.expect("transport is fine");
+            let resp = client
+                .systemone("test", &req)
+                .await
+                .expect("transport is fine");
             assert!(matches!(
                 resp.choice("q", req.question("q").expect("q")),
                 Err(LayaError::InvalidResponse(_))
@@ -1376,7 +1416,7 @@ mod tests {
         let server = serve(200, big, Duration::ZERO).await;
         let client = LayaClient::new(LayaConfig::new(&server.base_url));
         assert!(matches!(
-            client.systemone(&one_question_request()).await,
+            client.systemone("test", &one_question_request()).await,
             Err(LayaError::InvalidResponse(m)) if m.contains("exceeded")
         ));
     }
@@ -1389,7 +1429,7 @@ mod tests {
         let client = LayaClient::new(config);
         assert_eq!(
             client
-                .systemone(&one_question_request())
+                .systemone("test", &one_question_request())
                 .await
                 .expect_err("slow"),
             LayaError::Timeout(Duration::from_millis(100))
@@ -1405,7 +1445,7 @@ mod tests {
         };
         let client = LayaClient::new(LayaConfig::new(closed));
         assert!(matches!(
-            client.systemone(&one_question_request()).await,
+            client.systemone("test", &one_question_request()).await,
             Err(LayaError::Connect(_))
         ));
         assert!(!client.health().await);
@@ -1436,7 +1476,7 @@ mod tests {
         let mut config = LayaConfig::new(&with.base_url);
         config.api_key = Some(Token::new(KEY));
         LayaClient::new(config)
-            .systemone(&one_question_request())
+            .systemone("test", &one_question_request())
             .await
             .expect("ok");
         let sent = with.requests.lock().expect("log")[0].to_ascii_lowercase();
@@ -1450,7 +1490,7 @@ mod tests {
 
         let without = serve(200, ok_body(), Duration::ZERO).await;
         LayaClient::new(LayaConfig::new(&without.base_url))
-            .systemone(&one_question_request())
+            .systemone("test", &one_question_request())
             .await
             .expect("ok");
         let sent = without.requests.lock().expect("log")[0].to_ascii_lowercase();
@@ -1470,7 +1510,7 @@ mod tests {
         let server = serve(200, ok_body(), Duration::ZERO).await;
         let client = LayaClient::new(LayaConfig::new(&server.base_url));
         assert!(matches!(
-            client.systemone(&SystemOneRequest::new("s")).await,
+            client.systemone("test", &SystemOneRequest::new("s")).await,
             Err(LayaError::InvalidRequest(_))
         ));
         assert!(server.requests.lock().expect("log").is_empty());

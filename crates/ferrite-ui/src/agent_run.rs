@@ -35,6 +35,7 @@ use ferrite_agent::context::{
 };
 use ferrite_agent::decider::{
     generate_field_text, plan_fast_lane, FastAction, FastLane, HistoryItem, LayaStepDecider,
+    StepDecision,
 };
 use ferrite_engine::{sanitize_text, truncate_chars, PageDigest};
 use ferrite_ipi::IpiTask;
@@ -405,16 +406,28 @@ pub(crate) async fn try_fast_lane(inputs: &FastLaneInputs) -> Option<(FastAction
         Ok(Some(decision)) => decision,
         Ok(None) | Err(_) => return None,
     };
-    let fast = match plan_fast_lane(
+    let lane = plan_fast_lane(
         &decision,
         inputs.decider.config(),
         &inputs.digest,
         inputs.previous.as_ref(),
-    ) {
-        FastLane::Act(action) => action,
-        FastLane::Fallback(_) => return None,
+    );
+    let fast = match lane {
+        FastLane::Act(action) => {
+            record_verdict(inputs, &decision, &format!("accepted: {action:?}"));
+            action
+        }
+        FastLane::Fallback(reason) => {
+            record_verdict(
+                inputs,
+                &decision,
+                &format!("fell back to the LLM: {reason}"),
+            );
+            return None;
+        }
         FastLane::NeedsText { target_ref } => {
             let field = inputs.digest.element(target_ref)?;
+            let started = std::time::Instant::now();
             let text = tokio::time::timeout(
                 FIELD_TEXT_TIMEOUT,
                 generate_field_text(
@@ -428,13 +441,65 @@ pub(crate) async fn try_fast_lane(inputs: &FastLaneInputs) -> Option<(FastAction
                 ),
             )
             .await
-            .ok()?
-            .ok()??;
-            FastAction::TypeText { target_ref, text }
+            .ok()
+            .and_then(Result::ok)
+            .flatten();
+            let waited = started.elapsed().as_millis();
+            match text {
+                Some(text) => {
+                    record_verdict(
+                        inputs,
+                        &decision,
+                        &format!(
+                            "accepted: type into @{target_ref} (text from the small model, {waited} ms)"
+                        ),
+                    );
+                    FastAction::TypeText { target_ref, text }
+                }
+                None => {
+                    record_verdict(
+                        inputs,
+                        &decision,
+                        &format!("fell back to the LLM: no text for @{target_ref} ({waited} ms)"),
+                    );
+                    return None;
+                }
+            }
         }
     };
     let history = fast.history_item(&inputs.digest);
     Some((fast, history))
+}
+
+/// Records what Laya decided and what the gates did with it, in the activity
+/// trace. The Laya round trip itself is already recorded by the client; this
+/// is the verdict on top of it, which is what tells "Laya answered" apart from
+/// "Laya's answer was used".
+fn record_verdict(inputs: &FastLaneInputs, decision: &StepDecision, verdict: &str) {
+    let mut event = ferrite_model::trace::TraceEvent::new(
+        ferrite_model::trace::TraceBackend::Laya,
+        "fast-lane verdict",
+        "",
+    );
+    event.latency_ms = decision.latency_ms;
+    event.request = format!(
+        "goal: {}\nelements offered: {}",
+        truncate_chars(&inputs.goal, 300),
+        inputs.digest.elements.len()
+    );
+    event.response = format!(
+        "{:?}, operation confidence {:.2}{}",
+        decision.operation,
+        decision.op_probability,
+        decision
+            .target_probability
+            .map_or(String::new(), |p| format!(
+                ", target @{} confidence {p:.2}",
+                decision.target_ref.unwrap_or_default()
+            ))
+    );
+    event.note = verdict.to_string();
+    ferrite_model::trace::global().record(event);
 }
 
 /// Resolves the optional Laya decider from the environment, returning it (if

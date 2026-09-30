@@ -309,3 +309,53 @@ poisoned page shape every future run in the chat.
 follow-ups such as "do the same for the second one" predict a looser
 fingerprint and may raise more consent prompts. That is the fail-safe
 direction and is accepted.
+
+## ADR-011 — A separate model-activity trace, not the hash-chained audit log
+
+**Date:** 2026-09-30. **Status:** live (`ferrite_model::trace`, the Audit panel's "Model calls" view).
+
+The owner needs to see exactly what was sent to the LLM and to Laya, what came
+back, and how long each took, to judge whether Laya is worth having. That is
+a different record from the hash-chained audit log, which exists so the
+*containment decision* is verifiable (capability granted/denied/exercised).
+
+- **Where it is written.** One process-wide `TraceLog` (bounded ring of 500
+  events, plus a JSON-lines file at `$FERRITE_HOME/logs/model-activity.jsonl`,
+  rotated at 20 MB). LLM calls are recorded by the `Trace` provider decorator
+  (outermost, so it sees what the caller waited for, cache hits included);
+  every Laya request is recorded inside `LayaClient::systemone`; the UI adds
+  the agent's own events (run start/finish, each executed action with its
+  result and timing, consent requested/decided) and the Laya fast-lane
+  *verdict* (accepted, or which gate sent it back to the LLM).
+- **Why not the audit chain.** Prompts and page text are large, free-form and
+  private, and do not fit the chain's fixed fields; putting them there would
+  also make a log meant to be verifiable and shareable carry page content. The
+  trace is explicitly local and every text field is cut to 6 000 characters.
+- **Not in the security path.** Recording is best-effort (a write failure is
+  ignored) and never influences a decision, admission or fingerprint. Nothing
+  reads the trace back except the UI.
+- **Labels.** `CompletionRequest::label` names a call's purpose (`agent step`,
+  `fingerprint`, `field text`); it is not sent to any backend and not part of
+  the cache key.
+- **The "is Laya faster" answer** is computed from the events held
+  (`activity::laya_effect_summary`): Laya round-trip mean vs LLM agent-step
+  mean, times the number of steps whose Laya answer was actually used. It
+  reports "no time saved" rather than a negative number when Laya is slower.
+
+## ADR-012 — The browser profile persists under the data directory
+
+**Date:** 2026-09-30. **Status:** live; Google sign-in specifically **unverified**.
+
+`ServoBuilder` now gets `Opts::config_dir = $FERRITE_HOME/profile` (default
+`~/.local/share/ferrite/profile`), so cookies, HSTS, cached HTTP credentials and
+web storage survive a restart, and `dom_indexeddb_enabled` /
+`dom_cookiestore_enabled` are on. Servo writes the cookie jar only when it
+shuts down cleanly, so closing the window now drops every session and calls
+`ferrite_servo::session::shutdown_engine()` before exiting; a crash, `kill`
+or macOS Cmd+Q that bypasses the window close loses that run's new cookies.
+Verified with `ferrite-servo/examples/profile_probe.rs` (a cookie set by a
+response and a `localStorage` value both visible to a fresh process) and by
+closing the real window. Whether a given site's login works is a different
+question: Google in particular may refuse an embedded engine or a user-agent
+that names Servo (`FERRITE_USER_AGENT` overrides it), and needs web-platform
+features this Servo version may lack.

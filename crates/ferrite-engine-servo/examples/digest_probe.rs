@@ -75,6 +75,8 @@ fn find<'a>(elements: &'a [DigestElement], role: &str, label: &str) -> Option<&'
         .find(|e| e.role == role && e.label.to_lowercase().contains(&label.to_lowercase()))
 }
 
+// Sessions only implement `Drop` (and so hold the engine) with the `servo` feature.
+#[allow(clippy::drop_non_drop)]
 fn main() {
     let mut session = match HeadlessServoSession::new(W, H) {
         Ok(s) => s,
@@ -109,11 +111,18 @@ fn main() {
             std::process::exit(1);
         }
     };
-    println!("--- digest ---\n{}\n--------------", digest.render(RenderBudget::default()));
+    println!(
+        "--- digest ---\n{}\n--------------",
+        digest.render(RenderBudget::default())
+    );
     ok &= check(
         "digest",
         digest.title == "Checkout" && digest.elements.len() >= 7,
-        &format!("title {:?}, {} elements", digest.title, digest.elements.len()),
+        &format!(
+            "title {:?}, {} elements",
+            digest.title,
+            digest.elements.len()
+        ),
     );
     let pw = digest.elements.iter().find(|e| e.sensitive);
     ok &= check(
@@ -177,5 +186,8 @@ fn main() {
         &format!("{} link(s)", links.len()),
     );
 
+    drop(engine);
+    drop(session);
+    ferrite_servo::session::shutdown_engine();
     std::process::exit(if ok { 0 } else { 1 });
 }

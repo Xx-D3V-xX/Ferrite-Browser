@@ -155,8 +155,42 @@ impl PageKeyEvent {
     }
 }
 
+/// Where Ferrite keeps its data: `$FERRITE_HOME`, else `~/.local/share/ferrite`
+/// (`None` when neither can be resolved).
+fn data_dir() -> Option<std::path::PathBuf> {
+    match std::env::var_os("FERRITE_HOME").filter(|h| !h.is_empty()) {
+        Some(home) => Some(std::path::PathBuf::from(home)),
+        None => std::env::var_os("HOME")
+            .filter(|h| !h.is_empty())
+            .map(|home| {
+                std::path::PathBuf::from(home)
+                    .join(".local")
+                    .join("share")
+                    .join("ferrite")
+            }),
+    }
+}
+
+/// The browser profile directory: cookies, HSTS and cached HTTP credentials
+/// (written by Servo when it shuts down cleanly) and web storage live here, so
+/// a login survives a restart. `None` runs with an in-memory profile.
+#[must_use]
+pub fn profile_dir() -> Option<std::path::PathBuf> {
+    data_dir().map(|dir| dir.join("profile"))
+}
+
+/// The hash-chained network audit log every tab writes to (`$FERRITE_HOME/
+/// audit/network.db`; the temp directory when no data directory resolves).
+#[must_use]
+pub fn audit_db_path() -> std::path::PathBuf {
+    data_dir()
+        .unwrap_or_else(std::env::temp_dir)
+        .join("audit")
+        .join("network.db")
+}
+
 #[cfg(feature = "servo")]
-pub use inner::HeadlessServoSession;
+pub use inner::{shutdown_engine, HeadlessServoSession};
 
 #[cfg(feature = "servo")]
 mod inner {
@@ -271,6 +305,42 @@ mod inner {
         static SERVO_ENGINE: RefCell<Option<Servo>> = const { RefCell::new(None) };
     }
 
+    thread_local! {
+        static AUDIT_LOG: RefCell<Option<Rc<RefCell<PersistentAuditLog>>>> =
+            const { RefCell::new(None) };
+    }
+
+    /// The one audit log every tab appends to. Tabs used to open (and delete)
+    /// their own file each, so each tab's chain overwrote the last and nothing
+    /// could read them back; one chain per process, at [`super::audit_db_path`],
+    /// starts fresh on each launch.
+    fn shared_audit_log() -> Result<Rc<RefCell<PersistentAuditLog>>, String> {
+        AUDIT_LOG.with(|cell| {
+            let mut slot = cell.borrow_mut();
+            if let Some(log) = slot.as_ref() {
+                return Ok(log.clone());
+            }
+            let path = super::audit_db_path();
+            if let Some(parent) = path.parent() {
+                let _ = std::fs::create_dir_all(parent);
+            }
+            let _ = std::fs::remove_file(&path);
+            let log =
+                PersistentAuditLog::new(&path.to_string_lossy()).map_err(|e| e.to_string())?;
+            let log = Rc::new(RefCell::new(log));
+            *slot = Some(log.clone());
+            Ok(log)
+        })
+    }
+
+    /// Shuts the process-wide engine down cleanly, which is what makes Servo
+    /// write the profile (cookies, HSTS, credentials) to disk. Every
+    /// [`HeadlessServoSession`] must have been dropped first: each holds a
+    /// handle to the engine, and shutdown happens when the last one goes.
+    pub fn shutdown_engine() {
+        SERVO_ENGINE.with(|cell| drop(cell.borrow_mut().take()));
+    }
+
     /// Return (or lazily create) the process-wide `Servo` engine.
     ///
     /// The first call builds the engine; every subsequent call clones the `Rc`
@@ -279,7 +349,38 @@ mod inner {
         SERVO_ENGINE.with(|cell| {
             let mut guard = cell.borrow_mut();
             if guard.is_none() {
-                *guard = Some(ServoBuilder::default().build());
+                let mut opts = servo::Opts::default();
+                if let Some(dir) = super::profile_dir() {
+                    match std::fs::create_dir_all(&dir) {
+                        Ok(()) => opts.config_dir = Some(dir),
+                        Err(e) => eprintln!(
+                            "[ferrite-session] cannot create the profile directory {dir:?}: {e}; \
+                             logins will not survive a restart"
+                        ),
+                    }
+                }
+                // Sites that keep a login in IndexedDB or the async cookie API
+                // (Google's sign-in among them) need both.
+                let mut prefs = servo::Preferences {
+                    dom_indexeddb_enabled: true,
+                    dom_cookiestore_enabled: true,
+                    ..servo::Preferences::default()
+                };
+                // Some sites (Google's sign-in among them) decide whether a
+                // browser is acceptable from its user-agent string. Servo's own
+                // default names Servo; set FERRITE_USER_AGENT to present another.
+                if let Some(ua) = std::env::var("FERRITE_USER_AGENT")
+                    .ok()
+                    .filter(|ua| !ua.trim().is_empty())
+                {
+                    prefs.user_agent = ua;
+                }
+                *guard = Some(
+                    ServoBuilder::default()
+                        .opts(opts)
+                        .preferences(prefs)
+                        .build(),
+                );
             }
             guard.as_ref().unwrap().clone()
         })
@@ -541,14 +642,7 @@ mod inner {
             let _ = aws_lc_rs::default_provider().install_default();
 
             // ── Audit log ──────────────────────────────────────────────────
-            let db_path = std::env::temp_dir()
-                .join("ferrite_servo_session.db")
-                .to_string_lossy()
-                .into_owned();
-            let _ = std::fs::remove_file(&db_path);
-            let audit_log = PersistentAuditLog::new(&db_path).map_err(|e| e.to_string())?;
-
-            let audit_log = Rc::new(std::cell::RefCell::new(audit_log));
+            let audit_log = shared_audit_log()?;
 
             // ── Shared delegate ↔ session state ────────────────────────────
             let shared_load_status = Rc::new(std::cell::RefCell::new(LoadStatus::Loading));
@@ -593,6 +687,19 @@ mod inner {
 
             webview.resize(PhysicalSize { width, height });
             servo.spin_event_loop();
+            // Let the tab's initial about:blank finish loading before handing
+            // the session out: a `navigate` issued while it is still in flight
+            // is lost to it (the tab stays blank), which is what a tab opened
+            // and immediately pointed somewhere — by the agent's `open_tab`,
+            // say — would hit.
+            let settle_deadline =
+                std::time::Instant::now() + std::time::Duration::from_millis(1500);
+            while *shared_load_status.borrow() != LoadStatus::Complete
+                && std::time::Instant::now() < settle_deadline
+            {
+                servo.spin_event_loop();
+                std::thread::sleep(std::time::Duration::from_millis(5));
+            }
 
             Ok(Self {
                 servo,
@@ -712,6 +819,14 @@ mod inner {
         ///
         /// Call this on **every** session after one `pump_engine()` call.
         pub fn sync_and_read(&mut self) {
+            self.sync_state();
+            self.read_frame();
+        }
+
+        /// Sync per-tab state from delegate callbacks without reading pixels —
+        /// what a background tab needs each tick (title, URL, load status),
+        /// without the cost of copying a full frame nobody is looking at.
+        pub fn sync_state(&mut self) {
             // Sync load status, URL, and page title from delegate callbacks.
             self.last_load_status = self.shared_load_status.borrow().clone();
             self.current_url = self.shared_url.borrow().clone();
@@ -722,7 +837,15 @@ mod inner {
             // empty history in a real Servo build (found by the first real
             // `--features servo` compile, as a dead-code warning on this field).
             self.last_history = self.shared_history.borrow().clone();
+        }
 
+        /// The render-surface size this session was last asked to have,
+        /// `(width, height)` in physical pixels.
+        pub fn size(&self) -> (u32, u32) {
+            (self.width, self.height)
+        }
+
+        fn read_frame(&mut self) {
             // Read back the current frame after paint.
             //
             // `pump_engine()` may have called `make_current()` on another
@@ -901,6 +1024,20 @@ mod inner {
             self.width = width;
             self.height = height;
             self.webview.resize(PhysicalSize { width, height });
+        }
+
+        /// Marks this tab as the one the user is looking at (`true`) or as a
+        /// background tab (`false`). Servo routes keyboard input to the focused
+        /// WebView and hit-tests pointer input only against shown WebViews, so a
+        /// tab that was never focused/shown does not react to input.
+        pub fn set_active(&self, active: bool) {
+            if active {
+                self.webview.show();
+                self.webview.focus();
+            } else {
+                self.webview.blur();
+                self.webview.hide();
+            }
         }
 
         /// Send a mouse-move event to the WebView at pixel coordinates `(x, y)`.
@@ -1099,6 +1236,10 @@ mod inner {
 }
 
 // Stub for non-servo builds so the type name is always resolvable.
+/// Without the `servo` feature there is no engine to shut down.
+#[cfg(not(feature = "servo"))]
+pub fn shutdown_engine() {}
+
 #[cfg(not(feature = "servo"))]
 pub struct HeadlessServoSession;
 
@@ -1121,6 +1262,12 @@ impl HeadlessServoSession {
     pub fn pump_engine(&self) {}
 
     pub fn sync_and_read(&mut self) {}
+
+    pub fn sync_state(&mut self) {}
+
+    pub fn size(&self) -> (u32, u32) {
+        (0, 0)
+    }
 
     pub fn spin(&mut self) {}
 
@@ -1177,6 +1324,7 @@ impl HeadlessServoSession {
     }
 
     pub fn send_key(&self, _event: &PageKeyEvent) {}
+    pub fn set_active(&self, _active: bool) {}
     pub fn send_mouse_move(&self, _x: f32, _y: f32) {}
     pub fn send_right_click(&self, _x: f32, _y: f32) {}
     pub fn send_scroll(&self, _x: f32, _y: f32, _dx: f64, _dy: f64) {}

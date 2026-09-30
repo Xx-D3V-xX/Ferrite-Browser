@@ -212,10 +212,13 @@ use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
+mod activity;
+mod activity_panel;
 mod agent_panel;
 mod agent_run;
 mod icons;
 mod page_input;
+use activity_panel::AuditTab;
 use icons::{icon, Icon};
 
 use ferrite_agent::browser_loop::{
@@ -387,7 +390,10 @@ fn try_real_model_provider() -> Option<(Arc<dyn ModelProvider>, ferrite_model::M
         &ferrite_model::SystemEnv,
         &ferrite_model::OsKeyring,
     ) {
-        let provider: Arc<dyn ModelProvider> = ollama;
+        let provider: Arc<dyn ModelProvider> = Arc::new(ferrite_model::Trace::new(
+            ollama,
+            ferrite_model::trace::global(),
+        ));
         return Some((provider, config));
     }
 
@@ -397,7 +403,10 @@ fn try_real_model_provider() -> Option<(Arc<dyn ModelProvider>, ferrite_model::M
         &ferrite_model::SystemEnv,
         &ferrite_model::OsKeyring,
     ) {
-        let provider: Arc<dyn ModelProvider> = Arc::new(gemini);
+        let provider: Arc<dyn ModelProvider> = Arc::new(ferrite_model::Trace::new(
+            gemini,
+            ferrite_model::trace::global(),
+        ));
         return Some((provider, config));
     }
 
@@ -1244,9 +1253,18 @@ pub struct FerriteBrowser {
     pub tabs: Vec<String>,
     pub active_tab: usize,
     pub address_bar_input: String,
+    /// Whether the user has typed into the address bar since it last showed
+    /// the page's own address (decides whether a click selects it all).
+    pub address_bar_edited: bool,
     /// Committed (navigated-to) URL per tab.
     pub tab_urls: Vec<String>,
     pub show_audit_panel: bool,
+    /// Which view of the Audit panel is showing.
+    pub audit_tab: AuditTab,
+    /// The model-activity trace as of the last refresh (see `activity_panel`).
+    pub trace_events: Vec<ferrite_model::trace::TraceEvent>,
+    /// The trace event whose request/response is expanded, by sequence number.
+    pub trace_expanded: Option<u64>,
     pub show_js_console: bool,
     pub audit_entries: Vec<AuditEntry>,
     pub servo_sessions: HashMap<usize, HeadlessServoSession>,
@@ -1632,8 +1650,12 @@ impl Default for FerriteBrowser {
             tabs: vec!["New Tab".to_string()],
             active_tab: 0,
             address_bar_input: String::new(),
+            address_bar_edited: false,
             tab_urls: vec!["about:blank".to_string()],
             show_audit_panel: false,
+            audit_tab: AuditTab::default(),
+            trace_events: Vec::new(),
+            trace_expanded: None,
             show_js_console: false,
             audit_entries: vec![],
             servo_sessions: HashMap::new(),
@@ -1724,6 +1746,17 @@ pub enum FerriteBrowserMessage {
     ToggleAuditPanel,
     ToggleJsConsole,
     RefreshAuditLog,
+    /// Switches the Audit panel between its two views.
+    SetAuditTab(AuditTab),
+    /// Copies the model-activity trace into the UI (sent every second while
+    /// the Audit panel is open).
+    RefreshTrace,
+    /// Expands or collapses one trace event.
+    ToggleTraceEvent(u64),
+    /// Empties the in-memory trace.
+    ClearTrace,
+    /// The window's close button was pressed.
+    WindowCloseRequested,
     ServoReady,
     ServoFrame,
     GoBack,
@@ -1737,6 +1770,8 @@ pub enum FerriteBrowserMessage {
     },
     FocusAddressBar,
     ClearAddressBarFocus,
+    /// A click landed on the address bar.
+    AddressBarPressed,
     CloseActiveTab,
     EscapePressed,
     NewTabSearchChanged(String),
@@ -1971,10 +2006,12 @@ pub fn update(
             select_tab_at(state, i);
         }
         FerriteBrowserMessage::AddressBarChanged(s) => {
+            state.address_bar_edited = true;
             state.address_bar_input = s;
         }
         FerriteBrowserMessage::NavigateRequested(raw) => {
             let url = resolve_url(&raw);
+            state.address_bar_edited = false;
             state.address_bar_input = url.clone();
             state.tab_urls[state.active_tab] = url.clone();
             if state.active_tab < state.tab_error.len() {
@@ -2021,8 +2058,12 @@ pub fn update(
                 if tab < state.tab_error.len() {
                     state.tab_error[tab] = None;
                 }
-                if !url.is_empty() && url != state.address_bar_input {
-                    state.address_bar_input = url.clone();
+                if !url.is_empty() && tab == state.active_tab {
+                    let shown = address_bar_text(&url);
+                    if shown != state.address_bar_input {
+                        state.address_bar_input = shown;
+                        state.address_bar_edited = false;
+                    }
                 }
                 // C3d: record this visit before `tab_urls[tab]` is
                 // overwritten below — `status == "complete"` only (not
@@ -2062,6 +2103,7 @@ pub fn update(
             if state.show_audit_panel {
                 state.show_js_console = false;
                 state.show_library_panel = false;
+                refresh_audit_views(state);
             }
         }
         FerriteBrowserMessage::ToggleJsConsole => {
@@ -2071,25 +2113,49 @@ pub fn update(
                 state.show_library_panel = false;
             }
         }
+        FerriteBrowserMessage::SetAuditTab(tab) => {
+            state.audit_tab = tab;
+            refresh_audit_views(state);
+        }
+        FerriteBrowserMessage::RefreshTrace => {
+            refresh_audit_views(state);
+        }
+        FerriteBrowserMessage::ToggleTraceEvent(seq) => {
+            state.trace_expanded = (state.trace_expanded != Some(seq)).then_some(seq);
+        }
+        FerriteBrowserMessage::WindowCloseRequested => {
+            // Every session holds a handle to the engine; Servo writes the
+            // profile (cookies, HSTS, credentials) when the last one goes.
+            state.servo_sessions.clear();
+            ferrite_servo::session::shutdown_engine();
+            return iced::exit();
+        }
+        FerriteBrowserMessage::ClearTrace => {
+            ferrite_model::trace::global().clear();
+            state.trace_events.clear();
+            state.trace_expanded = None;
+        }
         FerriteBrowserMessage::RefreshAuditLog => {
-            let db_path = std::env::temp_dir()
-                .join("ferrite_sandbox.db")
-                .to_string_lossy()
-                .into_owned();
-            state.audit_entries = match PersistentAuditLog::load(&db_path) {
-                Ok(log) => log.log.entries,
-                Err(e) => {
-                    eprintln!("[ferrite-ui] audit log load: {}", e);
-                    vec![]
-                }
-            };
+            load_security_log(state);
         }
         FerriteBrowserMessage::NewTabSearchChanged(s) => {
             state.new_tab_search_input = s;
         }
         FerriteBrowserMessage::FocusAddressBar => {
             state.address_bar_focused = true;
-            return text_input::focus(text_input::Id::new(ADDRESS_BAR_ID));
+            // In order: focusing moves the caret to the end, selecting all
+            // must come after it.
+            return text_input::focus(text_input::Id::new(ADDRESS_BAR_ID))
+                .chain(text_input::select_all(text_input::Id::new(ADDRESS_BAR_ID)));
+        }
+        FerriteBrowserMessage::AddressBarPressed => {
+            // A click into an address the user has not edited selects the
+            // whole of it, as in every other browser; once they are typing,
+            // clicks place the caret as usual.
+            state.address_bar_focused = true;
+            if !state.address_bar_edited {
+                return text_input::select_all(text_input::Id::new(ADDRESS_BAR_ID));
+            }
         }
         FerriteBrowserMessage::ClearAddressBarFocus => {
             state.address_bar_focused = false;
@@ -2308,6 +2374,14 @@ pub fn update(
             expected,
             evidence,
         } => {
+            activity::record(
+                "consent requested",
+                "",
+                &format!("{diff:?}"),
+                true,
+                "the agent's plan deviates from the predicted behaviour",
+                0,
+            );
             state.pending_diff = Some(diff);
             state.pending_expected = Some(expected);
             state.pending_evidence = Some(*evidence);
@@ -2340,6 +2414,14 @@ pub fn update(
                 return Task::none();
             }
 
+            activity::record(
+                "consent decision",
+                "",
+                &format!("{} rejected item(s)", state.pending_decision.rejected.len()),
+                true,
+                "user chose Proceed",
+                0,
+            );
             let all_rejected = state.pending_decision.rejected.clone();
             let rejected_origins: std::collections::HashSet<String> = all_rejected
                 .iter()
@@ -2369,6 +2451,14 @@ pub fn update(
             return start_live_loop(state, run_id, prompt, rejected, rejected_origins);
         }
         FerriteBrowserMessage::ConsentCancelled => {
+            activity::record(
+                "consent decision",
+                "",
+                "cancelled",
+                true,
+                "user cancelled the run",
+                0,
+            );
             // Same clearing as ConsentSubmitted — cancelling must leave no
             // trace of this task's pending decision behind either.
             state.pending_diff = None;
@@ -2450,8 +2540,14 @@ pub fn update(
             if state.resize_settle_ticks > 0 {
                 state.resize_settle_ticks -= 1;
             } else {
-                for session in state.servo_sessions.values_mut() {
-                    session.sync_and_read();
+                let active_tab = state.active_tab;
+                for (index, session) in state.servo_sessions.iter_mut() {
+                    if *index == active_tab {
+                        session.sync_and_read();
+                    } else {
+                        // A background tab's pixels are never shown.
+                        session.sync_state();
+                    }
                 }
             }
             let active = state.active_tab;
@@ -2759,6 +2855,7 @@ fn animate_item(state: &mut FerriteBrowser, slot: u32) {
 /// A no-op on the chat when no turn is running (finishing twice cannot
 /// overwrite a real outcome — `Chat::finish_turn`'s own rule).
 fn conclude_run(state: &mut FerriteBrowser, outcome: Outcome) -> Task<FerriteBrowserMessage> {
+    activity::record("run finished", "", &format!("{outcome:?}"), true, "", 0);
     if let Some(text) = agent_run::outcome_mirror_text(&outcome) {
         state.agent_response = Some(text);
     }
@@ -2946,6 +3043,14 @@ fn submit_task(state: &mut FerriteBrowser) -> Task<FerriteBrowserMessage> {
     state.agent_is_running = true;
     state.run_id += 1;
     let run_id = state.run_id;
+    activity::record(
+        "run started",
+        &prompt,
+        &format!("page context mode: {:?}", state.context_mode),
+        true,
+        "",
+        0,
+    );
 
     let context_url = state.tab_urls.get(state.active_tab).cloned();
     // SECURITY — do not feed the seed to the defense. The injection defense's
@@ -3146,6 +3251,7 @@ fn handle_agent_step(
     }
 
     let blocked = is_action_rejected(&action, &live.rejected, &live.rejected_origins);
+    let exec_started = std::time::Instant::now();
     let observation = if blocked {
         "blocked by user consent".to_string()
     } else if agent_run::is_tab_action(&action) {
@@ -3161,6 +3267,20 @@ fn handle_agent_step(
     };
 
     let is_fast = fast.is_some();
+    activity::record(
+        "action",
+        &serde_json::to_string(&action).unwrap_or_default(),
+        &observation,
+        !blocked && !observation.starts_with("error"),
+        if blocked {
+            "blocked by user consent"
+        } else if is_fast {
+            "chosen by Laya"
+        } else {
+            "chosen by the LLM"
+        },
+        u64::try_from(exec_started.elapsed().as_millis()).unwrap_or(u64::MAX),
+    );
     state.agent_log.push(AgentLogEntry::Step {
         icon: icon_for_action(&action),
         label: action_label(&action),
@@ -3216,6 +3336,31 @@ fn handle_agent_step(
         spawn_next_step(state, run_id, live),
         scroll_to_latest(state),
     ])
+}
+
+/// Loads the hash-chained network log every tab writes to. A missing file is
+/// simply an empty log (nothing has been fetched yet).
+fn load_security_log(state: &mut FerriteBrowser) {
+    let path = ferrite_servo::session::audit_db_path();
+    if !path.exists() {
+        state.audit_entries.clear();
+        return;
+    }
+    state.audit_entries = match PersistentAuditLog::load(&path.to_string_lossy()) {
+        Ok(log) => log.log.entries,
+        Err(e) => {
+            eprintln!("[ferrite-ui] audit log load: {}", e);
+            vec![]
+        }
+    };
+}
+
+/// Brings whichever Audit-panel view is showing up to date.
+fn refresh_audit_views(state: &mut FerriteBrowser) {
+    match state.audit_tab {
+        AuditTab::Models => state.trace_events = ferrite_model::trace::global().snapshot(),
+        AuditTab::Security => load_security_log(state),
+    }
 }
 
 /// Saves `state.bookmarks` to `state.bookmarks_path` if one is set (real
@@ -3326,6 +3471,17 @@ fn sync_nav_state(state: &mut FerriteBrowser) {
 // are kept in step in exactly one place).
 // ---------------------------------------------------------------------------
 
+/// What the address bar shows for a tab at `url`: nothing for the blank page,
+/// so the "Search or type an address" prompt shows and the first keystroke
+/// starts a fresh address instead of extending `about:blank`.
+fn address_bar_text(url: &str) -> String {
+    if url == "about:blank" {
+        String::new()
+    } else {
+        url.to_string()
+    }
+}
+
 /// Pushes a fresh, blank tab onto every per-tab `Vec`, makes it the active one
 /// and resets the navigation flags. Returns its index. Creates no session.
 fn push_tab_state(state: &mut FerriteBrowser) -> usize {
@@ -3352,9 +3508,27 @@ fn add_tab(state: &mut FerriteBrowser) -> (usize, Option<String>) {
     match HeadlessServoSession::new(1280, 700) {
         Ok(session) => {
             state.servo_sessions.insert(index, session);
+            sync_active_webview(state);
             (index, None)
         }
         Err(e) => (index, Some(e.to_string())),
+    }
+}
+
+/// Makes Servo's own notion of "the tab being looked at" match
+/// `state.active_tab`: the active WebView is shown and focused (keyboard input
+/// goes to the focused WebView), every other one is blurred and hidden. Also
+/// re-bases the resize tracking on the active session's real size — a new tab
+/// starts at its creation size, not at the size the previous tab was last
+/// resized to, and treating them as equal left every tab after the first
+/// displayed at the wrong size with pointer input landing in the wrong place.
+fn sync_active_webview(state: &mut FerriteBrowser) {
+    let active = state.active_tab;
+    for (index, session) in &state.servo_sessions {
+        session.set_active(*index == active);
+    }
+    if let Some(session) = state.servo_sessions.get(&active) {
+        state.last_resized_content_px = session.size();
     }
 }
 
@@ -3365,8 +3539,10 @@ fn select_tab_at(state: &mut FerriteBrowser, i: usize) -> bool {
         return false;
     }
     state.active_tab = i;
-    state.address_bar_input = state.tab_urls[i].clone();
+    state.address_bar_input = address_bar_text(&state.tab_urls[i]);
+    state.address_bar_edited = false;
     sync_nav_state(state);
+    sync_active_webview(state);
     true
 }
 
@@ -3411,8 +3587,10 @@ fn close_tab_at(state: &mut FerriteBrowser, i: usize) -> bool {
         }
     }
     state.active_tab = state.active_tab.min(state.tabs.len().saturating_sub(1));
-    state.address_bar_input = state.tab_urls[state.active_tab].clone();
+    state.address_bar_input = address_bar_text(&state.tab_urls[state.active_tab]);
+    state.address_bar_edited = false;
     sync_nav_state(state);
+    sync_active_webview(state);
     removed
 }
 
@@ -4000,7 +4178,16 @@ fn resolve_url(input: &str) -> String {
     let has_dot = trimmed.contains('.');
     let path_like = trimmed.starts_with('/');
     if no_spaces && (has_dot || path_like) {
-        return format!("https://{}", trimmed);
+        // A bare loopback or IP-literal address is a local server, which
+        // almost never speaks TLS.
+        let host = trimmed.split(['/', ':']).next().unwrap_or_default();
+        let local =
+            host.eq_ignore_ascii_case("localhost") || host.parse::<std::net::IpAddr>().is_ok();
+        let scheme = if local { "http" } else { "https" };
+        return format!("{scheme}://{trimmed}");
+    }
+    if no_spaces && trimmed.to_ascii_lowercase().starts_with("localhost") {
+        return format!("http://{trimmed}");
     }
 
     // Everything else → DuckDuckGo Lite search.
@@ -4746,6 +4933,7 @@ fn spawn_next_step(
             }
         }
         let request = CompletionRequest::new(model_tag_main, ModelTier::Main, messages)
+            .with_label("agent step")
             .with_system_prompt(SYSTEM_PROMPT, SYSTEM_PROMPT_VERSION)
             .with_options(SamplingOptions::default().with_num_predict(AGENT_LOOP_NUM_PREDICT));
         let action =
@@ -5093,10 +5281,14 @@ pub fn view(state: &FerriteBrowser) -> Element<'_, FerriteBrowserMessage> {
     };
 
     let addr_row = container(
-        row![security_icon, addr_input, bookmark_btn]
-            .spacing(6)
-            .align_y(iced::Alignment::Center)
-            .width(Length::Fill),
+        row![
+            security_icon,
+            mouse_area(addr_input).on_press(FerriteBrowserMessage::AddressBarPressed),
+            bookmark_btn
+        ]
+        .spacing(6)
+        .align_y(iced::Alignment::Center)
+        .width(Length::Fill),
     )
     .width(Length::Fill)
     .padding([0, 4]);
@@ -5313,26 +5505,7 @@ pub fn view(state: &FerriteBrowser) -> Element<'_, FerriteBrowserMessage> {
 
     // ── Audit panel ────────────────────────────────────────────────────────
     let audit_panel: Option<Element<FerriteBrowserMessage>> = if state.show_audit_panel {
-        let hdr = container(
-            row![
-                text("  Audit Log")
-                    .size(12)
-                    .color(palette.text)
-                    .width(Length::Fill),
-                button(text("Refresh").size(11))
-                    .padding([2, 8])
-                    .style(panel_btn_inactive)
-                    .on_press(FerriteBrowserMessage::RefreshAuditLog),
-            ]
-            .spacing(8)
-            .align_y(iced::Alignment::Center)
-            .padding([5, PANEL_PADDING]),
-        )
-        .width(Length::Fill)
-        .style(|_: &Theme| container::Style {
-            background: Some(Background::Color(palette.raised)),
-            ..container::Style::default()
-        });
+        let hdr = activity_panel::header(state, palette);
 
         let col_hdr = container(
             row![
@@ -5363,7 +5536,7 @@ pub fn view(state: &FerriteBrowser) -> Element<'_, FerriteBrowserMessage> {
 
         let rows: Vec<Element<FerriteBrowserMessage>> = if state.audit_entries.is_empty() {
             vec![container(
-                text("No audit entries yet - run the sandbox demo and click Refresh")
+                text("No network requests logged yet. Load a page, then click Refresh.")
                     .size(12)
                     .color(palette.text_dim),
             )
@@ -5407,16 +5580,22 @@ pub fn view(state: &FerriteBrowser) -> Element<'_, FerriteBrowserMessage> {
                 .collect()
         };
 
+        let (body, height): (Element<FerriteBrowserMessage>, f32) = match state.audit_tab {
+            AuditTab::Models => (
+                activity_panel::models_body(state, palette),
+                activity_panel::MODELS_PANEL_HEIGHT,
+            ),
+            AuditTab::Security => (
+                column![col_hdr, scrollable(column(rows)).height(Length::Fill)].into(),
+                220.0,
+            ),
+        };
         Some(
-            container(column![
-                hdr,
-                col_hdr,
-                scrollable(column(rows)).height(Length::Fill)
-            ])
-            .width(Length::Fill)
-            .height(220)
-            .style(bottom_panel_style)
-            .into(),
+            container(column![hdr, body])
+                .width(Length::Fill)
+                .height(height)
+                .style(bottom_panel_style)
+                .into(),
         )
     } else {
         None
@@ -6046,12 +6225,17 @@ pub fn view(state: &FerriteBrowser) -> Element<'_, FerriteBrowserMessage> {
     }
     layout.push(sep_bottom.into());
 
-    if let Some(p) = audit_panel {
-        layout.push(p);
-    } else if let Some(p) = js_panel {
-        layout.push(p);
-    } else if let Some(p) = library_panel {
-        layout.push(p);
+    // The library drawer opens under the toolbar; the audit and JS panels are
+    // developer-style drawers and sit below the page, like browser devtools.
+    let bottom_panel = if audit_panel.is_some() {
+        audit_panel
+    } else {
+        js_panel
+    };
+    if bottom_panel.is_none() {
+        if let Some(p) = library_panel {
+            layout.push(p);
+        }
     }
 
     if let Some(bar) = find_bar {
@@ -6068,6 +6252,9 @@ pub fn view(state: &FerriteBrowser) -> Element<'_, FerriteBrowserMessage> {
         content
     };
     layout.push(main_content);
+    if let Some(p) = bottom_panel {
+        layout.push(p);
+    }
 
     container(column(layout))
         .width(Length::Fill)
@@ -6124,17 +6311,18 @@ fn tile_glyph<'a>(
             .into(),
         None => text(monogram.to_string()).size(16).color(accent).into(),
     };
+    // `center(len)` sets BOTH width and height to `len`; pairing it with
+    // `width`/`height` first (as this once did) silently made the tile fill
+    // its whole parent.
     container(inner)
-        .width(38)
-        .height(38)
-        .center(Length::Fill)
+        .center(Length::Fixed(38.0))
         .style(backdrop_style)
         .into()
 }
 
 /// Width shared by the new-tab page's search field and quick-access grid so
-/// the two edges line up (six 84 px tiles with 12 px gaps).
-const NEW_TAB_CONTENT_WIDTH: f32 = 564.0;
+/// the two edges line up (six 92 px tiles with 9 px gaps).
+const NEW_TAB_CONTENT_WIDTH: f32 = 600.0;
 
 /// The new-tab page: a flat, quiet start screen — wordmark, one search field,
 /// an "ask the agent" shortcut, a grid of quick-access sites and a footer of
@@ -6150,9 +6338,7 @@ fn new_tab_page(state: &FerriteBrowser) -> Element<'_, FerriteBrowserMessage> {
             .font(font_weight(iced::font::Weight::Bold))
             .color(palette.base),
     )
-    .width(40)
-    .height(40)
-    .center(Length::Fill)
+    .center(Length::Fixed(40.0))
     .style(|_: &Theme| container::Style {
         background: Some(Background::Color(palette.accent)),
         border: Border {
@@ -6205,6 +6391,7 @@ fn new_tab_page(state: &FerriteBrowser) -> Element<'_, FerriteBrowserMessage> {
     .on_submit(FerriteBrowserMessage::NavigateRequested(resolve_url(
         &state.new_tab_search_input,
     )));
+    let search_gap = container(text("")).height(8);
 
     // A quiet second entry point for the agent; hidden once its panel is open.
     let agent_hint: Element<'_, FerriteBrowserMessage> = if state.show_agent_sidebar {
@@ -6250,7 +6437,7 @@ fn new_tab_page(state: &FerriteBrowser) -> Element<'_, FerriteBrowserMessage> {
                     .spacing(8)
                     .align_x(iced::Alignment::Center),
             )
-            .width(84)
+            .width(92)
             .padding([12, 6])
             .style(|_: &Theme, s| {
                 let hov = matches!(s, button::Status::Hovered | button::Status::Pressed);
@@ -6276,7 +6463,7 @@ fn new_tab_page(state: &FerriteBrowser) -> Element<'_, FerriteBrowserMessage> {
 
     let quick_access = column![
         text("Quick access").size(12).color(palette.text_dim),
-        row(tile_row).spacing(12).wrap(),
+        row(tile_row).spacing(9).wrap(),
     ]
     .spacing(12)
     .width(NEW_TAB_CONTENT_WIDTH);
@@ -6292,6 +6479,7 @@ fn new_tab_page(state: &FerriteBrowser) -> Element<'_, FerriteBrowserMessage> {
             wordmark,
             container(text("")).height(36),
             search_bar,
+            search_gap,
             agent_hint,
             container(text("")).height(28),
             quick_access,
@@ -6468,9 +6656,21 @@ pub fn subscription(state: &FerriteBrowser) -> Subscription<FerriteBrowserMessag
             Subscription::none()
         };
 
+    // While the Audit panel is open its trace view refreshes once a second.
+    let trace_tick = if state.show_audit_panel {
+        time::every(std::time::Duration::from_secs(1)).map(|_| FerriteBrowserMessage::RefreshTrace)
+    } else {
+        Subscription::none()
+    };
+
+    let close_requests =
+        window::close_requests().map(|_| FerriteBrowserMessage::WindowCloseRequested);
+
     Subscription::batch([
         keyboard_sub,
         page_keys,
+        trace_tick,
+        close_requests,
         servo_tick,
         agent_event_sub,
         consent_anim_tick,
@@ -6486,6 +6686,9 @@ pub fn launch() -> iced::Result {
     iced::application("Ferrite", update, view)
         .window_size(Size::new(1280.0, 800.0))
         .centered()
+        // Closing the window is handled (`WindowCloseRequested`) so the engine
+        // can shut down cleanly and write the browser profile to disk.
+        .exit_on_close_request(false)
         .theme(|state: &FerriteBrowser| state.theme_mode.to_iced_theme())
         .subscription(subscription)
         // Embedded Inter (see the "Fonts" section above for why) — all
@@ -6575,6 +6778,12 @@ pub fn launch() -> iced::Result {
             // Optional Laya fast lane: resolved here only (never in `Default`).
             // Logs, once, whether it is on and — if the server is not on this
             // machine — that page text, URLs and element labels leave it.
+            // Model-activity trace: also kept on disk under the data directory
+            // (see `ferrite_model::trace` for what it holds and why it is local).
+            if let Some(dir) = ferrite_agent::chat::default_data_dir() {
+                ferrite_model::trace::global()
+                    .set_file(dir.join("logs").join("model-activity.jsonl"));
+            }
             let (laya, laya_log) = agent_run::resolve_laya(&ferrite_model::SystemEnv);
             for line in laya_log {
                 eprintln!("{line}");
@@ -6606,6 +6815,7 @@ pub fn launch() -> iced::Result {
             match HeadlessServoSession::new(1280, 700) {
                 Ok(session) => {
                     state.servo_sessions.insert(0, session);
+                    sync_active_webview(&mut state);
                     (
                         state,
                         Task::batch([
@@ -6647,6 +6857,8 @@ pub fn launch() -> iced::Result {
 // nothing scripted only ever returns a typed `ModelError`, never reaches a
 // socket. No live call is made, per R7.
 // ---------------------------------------------------------------------------
+#[cfg(test)]
+mod activity_tests;
 #[cfg(test)]
 mod chat_tests;
 #[cfg(test)]

@@ -197,6 +197,7 @@ requires.
 | `just doctor` | checklist: tools, build, env file, model tags, keys (never printed), Laya venv/checkpoint/server with a latency probe, disk. `--fix-hints` says how to fix each item |
 | `just laya-serve` | only the Laya server, in the foreground |
 | `just laya-verify` | sends one recorded browser step to the running server, prints its decision and latency |
+| `just probe-input` / `just probe-engine` / `just probe-profile` | drive a real headless Servo session against a built-in page and report what works: scrolling, clicks, typing, reload, two tabs; the page digest and `@ref` actions; cookies and storage surviving a restart (real Servo build only; on Linux run under `xvfb-run`) |
 | `just test-local` | tests for these scripts (no network; the Python ones skip unless `fastapi`, `uvicorn` and `laya` import) |
 
 Settings live in `$FERRITE_HOME/env.local` (plain `KEY=VALUE`, read as data,
@@ -206,3 +207,24 @@ documents every knob, including `FERRITE_LAYA_URL` (use a Laya server you run
 yourself), `FERRITE_LAYA_HOST`/`PORT`, `FERRITE_LAYA_CHECKPOINT`,
 `FERRITE_LAYA_DEVICE` and `FERRITE_LAYA_API_KEY`. The Laya server binds
 loopback only and refuses any other address unless an API key is set.
+
+## Watching what the agent, the LLM and Laya do
+
+Open **Audit** (toolbar, or `F12`). The **Model calls** view is a timeline of
+every call: what the agent ran, every LLM request with its full prompt and
+answer, every Laya request, and whether Laya's answer was used or sent back to
+the LLM, each with how long it took. Click a row to see what was sent and what
+came back. A one-line summary at the top answers "is Laya making it faster?"
+from the timings it has seen. The same events are appended to
+`$FERRITE_HOME/logs/model-activity.jsonl` (prompts and page text included, so
+treat it like the pages themselves; it never leaves your machine). The
+**Security log** view is the hash-chained record of network requests.
+
+## Logins and cookies
+
+The browser profile (cookies, HSTS, saved HTTP credentials, web storage) lives
+in `$FERRITE_HOME/profile` and survives restarts. It is written when the window
+is closed normally; a crash, `kill` or macOS Cmd+Q loses that run's new
+cookies. Whether a particular site lets you sign in is a separate question:
+Google in particular may refuse an embedded engine. `FERRITE_USER_AGENT`
+overrides the user-agent string.

@@ -4463,3 +4463,64 @@ warnings` and `clippy -p ferrite-servo --features servo --all-targets`
 clean; 970 tests pass; both probes pass; script tests pass. **Not verified:**
 the new-tab page has not been rendered (no display for iced here) — only
 compiled and covered by the existing widget-tree tests; macOS; any real website.
+
+## 2026-09-30 — coordinator — second tab, landing page, activity trace, logins
+
+**Reported by the owner (with screenshots from his Mac):** the new-tab page
+rendered as a giant purple block with "Ferrite" pushed off the right edge;
+a Google Form showed "File unavailable"; any second tab was unresponsive; he
+wanted every agent/LLM/Laya action in the audit log with prompts, answers and
+timings, Laya-vs-LLM speed visible, and logins (cookies, sessions) to work.
+
+**New capability: the UI can be driven and seen here.** `libegl1`, Mesa,
+`libxkbcommon-x11`, `xvfb`, `xdotool`, ImageMagick and `openbox` in the
+sandbox run the real release app headless, click and type into it, and take
+screenshots, against local pages and mock Ollama/Laya servers on loopback.
+Everything below marked "seen" was checked that way; there is still no
+internet, so no real site was loaded.
+
+**Root causes found.**
+- *Landing page:* `container.width(40).height(40).center(Length::Fill)` —
+  `center(len)` sets both sides to `len`, silently overriding the fixed size.
+  The same mistake was in the quick-access tiles. Fixed with
+  `center(Length::Fixed(..))`; seen.
+- *Second tab dead:* a new tab's session is created at 1280×700, but the
+  resize tracking assumed it already matched the first tab's size, so every
+  tab after the first was drawn at the wrong size (black margins) and pointer
+  input landed in the wrong place. Switching tabs now re-bases the tracking on
+  the active session's real size and marks the active WebView shown/focused
+  (`sync_active_webview`); background tabs also skip the pixel read. Seen:
+  two tabs, typing, scrolling, a checkbox, switching back — all work. Headless
+  probe (`just probe-input`) covers the same.
+- *Address bar:* clicking it did not select the address, so typing extended
+  `about:blank` into `about:blankhttp://…` (a white page). The blank page now
+  shows an empty bar with the prompt, a click or Ctrl/Cmd+L selects all until
+  the user types, and a bare `127.0.0.1:port` / `localhost` gets http://.
+- *A tab's first navigation was lost* when issued right after creation (the
+  initial about:blank load won): `HeadlessServoSession::new` now waits for it.
+  This is what the agent's `open_tab` would hit.
+- The Audit/JS panels now sit below the page, like devtools, not above it.
+
+**Activity trace (ADR-011).** `ferrite_model::trace` records every LLM call
+(a `Trace` decorator), every Laya request, the fast-lane verdict and the
+agent's own events; the Audit panel's new "Model calls" view shows a timeline,
+a per-stage timing table and a one-sentence Laya-vs-LLM summary, with the full
+prompt/answer one click away; also appended to
+`$FERRITE_HOME/logs/model-activity.jsonl`. Seen end to end with a mock
+Ollama and mock Laya: run start, fingerprint call, agent steps, consent
+request and decision, a Laya step accepted, a Laya "DONE" sent back to the LLM,
+run finished, and the summary line ("…the fast lane saved about 578 ms" — mock
+timings, not a measurement of real models). The "Security log" view now reads
+the real network audit log (T-240 fixed, seen).
+
+**Logins (ADR-012).** The Servo profile persists under `$FERRITE_HOME/profile`
+and is flushed on a clean shutdown; closing the window now shuts the engine
+down cleanly (seen: files written, no crash). `profile_probe` shows a cookie
+and `localStorage` surviving a restart. No real login was tried (T-241).
+
+**Verified:** `cargo fmt --check`; `clippy --workspace --all-targets -D
+warnings`; `cargo test --workspace --no-fail-fast` — 996 tests, 0 failures;
+probes `input_probe`, `digest_probe`, `profile_probe` pass (release, headless
+Linux). **Not verified:** macOS; any real website, Google Forms or Google
+sign-in in particular; the release-profile exit segfault in probes that do not
+shut the engine down; the new-tab page beyond the dark theme.

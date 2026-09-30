@@ -473,18 +473,22 @@ pub fn ferrite_data_dir(ferrite_home: Option<&str>, home: Option<PathBuf>) -> Op
     }
 }
 
+/// The data directory for this process (`$FERRITE_HOME`, else
+/// `~/.local/share/ferrite`); `None` when neither can be resolved.
+#[must_use]
+pub fn default_data_dir() -> Option<PathBuf> {
+    ferrite_data_dir(
+        std::env::var("FERRITE_HOME").ok().as_deref(),
+        dirs::home_dir(),
+    )
+}
+
 /// `<data dir>/chats` (see [`ferrite_data_dir`]) — same location convention
 /// (and same graceful `None` when nothing can be resolved) as the bookmarks
 /// file. Callers that get `None` simply run without persistence.
 #[must_use]
 pub fn default_chats_dir() -> Option<PathBuf> {
-    Some(
-        ferrite_data_dir(
-            std::env::var("FERRITE_HOME").ok().as_deref(),
-            dirs::home_dir(),
-        )?
-        .join("chats"),
-    )
+    Some(default_data_dir()?.join("chats"))
 }
 
 /// A directory of chat files, one `<id>.json` per chat. The directory is

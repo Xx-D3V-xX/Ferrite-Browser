@@ -66,11 +66,12 @@ pub mod request;
 pub mod response;
 pub mod secret;
 pub mod testing;
+pub mod trace;
 
 pub use backends::{GeminiProvider, MockProvider, MockStep, OllamaProvider, ReplayProvider};
 pub use cache_key::CacheKey;
 pub use config::{EnvSource, MapEnv, ModelConfig, SystemEnv};
-pub use decorators::{Budget, Cache, Throttle, ThrottleConfig};
+pub use decorators::{Budget, Cache, Throttle, ThrottleConfig, Trace};
 pub use error::ModelError;
 pub use provider::{ModelProvider, ModelTier, ProviderCapabilities, ProviderId};
 pub use request::{CompletionRequest, Message, Role, SamplingOptions};

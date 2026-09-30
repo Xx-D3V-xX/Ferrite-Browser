@@ -20,9 +20,11 @@
 mod budget;
 mod cache;
 mod throttle;
+mod trace;
 
 pub use budget::{Budget, BudgetSummary, CallRecord, PartialResults};
 pub use cache::{
     Cache, CacheDirReport, CacheEntry, CacheStatsSnapshot, STATS_FILENAME, report as cache_report,
 };
 pub use throttle::{BackoffPolicy, RateLimit, Throttle, ThrottleConfig};
+pub use trace::Trace;

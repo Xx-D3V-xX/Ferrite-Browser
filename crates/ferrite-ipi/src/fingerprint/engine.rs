@@ -129,6 +129,7 @@ fn build_request(
         names.join(", ")
     );
     CompletionRequest::new(model_tag, ModelTier::Small, vec![Message::user(user)])
+        .with_label("fingerprint")
         .with_system_prompt(SYSTEM_PROMPT, SYSTEM_PROMPT_VERSION)
         .with_format_schema(schema_for(available))
 }

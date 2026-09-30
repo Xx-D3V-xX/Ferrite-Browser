@@ -920,6 +920,7 @@ pub async fn run_agent_loop<E: BrowserEngine>(
         }
 
         let request = CompletionRequest::new(model_tag, tier, messages.clone())
+            .with_label("agent step")
             .with_system_prompt(SYSTEM_PROMPT, SYSTEM_PROMPT_VERSION)
             .with_options(
                 ferrite_model::SamplingOptions::default().with_num_predict(AGENT_LOOP_NUM_PREDICT),

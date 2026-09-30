@@ -114,11 +114,39 @@ fn percent_encode(text: &str) -> String {
     out
 }
 
+/// One UI tick over two tabs, in the way selected by `MODE` (see the variants).
+fn tick(a: &mut HeadlessServoSession, b: &mut HeadlessServoSession) {
+    match std::env::var("MODE").as_deref() {
+        Ok("state_only") => {
+            a.pump_engine();
+            a.sync_and_read();
+            b.sync_state();
+        }
+        Ok("b_only") => {
+            b.pump_engine();
+            b.sync_and_read();
+            a.sync_state();
+        }
+        Ok("no_a_read") => {
+            a.pump_engine();
+            a.sync_state();
+            b.sync_and_read();
+        }
+        _ => {
+            a.pump_engine();
+            a.sync_and_read();
+            b.sync_and_read();
+        }
+    }
+}
+
 fn check(name: &str, ok: bool, detail: &str) -> bool {
     println!("{} {name}: {detail}", if ok { "PASS" } else { "FAIL" });
     ok
 }
 
+// Sessions only implement `Drop` (and so hold the engine) with the `servo` feature.
+#[allow(clippy::drop_non_drop)]
 fn main() {
     let url = std::env::args()
         .nth(1)
@@ -234,5 +262,101 @@ fn main() {
         &format!("scrollY {before} -> {after}"),
     );
 
+    // A second tab: another session on the same engine, driven the way the
+    // app drives tabs (pump once per tick, then sync every session).
+    let mut b = match HeadlessServoSession::new(W, H) {
+        Ok(s) => s,
+        Err(e) => {
+            println!("FAIL second session: {e}");
+            std::process::exit(2);
+        }
+    };
+    // The app makes the new tab the active one the moment it exists.
+    if std::env::var("NO_ACTIVATE").is_err() {
+        session.set_active(false);
+        b.set_active(true);
+    }
+    // Let the tab's initial about:blank settle first, as it does in the app
+    // (a navigation issued in the same instant is lost to it).
+    for _ in 0..15 {
+        tick(&mut session, &mut b);
+        std::thread::sleep(Duration::from_millis(16));
+    }
+    b.navigate(&url);
+    let load_started = Instant::now();
+    let end = Instant::now() + Duration::from_secs(20);
+    while Instant::now() < end
+        && !(*b.load_status() == LoadStatus::Complete && b.current_url().contains(&expect))
+    {
+        tick(&mut session, &mut b);
+        std::thread::sleep(Duration::from_millis(16));
+        if std::env::var("DEBUG_B").is_ok() && load_started.elapsed().as_millis() % 1000 < 20 {
+            println!(
+                "DEBUG b: status={:?} url={:.40} title={:?} elapsed={:?}",
+                b.load_status(),
+                b.current_url(),
+                b.page_title(),
+                load_started.elapsed()
+            );
+        }
+    }
+    println!("INFO second tab loaded in {:?}", load_started.elapsed());
+    for _ in 0..30 {
+        tick(&mut session, &mut b);
+        std::thread::sleep(Duration::from_millis(16));
+    }
+    let (x, y) = center_of(&mut b, "q");
+    click(&mut b, x, y);
+    type_text(&mut b, "tab2");
+    let value = js(&mut b, "document.getElementById('q').value");
+    ok &= check("second tab: typing", value.contains("tab2"), &value);
+    b.send_mouse_move(400.0, 300.0);
+    spin_for(&mut b, 100);
+    b.send_scroll(400.0, 300.0, 0.0, -300.0);
+    spin_for(&mut b, 600);
+    let after = js(&mut b, "String(window.scrollY)");
+    ok &= check(
+        "second tab: wheel scroll",
+        after.contains("300"),
+        &format!("scrollY {after}"),
+    );
+
+    // Back to the first tab (freshly reloaded, so the zoom transform above is
+    // gone): it must react again.
+    session.set_active(true);
+    b.set_active(false);
+    session.reload();
+    let end = Instant::now() + Duration::from_secs(20);
+    while Instant::now() < end {
+        tick(&mut session, &mut b);
+        if *session.load_status() == LoadStatus::Complete
+            && js(&mut session, "String(!!document.getElementById('btn'))").contains("true")
+        {
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(16));
+    }
+    for _ in 0..30 {
+        tick(&mut session, &mut b);
+        std::thread::sleep(Duration::from_millis(16));
+    }
+    let (x, y) = center_of(&mut session, "btn");
+    click(&mut session, x, y);
+    let n = js(&mut session, "String(window.clicks)");
+    ok &= check(
+        "first tab again: button",
+        n.contains('1'),
+        &format!("handler ran {n} time(s)"),
+    );
+    let (x, y) = center_of(&mut session, "q");
+    click(&mut session, x, y);
+    type_text(&mut session, "back");
+    let value = js(&mut session, "document.getElementById('q').value");
+    ok &= check("first tab again: typing", value.contains("back"), &value);
+
+    // Shut the engine down cleanly rather than exiting with Servo's threads running.
+    drop(session);
+    drop(b);
+    ferrite_servo::session::shutdown_engine();
     std::process::exit(if ok { 0 } else { 1 });
 }
