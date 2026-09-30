@@ -22,7 +22,7 @@ const RULES: &[(Capability, &[&str])] = &[
     (
         Capability::ScopedRead,
         &[
-            "email", "inbox", "mail", "calendar", "schedule", "meeting", "contacts",
+            "email", "e-mail", "inbox", "mail", "calendar", "schedule", "meeting", "contacts",
         ],
     ),
     (
@@ -59,13 +59,60 @@ const RULES: &[(Capability, &[&str])] = &[
     (Capability::WebDownload, &["download"]),
 ];
 
+/// Suffixes a keyword may carry and still count as that keyword: plural,
+/// past, continuous and doubled-consonant forms ("emails", "booked", "filling",
+/// "submitting"). Anything else (`information` for `form`, `platform` for
+/// `form`, `bookmark` for `book`, `already` for `read`) is a different word.
+const INFLECTIONS: &[&str] = &[
+    "", "s", "es", "d", "ed", "ing", "ting", "ted", "ping", "ped",
+];
+
+/// The prompt as lowercase words: runs of letters, digits and hyphens.
+/// Hyphenated compounds stay one word, so `open-ended` and `open-source` are
+/// not the word `open`; `e-mail` is listed as its own keyword.
+fn words(lower: &str) -> Vec<&str> {
+    lower
+        .split(|c: char| !(c.is_alphanumeric() || c == '-'))
+        .map(|w| w.trim_matches('-'))
+        .filter(|w| !w.is_empty())
+        .collect()
+}
+
+/// Whether the prompt word `word` is `keyword` or an inflection of it.
+fn is_form_of(word: &str, keyword: &str) -> bool {
+    word.strip_prefix(keyword)
+        .is_some_and(|rest| INFLECTIONS.contains(&rest))
+}
+
+/// Whether the word sequence `words` contains the (possibly multi-word)
+/// `keyword` phrase: consecutive whole words, the last one allowed to be an
+/// inflection.
+fn contains_phrase(words: &[&str], keyword: &str) -> bool {
+    let parts: Vec<&str> = keyword.split(' ').collect();
+    let Some((last, head)) = parts.split_last() else {
+        return false;
+    };
+    words
+        .windows(parts.len())
+        .any(|window| window[..head.len()] == *head && is_form_of(window[head.len()], last))
+}
+
 /// The deterministic keyword layer: capabilities directly and unambiguously
 /// implied by the prompt text alone, computed offline with no model call.
 ///
-/// Case-insensitive substring match against [`RULES`]. A prompt matching no
-/// group yields the empty set — an open-ended prompt is a legitimate input,
-/// not a failure; the model layer (`engine::generate_fingerprint`) may still
-/// propose `may_use` capabilities for it.
+/// Matches **whole words** (with their usual inflections), case-insensitively.
+/// The first version matched substrings, which made the layer fail *open*:
+/// `form` granted the click/type/fill capability to "what **form**ation is on
+/// this page", `read` granted page reads to "I'm al**read**y logged in", `mail`
+/// granted inbox access to "tell me about G**mail**'s history", and `open`
+/// granted navigation to "**open**-ended question". Every spurious capability
+/// widens what the comparator will later admit without a consent prompt, so
+/// the rule layer must err toward *fewer* capabilities, never more.
+///
+/// A prompt matching no group yields the empty set — an open-ended prompt is a
+/// legitimate input, not a failure; the model layer
+/// (`engine::generate_fingerprint`) may still propose `may_use` capabilities
+/// for it.
 ///
 /// `js.execute` can never appear in the result: [`Capability`] has no
 /// variant belonging to [`ferrite_core::ActionClass::Execute`], so there is
@@ -74,9 +121,10 @@ const RULES: &[(Capability, &[&str])] = &[
 #[must_use]
 pub fn rule_based_must_use(prompt: &str) -> BTreeSet<Capability> {
     let lower = prompt.to_lowercase();
+    let words = words(&lower);
     RULES
         .iter()
-        .filter(|(_, keywords)| keywords.iter().any(|kw| lower.contains(kw)))
+        .filter(|(_, keywords)| keywords.iter().any(|kw| contains_phrase(&words, kw)))
         .map(|(capability, _)| *capability)
         .collect()
 }
@@ -164,5 +212,63 @@ mod tests {
                 );
             }
         }
+    }
+
+    #[test]
+    fn a_keyword_inside_a_longer_word_grants_nothing() {
+        // Each of these contained a rule keyword as a *substring* and used to
+        // grant a capability the user never asked for.
+        for (prompt, must_not) in [
+            ("What information is on this page?", Capability::WebInteract), // form
+            ("Is this platform any good?", Capability::WebInteract),        // form
+            ("I'm already signed in, what now?", Capability::WebRead),      // read
+            ("Tell me about Gmail's history", Capability::ScopedRead),      // mail
+            ("Give me an open-ended answer", Capability::WebNavigate),      // open
+            ("Explain bookkeeping to me", Capability::WebInteract),         // book
+            ("What is a thread in Rust?", Capability::WebRead),             // read
+            ("Who was the performer?", Capability::WebInteract),            // form
+            ("Is the schedule a secret?", Capability::WebInteract),         // (control: no rule)
+        ] {
+            assert!(
+                !rule_based_must_use(prompt).contains(&must_not),
+                "{prompt:?} must not grant {must_not:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn inflected_keywords_still_match() {
+        assert!(rule_based_must_use("Read my emails").contains(&Capability::ScopedRead));
+        assert!(rule_based_must_use("I am filling in the forms").contains(&Capability::WebInteract));
+        assert!(rule_based_must_use("Book it, then submitting the form")
+            .contains(&Capability::WebInteract));
+        assert!(rule_based_must_use("Opened the link? go to the next")
+            .contains(&Capability::WebNavigate));
+        assert!(rule_based_must_use("downloading the files").contains(&Capability::WebDownload));
+        assert!(rule_based_must_use("Please summarised that").contains(&Capability::WebRead));
+    }
+
+    #[test]
+    fn multi_word_phrases_need_their_words_adjacent_and_whole() {
+        assert!(rule_based_must_use("reply to Bob").contains(&Capability::WebInteract));
+        assert!(rule_based_must_use("Reply   to   Bob").contains(&Capability::WebInteract));
+        assert!(!rule_based_must_use("reply, then go to sleep").contains(&Capability::WebInteract));
+        assert!(rule_based_must_use("send email to Bob").contains(&Capability::WebInteract));
+        assert!(rule_based_must_use("e-mail me").contains(&Capability::ScopedRead));
+    }
+
+    #[test]
+    fn unicode_and_hostile_input_never_panic_and_grant_nothing_extra() {
+        for prompt in [
+            "",
+            "   ",
+            "rеаd the page", // Cyrillic е/а: not the ASCII word, so no match
+            "r\u{200b}ead this",
+            "\u{0000}\u{0001}",
+            "ＲＥＡＤ",
+        ] {
+            let _ = rule_based_must_use(prompt);
+        }
+        assert!(rule_based_must_use("rеаd the page").is_empty());
     }
 }

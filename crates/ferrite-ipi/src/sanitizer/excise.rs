@@ -16,7 +16,9 @@
 //!   sentence had never existed. A space is the only neutral replacement.
 
 use super::patterns::PatternSet;
+use regex::Regex;
 use serde_json::Value;
+use std::sync::OnceLock;
 
 /// Finds the segment `[start, end)` containing byte index `i` in `text`. A
 /// RIGHT boundary is `\n`, or `.`/`!`/`?` followed by whitespace-or-end
@@ -101,27 +103,91 @@ fn excise_ranges(text: &str, ranges: &[(usize, usize)]) -> String {
     out
 }
 
+/// Matches an exotic view (leetspeak, ROT13, reversed) may contribute per
+/// pattern before the whole text is judged hostile and cut entirely. Those
+/// views exist to catch disguised instructions; hundreds of matches in them is
+/// not a page, and each match costs a sentence scan.
+const MAX_EXOTIC_MATCHES: usize = 512;
+
+/// The sentence of the original text that contains the original span
+/// `os..oe`, found on the de-obfuscated base view (so zero-width characters,
+/// spaced-out letters, escapes and the like do not hide a sentence end) and
+/// mapped back to original offsets.
+fn sentence_range(
+    base: &super::normalize::Folded,
+    os: usize,
+    oe: usize,
+    hard_boundary: Option<fn(u8) -> bool>,
+) -> (usize, usize) {
+    let at = base.offset_of(os);
+    if at >= base.text.len() {
+        return (os, oe);
+    }
+    let (start, end) = segment_bounds(&base.text, at, hard_boundary);
+    if end <= start {
+        return (os, oe);
+    }
+    let (a, b) = base.original_span(start, end);
+    (a.min(os), b.max(oe))
+}
+
 fn matching_ranges(
     set: &PatternSet,
     text: &str,
     hard_boundary: Option<fn(u8) -> bool>,
 ) -> Vec<(usize, usize)> {
+    let views = super::normalize::views(text);
     let mut ranges = vec![];
-    for (re, _def) in set.compiled() {
-        for m in re.find_iter(text) {
-            if let Some(is_hard) = hard_boundary {
-                // A match whose own span crosses a hard boundary (e.g. via
-                // the `.{0,30}` gap reaching across `<`/`>`) is skipped
-                // entirely — served through, not excised — rather than
-                // producing unbalanced tags. Payload split across elements
-                // is out of the sanitizer's scope; the behavioral loop is
-                // the intended defense for it.
-                if m.as_str().bytes().any(is_hard) {
+    // Every de-obfuscated view is matched, but what is cut is always a span of
+    // the ORIGINAL text.
+    for view in &views {
+        let exotic = view.exotic;
+        for (re, _def) in set.compiled() {
+            // Matches arrive in order, and a match inside a segment already
+            // chosen adds nothing. Without this, a long text with no sentence
+            // terminators and thousands of matches rescans the whole text for
+            // every match (quadratic: a 1 MB page took minutes to excise).
+            let mut covered_until = 0;
+            let mut seen = 0;
+            for m in re.find_iter(&view.text) {
+                let (start, end) = view.original_span(m.start(), m.end());
+                if start < covered_until {
                     continue;
                 }
+                if let Some(is_hard) = hard_boundary {
+                    // A match whose own span crosses a hard boundary (e.g. via
+                    // the `.{0,30}` gap reaching across `<`/`>`) is skipped
+                    // entirely — served through, not excised — rather than
+                    // producing unbalanced tags. Payload split across elements
+                    // is out of the sanitizer's scope; the behavioral loop is
+                    // the intended defense for it.
+                    if text.as_bytes()[start..end].iter().copied().any(is_hard) {
+                        continue;
+                    }
+                }
+                seen += 1;
+                if exotic && seen > MAX_EXOTIC_MATCHES {
+                    return vec![(0, text.len())];
+                }
+                // An encoded blob, or a payload written entirely in invisible
+                // characters, is cut exactly: the text around it is innocent.
+                let hidden_only = text[start..end].chars().all(|c| {
+                    super::normalize::is_tag_char(c) || super::normalize::is_zero_width(c)
+                });
+                let bounds = if view.decoded || hidden_only {
+                    (start, end)
+                } else {
+                    sentence_range(&views[0], start, end, hard_boundary)
+                };
+                covered_until = covered_until.max(bounds.1);
+                ranges.push(bounds);
             }
-            ranges.push(segment_bounds(text, m.start(), hard_boundary));
         }
+    }
+    if set.name == "general" {
+        // Invisible payloads are cut exactly (just the hidden characters), not
+        // by sentence: the visible text around them is innocent.
+        ranges.extend(super::normalize::hidden_unicode_runs(text));
     }
     ranges
 }
@@ -136,15 +202,62 @@ pub fn excise_injections_text(text: &str) -> String {
     excise_ranges(text, &merge_ranges(ranges))
 }
 
+/// Tags of an HTML string and, inside a tag, its `name="value"` attributes.
+/// The serializer (`ammonia`) always double-quotes attribute values.
+fn tag_and_attribute_patterns() -> &'static (Regex, Regex) {
+    static RE: OnceLock<(Regex, Regex)> = OnceLock::new();
+    RE.get_or_init(|| {
+        (
+            Regex::new(r"<[^<>]+>").expect("static regex"),
+            Regex::new(r#"\s([a-zA-Z_:][-a-zA-Z0-9_:.]*)\s*=\s*"([^"]*)""#).expect("static regex"),
+        )
+    })
+}
+
+/// Every attribute value in `html`'s tags (`alt`, `title`, `href`, ...): text
+/// an agent can read through an accessibility tree although it is not "visible
+/// text" once the tags are stripped.
+pub(crate) fn attribute_values(html: &str) -> Vec<String> {
+    let (tag, attr) = tag_and_attribute_patterns();
+    tag.find_iter(html)
+        .flat_map(|t| {
+            attr.captures_iter(t.as_str())
+                .map(|c| c[2].to_string())
+                .collect::<Vec<_>>()
+        })
+        .collect()
+}
+
+/// Removes every attribute whose value is flagged. Text excision never enters
+/// a tag (it would unbalance the markup), so an injection in `alt="..."` is
+/// handled here instead, by dropping that one attribute and leaving the tag.
+fn excise_flagged_attributes(html: &str) -> String {
+    let (tag, attr) = tag_and_attribute_patterns();
+    tag.replace_all(html, |tag_caps: &regex::Captures| {
+        attr.replace_all(&tag_caps[0], |attr_caps: &regex::Captures| {
+            if super::detect::detect_injection(&attr_caps[2]).is_empty() {
+                attr_caps[0].to_string()
+            } else {
+                String::new()
+            }
+        })
+        .into_owned()
+    })
+    .into_owned()
+}
+
 /// Like [`excise_injections_text`], but `<` and `>` are ALSO hard
-/// boundaries, so excision never crosses a tag.
+/// boundaries, so excision never crosses a tag; flagged attribute values
+/// (`alt`, `title`, ...) are dropped as whole attributes.
 pub fn excise_injections_html(html: &str) -> String {
     let is_hard: fn(u8) -> bool = |b| b == b'<' || b == b'>';
     let ranges = matching_ranges(&super::patterns::GENERAL_PATTERNS, html, Some(is_hard));
-    if ranges.is_empty() {
-        return html.to_string();
-    }
-    excise_ranges(html, &merge_ranges(ranges))
+    let text_cut = if ranges.is_empty() {
+        html.to_string()
+    } else {
+        excise_ranges(html, &merge_ranges(ranges))
+    };
+    excise_flagged_attributes(&text_cut)
 }
 
 /// Recursive walk mirroring [`super::detect::detect_injection_in_value`]'s

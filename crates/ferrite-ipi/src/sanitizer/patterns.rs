@@ -28,7 +28,7 @@ use std::sync::OnceLock;
 
 /// The pattern-set schema version. Bump when a pattern is added or retired;
 /// each [`PatternDef::since_version`] records which version introduced it.
-pub const PATTERN_SET_VERSION: u32 = 1;
+pub const PATTERN_SET_VERSION: u32 = 2;
 
 /// One named, versioned detection rule.
 #[derive(Debug, Clone, Copy)]
@@ -125,17 +125,90 @@ pub static GENERAL_PATTERNS: PatternSet = PatternSet::new(
         PatternDef {
             id: "data_exfiltration_language",
             description: "Language asking for data to be exfiltrated, sent out, or leaked.",
-            regex: r"(?i)(exfiltrate|send.{0,20}data|leak)",
+            regex: r"(?i)(?:exfiltrat(?:e|es|ed|ing|ion)\b|send.{0,20}data|\bleak(?:s|ed|ing)?\b.{0,30}\b(?:data|credentials?|passwords?|cookies?|tokens?|secrets?|keys?|information|files?|conversation|history|contents?))",
             since_version: 1,
         },
         PatternDef {
             id: "new_instructions",
             description: "Introduces a supposed new instruction set to follow instead.",
-            regex: r"(?i)new\s+instructions?",
+            regex: r"(?i)(?:new\s+instructions?\s*(?:[:\-–]|follow|are\b|below|you\b|that\b|which\b|to\s+(?:follow|obey))|(?:your|the|these|following|my|here\s+(?:are|is))\s+new\s+instructions?|(?:follow|obey|execute)\s+(?:the\s+|these\s+)?new\s+instructions?)",
             since_version: 1,
+        },
+        // ── Version 2 (ADR-014) ──────────────────────────────────────────
+        // Added against attacks the five v1 patterns cannot see even after
+        // folding (see `normalize`): the same intent in other words, other
+        // languages, and other shapes. Each is written for precision first —
+        // a pattern that fires on ordinary pages costs utility (a stripped
+        // sentence, a consent prompt), which is why `tests/red_team_sanitizer`
+        // carries a benign corpus the whole set must stay silent on.
+        PatternDef {
+            id: "instruction_override_extended",
+            description: "Ignore/disregard/forget plus an instruction-like object (all/your/these ... instructions/rules/guidelines/prompt), beyond the v1 previous/prior/above wording.",
+            regex: r"(?i)\b(ignore|disregard|forget)\b.{0,40}\b(all|any|every|your|the|these|those|previous|prior|above|earlier|preceding|original|system)\b.{0,25}\b(instructions?|prompts?|rules|guidelines|directives|constraints|programming|training)\b",
+            since_version: 2,
+        },
+        PatternDef {
+            id: "instruction_override_multilingual",
+            description: "\"Ignore the previous instructions\" in French, Spanish, German, Portuguese, Italian, Russian, Chinese and Japanese.",
+            regex: r"(?i)(ignor(?:e|ez|ar|a|iere|ieren)\b.{0,30}\b(?:instructions?\s+(?:pr[ée]c[ée]dentes|ant[ée]rieures)|instrucciones\s+(?:anteriores|previas)|instru[cç][õo]es\s+(?:anteriores|pr[ée]vias)|istruzioni\s+precedenti|(?:vorherigen|bisherigen|obigen|fr[üu]heren)\s+(?:anweisungen|instruktionen|befehle))|игнорируй(?:те)?\b.{0,30}(?:предыдущие|прошлые|прежние|все)\s+(?:инструкции|указания|команды)|забудь(?:те)?\b.{0,30}(?:инструкции|указания)|忽略.{0,8}(?:之前|以前|先前|上面|上述|所有).{0,6}(?:指令|指示|说明|提示|规则)|(?:以前|これまで|上記|前)の?(?:指示|命令|プロンプト)を?(?:全て)?(?:無視|忘れ))",
+            since_version: 2,
+        },
+        PatternDef {
+            id: "audience_is_the_agent",
+            description: "Text that addresses the AI agent/assistant/LLM directly (\"Note to AI assistants\", \"if you are an AI\", \"AI agents must\").",
+            regex: r"(?i)\b(?:(?:attention|note|notice|message|instructions?|important)\s*(?:to|for)\s+(?:the\s+)?(?:ai|llm|assistant|agent|language\s+model|chatbot|bot)s?\b|attention\s*[:,-]?\s*(?:ai|llm|assistant|agent)s?\b|(?:if|when)\s+you\s+are\s+(?:an?\s+)?(?:ai|llm|language\s+model|ai\s+assistant|assistant|ai\s+agent|agent)\b|as\s+an?\s+(?:ai|llm)(?:\s+(?:assistant|agent|model))?,?\s+you\s+(?:must|should|will|need|have)|(?:ai|llm)\s+(?:agents?|assistants?|models?)\s+(?:must|should|shall|need\s+to|are\s+required|reading\s+this|processing\s+this))",
+            since_version: 2,
+        },
+        PatternDef {
+            id: "concealment_from_user",
+            description: "Asks the agent to hide what it is doing from the user, or to act secretly.",
+            regex: r"(?i)\b(?:(?:do\s+not|don'?t|never|without)\s+(?:tell(?:ing)?|inform(?:ing)?|notify(?:ing)?|alert(?:ing)?|mention(?:ing)?|reveal(?:ing)?|show(?:ing)?)(?:\s+[\w']+){0,4}?\s+(?:the\s+|your\s+)?(?:user|human|person|owner)\b|(?:secretly|covertly|silently|quietly)\b.{0,30}\b(?:send|post|upload|forward|email|navigate|visit|open|click|download|submit|transfer|copy))",
+            since_version: 2,
+        },
+        PatternDef {
+            id: "exfiltration_of_sensitive_data",
+            description: "A send/upload verb, a sensitive object (password, cookie, token, key, clipboard, conversation, personal data) and a URL or address, in either order.",
+            regex: r"(?i)\b(?:send|post|upload|forward|e-?mail|transmit|submit|leak|copy|paste|append|include)\b.{0,80}\b(?:passwords?|credentials?|cookies?|session\s+(?:token|id)s?|tokens?|secrets?|api[\s_-]?keys?|private\s+keys?|seed\s+phrase|clipboard|conversation|chat\s+history|browsing\s+history|personal\s+(?:data|information|details)|credit\s+card|ssn)\b.{0,160}(?:https?://|www\.|\b[a-z0-9._-]+@[a-z0-9.-]+\.[a-z]{2,})|(?:https?://|www\.)\S{0,100}.{0,80}\b(?:passwords?|credentials?|cookies?|session\s+(?:token|id)s?|api[\s_-]?keys?|clipboard|chat\s+history)\b",
+            since_version: 2,
+        },
+        PatternDef {
+            id: "chat_template_spoofing",
+            description: "Chat-template or role delimiters planted in content (<|im_start|>, [INST], <<SYS>>, <system>, a line starting \"System: ignore ...\").",
+            regex: r"(?im)(?:<\|(?:im_start|im_end|system|user|assistant|endoftext)\|>|\[/?(?:inst|sys)\]|<</?sys>>|</?(?:system|assistant|instructions?)>|^\s*(?:system|assistant|developer)(?:\s+(?:message|prompt))?\s*:\s*(?:you\b|ignore|do\s+not|never|always|new|from\s+now|important))",
+            since_version: 2,
+        },
+        PatternDef {
+            id: "agent_action_mimicry",
+            description: "A JSON action in Ferrite's own agent format planted in page or tool text ({\"action\":\"navigate\",...}).",
+            regex: r#"(?i)\{\s*["']action["']\s*:\s*["'](?:navigate|click|type_text|fill_form|js_execute|download|open_tab|clipboard_read|clipboard_write|submit_form|press_key|select_option|set_checked|finish|ask_user)["']"#,
+            since_version: 2,
+        },
+        PatternDef {
+            id: "tool_call_mimicry",
+            description: "A tool/function-call envelope planted in content (<tool_call>, <function_calls>, <invoke>, \"tool_calls\":).",
+            regex: r#"(?i)(?:<\s*(?:tool_call|tool_use|function_calls?|invoke)\b|["']tool_calls["']\s*:)"#,
+            since_version: 2,
+        },
+        PatternDef {
+            id: "markdown_image_exfiltration",
+            description: "A markdown image whose URL carries a templated placeholder in its query string (the ![x](https://evil/?q={data}) exfiltration shape).",
+            regex: r"(?i)!\[[^\]]{0,80}\]\(\s*https?://[^)\s]{0,200}\?[^)\s]{0,200}(?:\{[^}]*\}|\[[^\]]*\]|<[^>]*>|%7B[^)\s]*%7D)",
+            since_version: 2,
+        },
+        PatternDef {
+            id: "prompt_extraction",
+            description: "Asks the agent to repeat or reveal the instructions/text above it.",
+            regex: r"(?i)\b(?:repeat|reveal|print|output|show|display|leak)\b.{0,25}\b(?:all\s+)?(?:of\s+)?(?:the\s+|your\s+)?(?:text|words|instructions|messages?|prompt|context)\s+(?:above|before|so\s+far)\b",
+            since_version: 2,
         },
     ],
 );
+
+/// The structural (non-regex) detector for hidden Unicode payloads: runs of
+/// zero-width characters or Unicode tag characters long enough to carry a
+/// message. Not a [`PatternDef`] because it is not a phrase; reported under
+/// this stable id alongside the pattern findings.
+pub const HIDDEN_UNICODE_PATTERN_ID: &str = "hidden_unicode_payload";
 
 /// `<script>`-specific patterns: JS-shaped exfiltration/network primitives
 /// that prose carriers have no equivalent of and do not need scanned for.
@@ -168,6 +241,24 @@ pub static SCRIPT_PATTERNS: PatternSet = PatternSet::new(
             description: "Reads browser local/session storage.",
             regex: r"(?i)localStorage|sessionStorage",
             since_version: 1,
+        },
+        PatternDef {
+            id: "js_xhr",
+            description: "Uses XMLHttpRequest, an older exfiltration primitive.",
+            regex: r"(?i)XMLHttpRequest",
+            since_version: 2,
+        },
+        PatternDef {
+            id: "js_image_beacon",
+            description: "Loads an image or script from a built URL (new Image().src = ...), the pixel-beacon exfiltration shape.",
+            regex: r#"(?i)new\s+Image\s*\(\s*\)\s*\.\s*src|\.src\s*=\s*[`'"]https?://[^`'"]*[`'"]\s*\+"#,
+            since_version: 2,
+        },
+        PatternDef {
+            id: "js_dynamic_code",
+            description: "eval/atob/Function-constructor: code assembled at run time to dodge a static scan.",
+            regex: r"(?i)\beval\s*\(|\batob\s*\(|new\s+Function\s*\(",
+            since_version: 2,
         },
         PatternDef {
             id: "js_send_beacon",

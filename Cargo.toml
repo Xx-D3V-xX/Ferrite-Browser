@@ -53,6 +53,9 @@ rusqlite = { version = "0.38", features = ["bundled"] }
 sha2 = "0.10"
 hex = "0.4"
 url = "2"
+# Public Suffix List, compiled in: a DomainSuffix scope that is itself a public
+# suffix (com, co.uk, github.io) would admit every site beneath it (T-212).
+psl = "2"
 
 # ── ferrite-model ────────────────────────────────────────────────────────
 # OS keyring for OLLAMA_API_KEY (docs/REBUILD_DIRECTIVE.md §10.1: the key

@@ -129,7 +129,14 @@ pub fn sanitize_html(raw_html: &str) -> SanitizedPage {
     // where most text-carrier injections surface once tags are gone. Detect,
     // but do NOT mutate clean_html here.
     let visible_text = strip_tags_to_text(&clean_html);
-    let visible_text_findings = detect_injection(&visible_text);
+    let mut visible_text_findings = detect_injection(&visible_text);
+    // Attribute values (`alt`, `title`, `href`, ...) survive cleaning and reach
+    // an agent through the accessibility tree, but vanish when tags are
+    // stripped, so they are scanned separately and reported on the same
+    // channel as visible text.
+    for value in super::excise::attribute_values(&clean_html) {
+        visible_text_findings.extend(detect_injection(&value));
+    }
 
     let script_findings: Vec<String> = extracted_scripts
         .iter()

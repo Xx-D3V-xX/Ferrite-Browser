@@ -130,6 +130,25 @@ impl DomainSuffix {
         if normalized.split('.').any(str::is_empty) {
             return Err(invalid("contains an empty label"));
         }
+        // T-212: a suffix that is itself a public suffix (`com`, `co.uk`,
+        // `github.io`, `localhost`) admits every site registered beneath it.
+        // That is the one way a scope can fail open by authoring error, so it
+        // is refused here, where every route (Rust literal, JSON corpus, serde)
+        // passes. An all-numeric last label is an IP address, never a suffix.
+        if normalized
+            .rsplit('.')
+            .next()
+            .is_some_and(|last| last.chars().all(|c| c.is_ascii_digit()))
+        {
+            return Err(invalid(
+                "a numeric (IP-address-like) value is not a domain suffix",
+            ));
+        }
+        if psl::domain_str(&normalized).is_none() {
+            return Err(invalid(
+                "is a public suffix, which would admit every site beneath it; name a registrable domain such as example.com",
+            ));
+        }
 
         Ok(Self(normalized))
     }
