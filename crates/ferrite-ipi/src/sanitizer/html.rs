@@ -134,8 +134,23 @@ pub fn sanitize_html(raw_html: &str) -> SanitizedPage {
     // an agent through the accessibility tree, but vanish when tags are
     // stripped, so they are scanned separately and reported on the same
     // channel as visible text.
-    for value in super::excise::attribute_values(&clean_html) {
+    // Text the cleaner drops or rewrites (SVG `<title>`, `<template>`, `<noscript>`
+    // content, ...) is still text a reader may see, so the raw page's text, with
+    // comments, scripts and styles (each scanned on its own channel) removed, is
+    // scanned too.
+    visible_text_findings.extend(detect_injection(&strip_tags_to_text(
+        &without_code_and_comments(raw_html),
+    )));
+    // The RAW page is scanned, not the cleaned one: `placeholder`, `aria-label`,
+    // `value` and `<meta content>` are removed by cleaning yet are exactly what
+    // an accessibility-tree digest shows an agent.
+    for value in super::excise::attribute_values(raw_html) {
         visible_text_findings.extend(detect_injection(&value));
+    }
+    // Text drawn by CSS (`::before { content: "..." }`) is rendered and read by
+    // an agent but lives in a `<style>` element, which cleaning removes whole.
+    for text in css_generated_text(raw_html) {
+        visible_text_findings.extend(detect_injection(&text));
     }
 
     let script_findings: Vec<String> = extracted_scripts
@@ -158,6 +173,57 @@ pub fn sanitize_html(raw_html: &str) -> SanitizedPage {
         extracted_comments,
         comment_findings,
     }
+}
+
+/// `raw_html` without comments, `<script>` and `<style>` elements.
+fn without_code_and_comments(raw_html: &str) -> String {
+    static CODE: OnceLock<Regex> = OnceLock::new();
+    let code = CODE.get_or_init(|| {
+        Regex::new(r"(?is)<!--.*?-->|<script\b[^>]*>.*?</script\s*>|<style\b[^>]*>.*?</style\s*>")
+            .unwrap()
+    });
+    code.replace_all(raw_html, " ").into_owned()
+}
+
+/// The strings a stylesheet draws on the page: every `content: "..."` value in
+/// every `<style>` element (CSS escapes decoded). This is the `CssPseudo`
+/// carrier: invisible to a scan of the cleaned HTML, visible to a reader.
+fn css_generated_text(raw_html: &str) -> Vec<String> {
+    static STYLE: OnceLock<Regex> = OnceLock::new();
+    static CONTENT: OnceLock<Regex> = OnceLock::new();
+    static STRING: OnceLock<Regex> = OnceLock::new();
+    static ESCAPE: OnceLock<Regex> = OnceLock::new();
+    let style = STYLE.get_or_init(|| Regex::new(r"(?is)<style[^>]*>(.*?)</style>").unwrap());
+    let content = CONTENT.get_or_init(|| {
+        Regex::new(r#"(?is)\bcontent\s*:\s*((?:"(?:[^"\\]|\\.)*"|'(?:[^'\\]|\\.)*')(?:\s*(?:"(?:[^"\\]|\\.)*"|'(?:[^'\\]|\\.)*'))*)"#)
+            .unwrap()
+    });
+    let string =
+        STRING.get_or_init(|| Regex::new(r#""((?:[^"\\]|\\.)*)"|'((?:[^'\\]|\\.)*)'"#).unwrap());
+    let escape = ESCAPE.get_or_init(|| Regex::new(r"\\([0-9a-fA-F]{1,6})\s?|\\(.)").unwrap());
+    let mut out = Vec::new();
+    for sheet in style.captures_iter(raw_html) {
+        for decl in content.captures_iter(&sheet[1]) {
+            let joined: String = string
+                .captures_iter(&decl[1])
+                .map(|s| s.get(1).or_else(|| s.get(2)).map_or("", |m| m.as_str()))
+                .collect();
+            let decoded =
+                escape.replace_all(&joined, |c: &regex::Captures| match (c.get(1), c.get(2)) {
+                    (Some(hex), _) => u32::from_str_radix(hex.as_str(), 16)
+                        .ok()
+                        .and_then(char::from_u32)
+                        .map(String::from)
+                        .unwrap_or_default(),
+                    (_, Some(ch)) => ch.as_str().to_string(),
+                    _ => String::new(),
+                });
+            if !decoded.trim().is_empty() {
+                out.push(decoded.into_owned());
+            }
+        }
+    }
+    out
 }
 
 /// SHA-256 of arbitrary bytes, returned as a hex string.

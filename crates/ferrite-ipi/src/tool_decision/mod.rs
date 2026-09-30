@@ -256,8 +256,10 @@ mod engine_tests {
                 "Check my inbox and summarise new emails",
             )
             .await;
-        // Rule layer fires for "inbox" / "email" -> ScopedRead (narrow origin read).
-        assert!(fp.must_use().contains(&Capability::ScopedRead));
+        // Rule layer fires for "inbox" / "email" -> WebRead (a page read), and
+        // never ScopedRead: cookies and storage need an explicit mention.
+        assert!(fp.must_use().contains(&Capability::WebRead));
+        assert!(!fp.must_use().contains(&Capability::ScopedRead));
         // may_use is empty because the provider had no response queued (fail to empty).
         assert!(fp.may_use().is_empty());
     }

@@ -274,17 +274,43 @@ fn csv_report(cases: &[CaseDefinition], executions: &[ExecutionRecord]) -> Strin
 }
 
 /// Generates the full report (markdown + CSV) over a completed corpus run.
+/// Number of cases `docs/REBUILD_DIRECTIVE.md` §13.3's power calculation asks for.
+const TARGET_CASES: usize = 360;
+
+/// The honest caveat that goes with however many cases were run. Below the
+/// target every interval is wide; above it, the intervals are still computed as
+/// if the cases were independent draws, which a generated matrix (many cases
+/// share a task, a page template or a payload) is not, and the cases are
+/// self-authored by the defense's author (ADR-008), so they are tuned-against
+/// data, not an independent slice.
+fn scope_note(n: usize) -> String {
+    if n < TARGET_CASES {
+        format!(
+            "**Scope note: this corpus ({n} cases) is smaller than `docs/REBUILD_DIRECTIVE.md` \
+             §13.3's ~{TARGET_CASES}-case target (see `docs/TO-DO.md` T-227) — every interval below \
+             is honestly wide, not a rounding artifact.**"
+        )
+    } else {
+        format!(
+            "**Scope note: {n} cases meets `docs/REBUILD_DIRECTIVE.md` §13.3's ~{TARGET_CASES}-case \
+             size target, but size is not independence. Most cases are generated from a matrix \
+             (`scripts/gen_redteam_corpus.py`), so they share tasks, page templates and payloads, and the \
+             Wilson/McNemar figures below treat them as independent draws, which they are not; they are \
+             self-authored by the defense's author and therefore tuned-against data (ADR-008). Only the 3 \
+             AgentDojo cases are an external slice. Read the intervals as lower bounds on the uncertainty.**"
+        )
+    }
+}
+
 #[must_use]
 pub fn generate_report(cases: &[CaseDefinition], executions: &[ExecutionRecord]) -> EvalReport {
     let mut md = String::new();
     md.push_str("# Ferrite evaluation report\n\n");
     md.push_str(&format!(
-        "Generated over {} cases, {} executions. \
-         **Scope note: this corpus is far smaller than `docs/REBUILD_DIRECTIVE.md` \
-         §13.3's ~360-case target (see `docs/TO-DO.md` T-227) — every interval below \
-         is honestly wide, not a rounding artifact.**\n\n",
+        "Generated over {} cases, {} executions. {}\n\n",
         cases.len(),
-        executions.len()
+        executions.len(),
+        scope_note(cases.len())
     ));
 
     md.push_str("## Corpus composition\n\n");

@@ -55,6 +55,14 @@ impl ReplyChannel {
     pub fn push_default(&mut self, reply: DryRunReply) {
         self.default.push_back(reply);
     }
+
+    /// The origins this channel has a scripted queue for, sorted (so a caller
+    /// that wants "the" origin gets a deterministic one).
+    pub fn origins(&self) -> Vec<&str> {
+        let mut origins: Vec<&str> = self.by_origin.keys().map(String::as_str).collect();
+        origins.sort_unstable();
+        origins
+    }
 }
 
 /// Case-authored content for the dry-run. One `ReplyChannel` per content
@@ -72,6 +80,18 @@ pub struct DryRunContent {
 }
 
 impl DryRunContent {
+    /// The origin this content was authored for: the first origin of the page
+    /// channel, else of the tool-output channel. A case whose scope is not a
+    /// single exact origin (a domain suffix, `task_open`) still has a page the
+    /// agent is on, and that page is where its actions happen.
+    pub fn first_origin(&self) -> Option<&str> {
+        self.read_page
+            .origins()
+            .into_iter()
+            .next()
+            .or_else(|| self.extract_data.origins().into_iter().next())
+    }
+
     pub fn set_page(&mut self, origin: impl Into<String>, value: impl Into<String>) {
         self.read_page.push_origin(
             origin,

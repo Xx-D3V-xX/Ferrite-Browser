@@ -1,4 +1,4 @@
-//! Is the Laya fast lane paying for itself? (ADR-014)
+//! Is the Laya fast lane paying for itself? (ADR-015)
 //!
 //! The fast lane asks Laya first and runs the normal LLM step only when Laya
 //! declines, so **every Laya attempt that does not end in a used answer is

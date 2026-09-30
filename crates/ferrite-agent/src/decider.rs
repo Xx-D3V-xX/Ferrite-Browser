@@ -705,7 +705,7 @@ pub fn build_step_request(
 #[derive(Debug, Clone)]
 pub struct LayaStepDecider {
     client: LayaClient,
-    /// Stops asking when asking costs more than it saves (ADR-014). Shared by
+    /// Stops asking when asking costs more than it saves (ADR-015). Shared by
     /// every clone of the decider.
     governor: std::sync::Arc<ferrite_model::LaneGovernor>,
 }

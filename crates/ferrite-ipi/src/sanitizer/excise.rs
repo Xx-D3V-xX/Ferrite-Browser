@@ -137,6 +137,21 @@ fn matching_ranges(
     hard_boundary: Option<fn(u8) -> bool>,
 ) -> Vec<(usize, usize)> {
     let views = super::normalize::views(text);
+    // In HTML mode a match that sits inside a tag (an attribute value) must not
+    // be cut as text: that would leave half a tag. Such matches are dropped as
+    // whole attributes by `excise_flagged_attributes` instead. Tag spans are
+    // found with the quote-aware tag matcher, because a value may itself hold
+    // `<` and `>` (which is what confused the plain `<`/`>` boundary rule).
+    let tag_spans: Vec<(usize, usize)> = if hard_boundary.is_some() {
+        tag_and_attribute_patterns()
+            .0
+            .find_iter(text)
+            .map(|m| (m.start(), m.end()))
+            .collect()
+    } else {
+        Vec::new()
+    };
+    let inside_a_tag = |at: usize| tag_spans.iter().any(|&(s, e)| s < at && at < e);
     let mut ranges = vec![];
     // Every de-obfuscated view is matched, but what is cut is always a span of
     // the ORIGINAL text.
@@ -151,7 +166,7 @@ fn matching_ranges(
             let mut seen = 0;
             for m in re.find_iter(&view.text) {
                 let (start, end) = view.original_span(m.start(), m.end());
-                if start < covered_until {
+                if start < covered_until || inside_a_tag(start) {
                     continue;
                 }
                 if let Some(is_hard) = hard_boundary {
@@ -208,21 +223,40 @@ fn tag_and_attribute_patterns() -> &'static (Regex, Regex) {
     static RE: OnceLock<(Regex, Regex)> = OnceLock::new();
     RE.get_or_init(|| {
         (
-            Regex::new(r"<[^<>]+>").expect("static regex"),
+            // A tag with quoted attribute values, which may themselves contain
+            // `<` and `>` (ammonia writes them raw inside the quotes). A plain
+            // `<[^<>]+>` ended the tag at the first `>` inside a value and so
+            // never saw an attribute such as alt="... d=<everything> ...".
+            Regex::new(
+                r#"<[a-zA-Z][^\s>/]*(?:\s+[^\s=>/]+(?:\s*=\s*(?:"[^"]*"|'[^']*'|[^\s"'>]+))?)*\s*/?>"#,
+            )
+            .expect("static regex"),
             Regex::new(r#"\s([a-zA-Z_:][-a-zA-Z0-9_:.]*)\s*=\s*"([^"]*)""#).expect("static regex"),
         )
     })
 }
 
-/// Every attribute value in `html`'s tags (`alt`, `title`, `href`, ...): text
-/// an agent can read through an accessibility tree although it is not "visible
-/// text" once the tags are stripped.
+/// Every attribute value in `html`'s tags (`alt`, `title`, `aria-label`,
+/// `placeholder`, `href`, ...): text an agent can read through an accessibility
+/// tree although it is not "visible text" once the tags are stripped. Accepts
+/// double-quoted, single-quoted and unquoted values, since the raw page (unlike
+/// the cleaned one) may use any of them.
 pub(crate) fn attribute_values(html: &str) -> Vec<String> {
-    let (tag, attr) = tag_and_attribute_patterns();
+    static ANY_QUOTE: OnceLock<Regex> = OnceLock::new();
+    let (tag, _) = tag_and_attribute_patterns();
+    let attr = ANY_QUOTE.get_or_init(|| {
+        Regex::new(r#"\s([a-zA-Z_:][-a-zA-Z0-9_:.]*)\s*=\s*(?:"([^"]*)"|'([^']*)'|([^\s"'>]+))"#)
+            .expect("static regex")
+    });
     tag.find_iter(html)
         .flat_map(|t| {
             attr.captures_iter(t.as_str())
-                .map(|c| c[2].to_string())
+                .filter_map(|c| {
+                    c.get(2)
+                        .or_else(|| c.get(3))
+                        .or_else(|| c.get(4))
+                        .map(|m| m.as_str().to_string())
+                })
                 .collect::<Vec<_>>()
         })
         .collect()
@@ -251,13 +285,15 @@ fn excise_flagged_attributes(html: &str) -> String {
 /// (`alt`, `title`, ...) are dropped as whole attributes.
 pub fn excise_injections_html(html: &str) -> String {
     let is_hard: fn(u8) -> bool = |b| b == b'<' || b == b'>';
-    let ranges = matching_ranges(&super::patterns::GENERAL_PATTERNS, html, Some(is_hard));
-    let text_cut = if ranges.is_empty() {
-        html.to_string()
+    // Attributes first: once a flagged value is gone no tag holds anything the
+    // text pass could mistake for content.
+    let html = excise_flagged_attributes(html);
+    let ranges = matching_ranges(&super::patterns::GENERAL_PATTERNS, &html, Some(is_hard));
+    if ranges.is_empty() {
+        html
     } else {
-        excise_ranges(html, &merge_ranges(ranges))
-    };
-    excise_flagged_attributes(&text_cut)
+        excise_ranges(&html, &merge_ranges(ranges))
+    }
 }
 
 /// Recursive walk mirroring [`super::detect::detect_injection_in_value`]'s

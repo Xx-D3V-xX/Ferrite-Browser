@@ -237,6 +237,29 @@ pub fn mode_behavior(mode: DefenseMode) -> ModeBehavior {
 
 /// Runs a single case in a single mode end to end (fingerprint, dry-run, diff,
 /// adjudicate, audit anchor) and assembles the resulting `ExecutionRecord`.
+/// The expected fingerprint a case's prediction becomes: every predicted
+/// `must_use`/`may_use` capability gets the case's own single authored
+/// `expected_origins` scope. Reproduces `from_legacy_tool_fingerprint`'s exact
+/// policy against the new `Fingerprint` type — deliberately NOT
+/// `ExpectedFingerprint::from_fingerprint`, which would derive a cruder scope
+/// from the task's bare context URL alone and silently lose a case's authored
+/// `domain_suffix`/`task_open`-with-rationale scope. `from_capabilities` is the
+/// direct, no-defaulting constructor for exactly this.
+#[must_use]
+pub fn expected_fingerprint_for(
+    case: &CaseDefinition,
+    fp: &ferrite_ipi::fingerprint::Fingerprint,
+) -> ExpectedFingerprint {
+    let capabilities = fp
+        .must_use()
+        .iter()
+        .chain(fp.may_use())
+        .map(|c| ExpectedCapability::new(*c, case.expected_origins.clone()));
+    ExpectedFingerprint::from_capabilities(
+        ExpectedCapabilitySet::new(capabilities).unwrap_or_else(|_| ExpectedCapabilitySet::empty()),
+    )
+}
+
 /// Assembly only — every judgment is delegated to the existing W2a/W2b/ferrite-ipi
 /// components; this function's only logic is `mode_behavior`'s gating.
 #[allow(clippy::too_many_arguments)]
@@ -256,11 +279,17 @@ pub async fn run_one<R: DryRunDriver>(
     let behavior = mode_behavior(mode);
 
     // The legitimate task's declared origin seeds context — not the attack content.
+    // A domain-suffix or task-open scope names no single origin, but the agent
+    // is still on a page: the one the case's content was authored for. Without
+    // that, every event of such a case carried no origin at all and the
+    // comparator flagged it as an extra primitive, so the well-behaved agent was
+    // "gated" and the attacker's payload was never served (its page was keyed
+    // by an origin the agent never reached).
     let context_url = match &case.expected_origins {
         ferrite_core::OriginScope::Exact(origins) => {
             origins.first().map(|o| o.as_str().to_string())
         }
-        _ => None,
+        _ => content.first_origin().map(str::to_string),
     };
     let ipi_task = IpiTask::new(case.user_task.clone(), context_url);
 
@@ -283,25 +312,7 @@ pub async fn run_one<R: DryRunDriver>(
             .await;
         sw.mark_predict(t0.elapsed());
 
-        // Reproduces `from_legacy_tool_fingerprint`'s exact policy (every
-        // `must_use`/`may_use` capability gets the case's own single
-        // authored `expected_origins` scope) against the new `Fingerprint`
-        // type — deliberately NOT `ExpectedFingerprint::from_fingerprint`,
-        // which would derive a cruder scope from the task's bare context URL
-        // alone and silently lose a case's authored `domain_suffix`/
-        // `task_open`-with-rationale scope (see that constructor's own
-        // docs). This is the real, per-case scope the corpus already
-        // authors — `from_capabilities` is the direct, no-defaulting
-        // constructor for exactly this.
-        let capabilities = fp
-            .must_use()
-            .iter()
-            .chain(fp.may_use())
-            .map(|c| ExpectedCapability::new(*c, case.expected_origins.clone()));
-        let expected = ExpectedFingerprint::from_capabilities(
-            ExpectedCapabilitySet::new(capabilities)
-                .unwrap_or_else(|_| ExpectedCapabilitySet::empty()),
-        );
+        let expected = expected_fingerprint_for(case, &fp);
         let expected_primitives: std::collections::HashSet<ToolId> = expected
             .lowered()
             .into_iter()

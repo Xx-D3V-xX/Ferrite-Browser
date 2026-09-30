@@ -54,14 +54,16 @@ fn out_dir() -> PathBuf {
     }
 }
 
-/// The three corpus directories A11 built, relative to this crate's own
-/// manifest dir (works regardless of the caller's current directory).
+/// The corpus directories, relative to this crate's own manifest dir (works
+/// regardless of the caller's current directory): the three A11 built, plus the
+/// generated red-team matrix (`scripts/gen_redteam_corpus.py`, ADR-014).
 fn corpus_dirs() -> Vec<PathBuf> {
     let base = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests");
     vec![
         base.join("corpus"),
         base.join("pilot_corpus"),
         base.join("agentdojo_corpus"),
+        base.join("corpus_redteam"),
     ]
 }
 

@@ -19,10 +19,20 @@ use ferrite_core::Capability;
 /// data, and a new keyword is one array entry rather than a new branch to
 /// review for correctness.
 const RULES: &[(Capability, &[&str])] = &[
+    // Stored per-origin state (cookies, web storage) is credential-adjacent
+    // (`Capability::ScopedRead`'s own docs), so only an explicit mention grants
+    // it. The first version granted it for "email", "inbox", "calendar" and the
+    // like, which silently let "check my inbox" read the mail site's cookies
+    // and local storage while NOT granting the page read the task needs.
     (
         Capability::ScopedRead,
         &[
-            "email", "e-mail", "inbox", "mail", "calendar", "schedule", "meeting", "contacts",
+            "cookie",
+            "cookies",
+            "local storage",
+            "session storage",
+            "saved login",
+            "saved session",
         ],
     ),
     (
@@ -54,6 +64,38 @@ const RULES: &[(Capability, &[&str])] = &[
             "report",
             "summarise",
             "summarize",
+            // Everyday verbs that ask for something to be looked up on the
+            // page. Without them ordinary read-only tasks ("List the
+            // ingredients", "Check today's price", "Get the forecast") matched
+            // nothing, produced an empty fingerprint, and sent the agent's very
+            // first page read to the consent prompt (a 43% false-gate rate on
+            // the first benign corpus).
+            "check",
+            "get",
+            "list",
+            "show",
+            "find",
+            "look up",
+            "look at",
+            "display",
+            "view",
+            "describe",
+            "identify",
+            "compare",
+            "review",
+            "search",
+            "fetch",
+            "scan",
+            "count",
+            // Reading the user's mail and calendar is reading a page.
+            "email",
+            "e-mail",
+            "inbox",
+            "mail",
+            "calendar",
+            "schedule",
+            "meeting",
+            "contacts",
         ],
     ),
     (Capability::WebDownload, &["download"]),
@@ -78,10 +120,18 @@ fn words(lower: &str) -> Vec<&str> {
         .collect()
 }
 
+/// Keywords whose `-ing` form is usually a *noun* ("opening hours", "booking
+/// confirmation"), not the action. Matching it would grant navigation or
+/// interaction for a prompt that asks for neither, so `-ing` is not accepted
+/// for these (the cost is a consent prompt for "I'm opening the site", which is
+/// the safe direction).
+const NOUN_WHEN_ING: &[&str] = &["open", "book"];
+
 /// Whether the prompt word `word` is `keyword` or an inflection of it.
 fn is_form_of(word: &str, keyword: &str) -> bool {
-    word.strip_prefix(keyword)
-        .is_some_and(|rest| INFLECTIONS.contains(&rest))
+    word.strip_prefix(keyword).is_some_and(|rest| {
+        INFLECTIONS.contains(&rest) && !(rest == "ing" && NOUN_WHEN_ING.contains(&keyword))
+    })
 }
 
 /// Whether the word sequence `words` contains the (possibly multi-word)
@@ -134,9 +184,36 @@ mod tests {
     use super::*;
 
     #[test]
-    fn email_prompt_gives_scoped_read() {
+    fn email_prompt_reads_the_page_and_grants_no_stored_state() {
         let caps = rule_based_must_use("Check my inbox and summarise new emails");
-        assert!(caps.contains(&Capability::ScopedRead));
+        assert!(caps.contains(&Capability::WebRead));
+        // Cookies and web storage are credential-adjacent: "inbox" must not
+        // grant them.
+        assert!(!caps.contains(&Capability::ScopedRead));
+    }
+
+    #[test]
+    fn only_an_explicit_mention_grants_stored_state() {
+        for prompt in [
+            "Show me which cookies this site sets",
+            "What is in local storage for this page?",
+            "Use my saved login",
+        ] {
+            assert!(
+                rule_based_must_use(prompt).contains(&Capability::ScopedRead),
+                "{prompt}"
+            );
+        }
+        for prompt in [
+            "Check my calendar",
+            "Read my mail",
+            "What meetings do I have?",
+        ] {
+            assert!(
+                !rule_based_must_use(prompt).contains(&Capability::ScopedRead),
+                "{prompt}"
+            );
+        }
     }
 
     #[test]
@@ -222,7 +299,7 @@ mod tests {
             ("What information is on this page?", Capability::WebInteract), // form
             ("Is this platform any good?", Capability::WebInteract),        // form
             ("I'm already signed in, what now?", Capability::WebRead),      // read
-            ("Tell me about Gmail's history", Capability::ScopedRead),      // mail
+            ("Tell me about Gmail's history", Capability::WebRead),         // mail
             ("Give me an open-ended answer", Capability::WebNavigate),      // open
             ("Explain bookkeeping to me", Capability::WebInteract),         // book
             ("What is a thread in Rust?", Capability::WebRead),             // read
@@ -238,7 +315,7 @@ mod tests {
 
     #[test]
     fn inflected_keywords_still_match() {
-        assert!(rule_based_must_use("Read my emails").contains(&Capability::ScopedRead));
+        assert!(rule_based_must_use("Read my emails").contains(&Capability::WebRead));
         assert!(rule_based_must_use("I am filling in the forms").contains(&Capability::WebInteract));
         assert!(rule_based_must_use("Book it, then submitting the form")
             .contains(&Capability::WebInteract));
@@ -254,7 +331,25 @@ mod tests {
         assert!(rule_based_must_use("Reply   to   Bob").contains(&Capability::WebInteract));
         assert!(!rule_based_must_use("reply, then go to sleep").contains(&Capability::WebInteract));
         assert!(rule_based_must_use("send email to Bob").contains(&Capability::WebInteract));
-        assert!(rule_based_must_use("e-mail me").contains(&Capability::ScopedRead));
+        assert!(rule_based_must_use("e-mail me").contains(&Capability::WebRead));
+    }
+
+    #[test]
+    fn everyday_read_verbs_grant_the_page_read_and_nothing_more() {
+        for prompt in [
+            "List the ingredients in this recipe.",
+            "Check today's closing price for AAPL on this page.",
+            "Get tomorrow's weather forecast for Boston.",
+            "Show me the opening hours",
+            "Look up the return policy",
+            "Find the cheapest flight",
+        ] {
+            assert_eq!(
+                rule_based_must_use(prompt),
+                BTreeSet::from([Capability::WebRead]),
+                "{prompt}"
+            );
+        }
     }
 
     #[test]
