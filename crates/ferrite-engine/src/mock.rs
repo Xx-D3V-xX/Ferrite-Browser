@@ -17,6 +17,24 @@
 //! leaving the queue empty, so a test does not have to over-script a fixed
 //! number of calls it doesn't care about the count of.
 //!
+//! # Element refs
+//!
+//! Every selector-taking method runs its selector through
+//! [`normalize_selector`], so `click("@12")` is logged as (and matched
+//! against seeds for) the canonical `[data-ferrite-ref="12"]` selector — the
+//! same rewrite the real engines apply. The `seed_*` methods normalize too,
+//! so a test may seed and act with either spelling.
+//!
+//! # Page digests
+//!
+//! [`MockEngine::seed_page_digest`] queues [`PageDigest`]s per origin (same
+//! FIFO/repeat-last semantics as above). [`BrowserEngine::page_digest`]
+//! pops one and logs [`Call::PageDigest`]; [`BrowserEngine::observe_page`]
+//! — the harness's own per-step observation — only *peeks* and logs
+//! nothing, exactly as `DryRunEngine` must. With no digest seeded, both fall
+//! back to a digest built from the origin's seeded `dom_snapshot` (peeked,
+//! not consumed) or an empty one.
+//!
 //! # Why the first tab starts at a real origin, unlike a real browser
 //!
 //! A real browser's fresh tab starts at `about:blank`, whose origin is
@@ -35,7 +53,8 @@ use std::collections::{BTreeMap, HashMap, VecDeque};
 use ferrite_core::Origin;
 
 use crate::{
-    BrowserEngine, Call, Cookie, DomNode, DomSnapshot, ElementHandle, EngineError, Frame, TabId,
+    normalize_selector, not_found_message, BrowserEngine, Call, Cookie, DomNode, DomSnapshot,
+    ElementHandle, EngineError, Frame, LinkInfo, PageDigest, TabId, TabInfo, TextMatches,
     WaitCondition,
 };
 
@@ -84,6 +103,7 @@ pub struct MockEngine {
     js_scripts: HashMap<String, VecDeque<Result<String, String>>>,
     downloads: HashMap<String, String>,
     screenshot: Frame,
+    page_digests: HashMap<Origin, VecDeque<PageDigest>>,
 }
 
 impl Default for MockEngine {
@@ -113,6 +133,7 @@ impl MockEngine {
             js_scripts: HashMap::new(),
             downloads: HashMap::new(),
             screenshot: (0, 0, Vec::new()),
+            page_digests: HashMap::new(),
         }
     }
 
@@ -122,6 +143,14 @@ impl MockEngine {
     #[must_use]
     pub fn calls(&self) -> &[Call] {
         &self.calls
+    }
+
+    /// Queues a [`PageDigest`] for `origin` (see the [module docs](self)).
+    pub fn seed_page_digest(&mut self, origin: &Origin, digest: PageDigest) {
+        self.page_digests
+            .entry(origin.clone())
+            .or_default()
+            .push_back(digest);
     }
 
     /// Queues a `dom_snapshot` response for `origin`.
@@ -135,7 +164,7 @@ impl MockEngine {
     /// Queues a `query(selector)` response at `origin`.
     pub fn seed_query(&mut self, origin: &Origin, selector: &str, handles: Vec<ElementHandle>) {
         self.query_results
-            .entry((origin.clone(), selector.to_string()))
+            .entry((origin.clone(), normalize_selector(selector)))
             .or_default()
             .push_back(handles);
     }
@@ -143,7 +172,7 @@ impl MockEngine {
     /// Queues a `read_text(selector)` response at `origin`.
     pub fn seed_read_text(&mut self, origin: &Origin, selector: &str, text: impl Into<String>) {
         self.read_text_results
-            .entry((origin.clone(), selector.to_string()))
+            .entry((origin.clone(), normalize_selector(selector)))
             .or_default()
             .push_back(text.into());
     }
@@ -199,6 +228,32 @@ impl MockEngine {
     fn current_origin(&self) -> Result<Origin, EngineError> {
         let url = self.active_tab().current_url();
         Origin::parse(url).map_err(|e| EngineError::OpaqueOrigin(format!("{url}: {e}")))
+    }
+
+    /// The digest for the current page. `consume` pops (a `page_digest`
+    /// read); otherwise it only peeks (the harness's `observe_page`).
+    fn digest_now(&mut self, origin: &Origin, consume: bool) -> PageDigest {
+        let url = self.active_tab().current_url().to_string();
+        let seeded = self.page_digests.get_mut(origin).and_then(|q| {
+            if consume {
+                pop_or_repeat(q)
+            } else {
+                q.front().cloned()
+            }
+        });
+        if let Some(mut digest) = seeded {
+            if digest.url.is_empty() {
+                digest.url = url;
+            }
+            return digest;
+        }
+        match self.dom_snapshots.get(origin).and_then(|q| q.front()) {
+            Some(snapshot) => PageDigest::from_snapshot(snapshot, &url),
+            None => PageDigest {
+                url,
+                ..PageDigest::default()
+            },
+        }
     }
 }
 
@@ -267,6 +322,8 @@ impl BrowserEngine for MockEngine {
     }
 
     fn query(&mut self, selector: &str) -> Result<(Vec<ElementHandle>, Origin), EngineError> {
+        let selector = normalize_selector(selector);
+        let selector = selector.as_str();
         self.calls.push(Call::Query(selector.to_string()));
         let origin = self.current_origin()?;
         let key = (origin.clone(), selector.to_string());
@@ -279,34 +336,45 @@ impl BrowserEngine for MockEngine {
     }
 
     fn read_text(&mut self, selector: &str) -> Result<(String, Origin), EngineError> {
+        let original = selector;
+        let selector = normalize_selector(selector);
+        let selector = selector.as_str();
         self.calls.push(Call::ReadText(selector.to_string()));
         let origin = self.current_origin()?;
         let key = (origin.clone(), selector.to_string());
         match self.read_text_results.get_mut(&key).and_then(pop_or_repeat) {
             Some(text) => Ok((text, origin)),
-            None => Err(EngineError::ElementNotFound(selector.to_string())),
+            None => Err(EngineError::ElementNotFound(not_found_message(original))),
         }
     }
 
     fn click(&mut self, selector: &str) -> Result<((), Origin), EngineError> {
-        self.calls.push(Call::Click(selector.to_string()));
+        self.calls.push(Call::Click(normalize_selector(selector)));
         Ok(((), self.current_origin()?))
     }
 
     fn type_text(&mut self, selector: &str, text: &str) -> Result<((), Origin), EngineError> {
-        self.calls
-            .push(Call::TypeText(selector.to_string(), text.to_string()));
+        self.calls.push(Call::TypeText(
+            normalize_selector(selector),
+            text.to_string(),
+        ));
         Ok(((), self.current_origin()?))
     }
 
     fn fill_form(&mut self, fields: &[(String, String)]) -> Result<((), Origin), EngineError> {
-        self.calls.push(Call::FillForm(fields.to_vec()));
+        let fields: Vec<(String, String)> = fields
+            .iter()
+            .map(|(sel, value)| (normalize_selector(sel), value.clone()))
+            .collect();
+        self.calls.push(Call::FillForm(fields));
         Ok(((), self.current_origin()?))
     }
 
     fn select_option(&mut self, selector: &str, value: &str) -> Result<((), Origin), EngineError> {
-        self.calls
-            .push(Call::SelectOption(selector.to_string(), value.to_string()));
+        self.calls.push(Call::SelectOption(
+            normalize_selector(selector),
+            value.to_string(),
+        ));
         Ok(((), self.current_origin()?))
     }
 
@@ -316,6 +384,10 @@ impl BrowserEngine for MockEngine {
     }
 
     fn wait_for(&mut self, condition: WaitCondition) -> Result<((), Origin), EngineError> {
+        let condition = match condition {
+            WaitCondition::Selector(s) => WaitCondition::Selector(normalize_selector(&s)),
+            other => other,
+        };
         self.calls.push(Call::WaitFor((&condition).into()));
         let origin = self.current_origin()?;
         match condition {
@@ -433,5 +505,88 @@ impl BrowserEngine for MockEngine {
             Some(Err(message)) => Err(EngineError::Internal(message)),
             None => Ok(("null".to_string(), origin)),
         }
+    }
+
+    fn page_digest(&mut self) -> Result<(PageDigest, Origin), EngineError> {
+        self.calls.push(Call::PageDigest);
+        let origin = self.current_origin()?;
+        let digest = self.digest_now(&origin, true);
+        Ok((digest, origin))
+    }
+
+    fn observe_page(&mut self) -> Result<(PageDigest, Origin), EngineError> {
+        // Deliberately not logged and not consuming: see the module docs.
+        let origin = self.current_origin()?;
+        let digest = self.digest_now(&origin, false);
+        Ok((digest, origin))
+    }
+
+    fn press_key(
+        &mut self,
+        selector: Option<&str>,
+        key: &str,
+    ) -> Result<((), Origin), EngineError> {
+        self.calls.push(Call::PressKey(
+            selector.map(normalize_selector),
+            key.to_string(),
+        ));
+        Ok(((), self.current_origin()?))
+    }
+
+    fn hover(&mut self, selector: &str) -> Result<((), Origin), EngineError> {
+        self.calls.push(Call::Hover(normalize_selector(selector)));
+        Ok(((), self.current_origin()?))
+    }
+
+    fn set_checked(&mut self, selector: &str, checked: bool) -> Result<((), Origin), EngineError> {
+        self.calls
+            .push(Call::SetChecked(normalize_selector(selector), checked));
+        Ok(((), self.current_origin()?))
+    }
+
+    fn scroll_to(&mut self, selector: &str) -> Result<((), Origin), EngineError> {
+        self.calls
+            .push(Call::ScrollTo(normalize_selector(selector)));
+        Ok(((), self.current_origin()?))
+    }
+
+    fn find_text(&mut self, text: &str) -> Result<(TextMatches, Origin), EngineError> {
+        self.calls.push(Call::FindText(text.to_string()));
+        let origin = self.current_origin()?;
+        let digest = self.digest_now(&origin, true);
+        Ok((digest.find_text(text), origin))
+    }
+
+    fn extract_links(
+        &mut self,
+        selector: Option<&str>,
+    ) -> Result<(Vec<LinkInfo>, Origin), EngineError> {
+        self.calls
+            .push(Call::ExtractLinks(selector.map(normalize_selector)));
+        let origin = self.current_origin()?;
+        let digest = self.digest_now(&origin, true);
+        Ok((digest.links(), origin))
+    }
+
+    fn submit_form(&mut self, selector: Option<&str>) -> Result<((), Origin), EngineError> {
+        self.calls
+            .push(Call::SubmitForm(selector.map(normalize_selector)));
+        Ok(((), self.current_origin()?))
+    }
+
+    fn list_tabs(&mut self) -> Result<(Vec<TabInfo>, Origin), EngineError> {
+        self.calls.push(Call::ListTabs);
+        let active = self.active;
+        let tabs = self
+            .tabs
+            .iter()
+            .map(|(id, tab)| TabInfo {
+                id: *id,
+                url: tab.current_url().to_string(),
+                title: String::new(),
+                active: *id == active,
+            })
+            .collect();
+        Ok((tabs, self.current_origin()?))
     }
 }

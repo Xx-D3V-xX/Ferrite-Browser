@@ -68,8 +68,8 @@ mod mock;
 pub mod digest;
 
 pub use digest::{
-    normalize_selector, parse_ref, ref_selector, sanitize_text, truncate_chars, DigestElement,
-    PageDigest, RenderBudget, ScrollState, REF_ATTRIBUTE,
+    normalize_selector, not_found_message, parse_ref, ref_selector, sanitize_text, truncate_chars,
+    DigestElement, LinkInfo, PageDigest, RenderBudget, ScrollState, TextMatches, REF_ATTRIBUTE,
 };
 pub use mock::{MockEngine, MOCK_HOME};
 
@@ -116,6 +116,19 @@ impl std::fmt::Display for TabId {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(f, "tab-{}", self.0)
     }
+}
+
+/// One open tab, as returned by [`BrowserEngine::list_tabs`].
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct TabInfo {
+    /// The handle `switch_tab`/`close_tab` take.
+    pub id: TabId,
+    /// The tab's current URL.
+    pub url: String,
+    /// The tab's document title (empty if unknown).
+    pub title: String,
+    /// Whether this is the tab actions currently act on.
+    pub active: bool,
 }
 
 /// Axis-aligned layout box, in CSS pixels.
@@ -251,6 +264,26 @@ pub enum Call {
     ClipboardWrite(String),
     /// [`BrowserEngine::js_execute`].
     JsExecute(String),
+    /// [`BrowserEngine::page_digest`] (the agent-initiated read; the
+    /// harness's own [`BrowserEngine::observe_page`] is deliberately never
+    /// a `Call` — see that method).
+    PageDigest,
+    /// [`BrowserEngine::press_key`]: `(selector, key)`.
+    PressKey(Option<String>, String),
+    /// [`BrowserEngine::hover`].
+    Hover(String),
+    /// [`BrowserEngine::set_checked`].
+    SetChecked(String, bool),
+    /// [`BrowserEngine::scroll_to`].
+    ScrollTo(String),
+    /// [`BrowserEngine::find_text`].
+    FindText(String),
+    /// [`BrowserEngine::extract_links`].
+    ExtractLinks(Option<String>),
+    /// [`BrowserEngine::submit_form`].
+    SubmitForm(Option<String>),
+    /// [`BrowserEngine::list_tabs`].
+    ListTabs,
 }
 
 /// Serializable, `Eq`-friendly stand-in for [`WaitCondition`] (whose
@@ -284,13 +317,28 @@ impl Call {
             Call::Navigate(_) | Call::GoBack | Call::GoForward | Call::Reload => {
                 Primitive::Navigate
             }
-            Call::CurrentUrl | Call::DomSnapshot => Primitive::DomRead,
+            // The new read-only surface: reading the page's content, links,
+            // matches or the tab list is a page/browser *read*, whatever
+            // shape the result takes.
+            Call::CurrentUrl
+            | Call::DomSnapshot
+            | Call::PageDigest
+            | Call::FindText(_)
+            | Call::ExtractLinks(_)
+            | Call::ListTabs => Primitive::DomRead,
             Call::Query(_) => Primitive::DomQuery,
             Call::ReadText(_) => Primitive::DomRead,
-            Call::Click(_) => Primitive::Click,
-            Call::TypeText(..) | Call::SelectOption(..) => Primitive::DomWrite,
+            // Conservative mapping: hover and set_checked drive the same
+            // pointer path as a click (they can trigger handlers, toggle
+            // state), and a form submission is the effect of clicking its
+            // submit button — none may be admitted by a weaker primitive.
+            Call::Click(_) | Call::Hover(_) | Call::SetChecked(..) | Call::SubmitForm(_) => {
+                Primitive::Click
+            }
+            // A key press is input into whatever has focus.
+            Call::TypeText(..) | Call::SelectOption(..) | Call::PressKey(..) => Primitive::DomWrite,
             Call::FillForm(_) => Primitive::FormFill,
-            Call::Scroll(..) => Primitive::Scroll,
+            Call::Scroll(..) | Call::ScrollTo(_) => Primitive::Scroll,
             Call::WaitFor(_) => Primitive::Wait,
             Call::Screenshot => Primitive::Screenshot,
             Call::Download(_) => Primitive::Download,
@@ -394,4 +442,173 @@ pub trait BrowserEngine {
     /// does not mean calling it is safe; the comparator upstream is what
     /// makes it safe, and this trait does not enforce that on its own.
     fn js_execute(&mut self, script: &str) -> Result<(String, Origin), EngineError>;
+
+    // ── Page understanding and richer interaction ──────────────────────
+    //
+    // Every method below has a default implementation, so an engine that
+    // predates them (or a test double) keeps compiling. The defaults are
+    // honest: derived from `dom_snapshot`/`current_url` where a sensible
+    // derivation exists, `EngineError::Unsupported` where acting on a page
+    // needs a real DOM.
+
+    /// The agent's numbered, ref-addressable view of the active page — the
+    /// agent-initiated `read_page` action. Recorded as a page read
+    /// ([`Call::PageDigest`], `dom.read`).
+    ///
+    /// The default builds a digest from [`Self::dom_snapshot`]
+    /// ([`PageDigest::from_snapshot`]); real engines override it with a page
+    /// script that also stamps live refs ([`REF_ATTRIBUTE`]).
+    fn page_digest(&mut self) -> Result<(PageDigest, Origin), EngineError> {
+        let (snapshot, origin) = self.dom_snapshot()?;
+        Ok((
+            PageDigest::from_snapshot(&snapshot, origin.as_str()),
+            origin,
+        ))
+    }
+
+    /// The **harness's own** per-step observation of the page — what the
+    /// agent loop appends after a state-changing action so the model need not
+    /// spend a step on `read_page`.
+    ///
+    /// This is deliberately *not* an agent-initiated action. An engine that
+    /// records what the agent did (the dry run's `DryRunEngine`) must
+    /// implement it **without** recording a call: were it logged, every
+    /// task's dry-run record would contain `dom.read`, the comparator would
+    /// flag a deviation on nearly every task, and the user would be
+    /// consent-prompted constantly. The default simply delegates to
+    /// [`Self::page_digest`], which is right for engines that keep no
+    /// record.
+    fn observe_page(&mut self) -> Result<(PageDigest, Origin), EngineError> {
+        self.page_digest()
+    }
+
+    /// Presses `key` (`Enter`, `Escape`, `Tab`, `ArrowDown`, a single
+    /// character, optionally with `Ctrl+`/`Shift+`/`Alt+`/`Meta+` prefixes)
+    /// on the element `selector` resolves to, or on whatever has focus when
+    /// `selector` is `None`.
+    fn press_key(
+        &mut self,
+        _selector: Option<&str>,
+        _key: &str,
+    ) -> Result<((), Origin), EngineError> {
+        Err(EngineError::Unsupported(
+            "press_key: this engine has no keyboard input path",
+        ))
+    }
+
+    /// Moves the pointer over the element `selector` resolves to.
+    fn hover(&mut self, _selector: &str) -> Result<((), Origin), EngineError> {
+        Err(EngineError::Unsupported(
+            "hover: this engine has no pointer input path",
+        ))
+    }
+
+    /// Makes the checkbox/radio/switch `selector` resolves to checked or
+    /// unchecked. Idempotent: it only clicks when the current state differs.
+    fn set_checked(
+        &mut self,
+        _selector: &str,
+        _checked: bool,
+    ) -> Result<((), Origin), EngineError> {
+        Err(EngineError::Unsupported(
+            "set_checked: this engine cannot read or toggle element state",
+        ))
+    }
+
+    /// Scrolls the element `selector` resolves to into the middle of the
+    /// viewport.
+    fn scroll_to(&mut self, _selector: &str) -> Result<((), Origin), EngineError> {
+        Err(EngineError::Unsupported(
+            "scroll_to: this engine cannot scroll to an element",
+        ))
+    }
+
+    /// Find-in-page: how often `text` occurs on the page, with a few
+    /// surrounding snippets. The default searches [`Self::page_digest`]'s
+    /// (bounded) text.
+    fn find_text(&mut self, text: &str) -> Result<(TextMatches, Origin), EngineError> {
+        let (digest, origin) = self.page_digest()?;
+        Ok((digest.find_text(text), origin))
+    }
+
+    /// The links on the page, or inside the element `selector` resolves to.
+    /// The default lists the digest's links and cannot scope to a selector.
+    fn extract_links(
+        &mut self,
+        selector: Option<&str>,
+    ) -> Result<(Vec<LinkInfo>, Origin), EngineError> {
+        if selector.is_some() {
+            return Err(EngineError::Unsupported(
+                "extract_links: this engine cannot scope link extraction to a selector",
+            ));
+        }
+        let (digest, origin) = self.page_digest()?;
+        Ok((digest.links(), origin))
+    }
+
+    /// Submits the form `selector` resolves to (or contains the resolved
+    /// element), or the page's only/first form when `selector` is `None` —
+    /// via `requestSubmit()`, so validation and submit handlers run.
+    fn submit_form(&mut self, _selector: Option<&str>) -> Result<((), Origin), EngineError> {
+        Err(EngineError::Unsupported(
+            "submit_form: this engine cannot submit forms",
+        ))
+    }
+
+    /// The open tabs. The default reports the one tab an engine with no tab
+    /// model has: the active page, as [`TabId`] `0`.
+    fn list_tabs(&mut self) -> Result<(Vec<TabInfo>, Origin), EngineError> {
+        let (url, origin) = self.current_url()?;
+        Ok((
+            vec![TabInfo {
+                id: TabId(0),
+                url,
+                title: String::new(),
+                active: true,
+            }],
+            origin,
+        ))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn new_calls_map_to_conservative_primitives() {
+        // Reads.
+        for call in [
+            Call::PageDigest,
+            Call::FindText("x".into()),
+            Call::ExtractLinks(None),
+            Call::ExtractLinks(Some("nav".into())),
+            Call::ListTabs,
+        ] {
+            assert_eq!(call.primitive(), Primitive::DomRead, "{call:?}");
+        }
+        // Key input is input.
+        assert_eq!(
+            Call::PressKey(None, "Enter".into()).primitive(),
+            Primitive::DomWrite
+        );
+        // Pointer-driven or submitting actions are never weaker than a click.
+        for call in [
+            Call::Hover("@1".into()),
+            Call::SetChecked("@2".into(), true),
+            Call::SubmitForm(None),
+            Call::SubmitForm(Some("form".into())),
+        ] {
+            assert_eq!(call.primitive(), Primitive::Click, "{call:?}");
+        }
+        assert_eq!(Call::ScrollTo("@3".into()).primitive(), Primitive::Scroll);
+    }
+
+    #[test]
+    fn js_execute_is_still_its_own_unscopable_primitive() {
+        assert_eq!(
+            Call::JsExecute("1".into()).primitive(),
+            Primitive::JsExecute
+        );
+    }
 }
