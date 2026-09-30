@@ -40,23 +40,33 @@ fn mean_ms<'a>(events: impl Iterator<Item = &'a TraceEvent>) -> Option<u64> {
     (!times.is_empty()).then(|| times.iter().sum::<u64>() / times.len() as u64)
 }
 
-/// One sentence answering "is Laya making things faster?" from the events held.
+/// Answers "is Laya making things faster?" from the events held: what asking
+/// Laya cost *in total* (answers, declined answers and failures all cost a
+/// round trip, and the LLM step still follows when Laya does not decide) against
+/// the LLM time the used answers avoided.
 pub(crate) fn laya_effect_summary(events: &[TraceEvent]) -> String {
     let llm_step = mean_ms(
         events
             .iter()
             .filter(|e| e.backend == TraceBackend::Llm && e.stage == "agent step"),
     );
-    let laya_call = mean_ms(
-        events
-            .iter()
-            .filter(|e| e.backend == TraceBackend::Laya && e.stage == "browser step"),
-    );
-    let verdicts: Vec<&TraceEvent> = events
+    let asked: Vec<&TraceEvent> = events
         .iter()
-        .filter(|e| e.backend == TraceBackend::Laya && e.stage == "fast-lane verdict")
+        .filter(|e| e.backend == TraceBackend::Laya && e.stage == "browser step")
         .collect();
-    if verdicts.is_empty() {
+    let used = events
+        .iter()
+        .filter(|e| {
+            e.backend == TraceBackend::Laya
+                && e.stage == "fast-lane verdict"
+                && e.note.starts_with("accepted")
+        })
+        .count();
+    let pauses = events
+        .iter()
+        .filter(|e| e.backend == TraceBackend::Laya && e.stage == "fast lane paused")
+        .count();
+    if asked.is_empty() {
         return match llm_step {
             Some(ms) => format!(
                 "Laya has made no decisions yet; every step ran on the LLM (about {} each).",
@@ -67,30 +77,41 @@ pub(crate) fn laya_effect_summary(events: &[TraceEvent]) -> String {
             }
         };
     }
-    let used = verdicts
-        .iter()
-        .filter(|e| e.note.starts_with("accepted"))
-        .count();
-    let fell_back = verdicts.len() - used;
+    let failed = asked.iter().filter(|e| !e.ok).count();
+    let answered = asked.len() - failed;
+    let declined = answered.saturating_sub(used);
+    let spent: u64 = asked.iter().map(|e| e.latency_ms).sum();
     let mut line = format!(
-        "Laya was asked {} time(s) and its answer was used {used} time(s); {fell_back} fell back to the LLM.",
-        verdicts.len()
+        "Laya was asked {} time(s): its answer was used {used} time(s), declined {declined} time(s) \
+         (the LLM decided instead) and failed {failed} time(s) (timed out or errored). Asking took {} in total.",
+        asked.len(),
+        format_ms(spent)
     );
-    if let Some(ms) = laya_call {
-        line.push_str(&format!(" A Laya round trip averages {}.", format_ms(ms)));
+    match llm_step {
+        Some(llm) => {
+            let avoided = llm * used as u64;
+            if avoided > spent {
+                line.push_str(&format!(
+                    " The {used} used step(s) skipped about {} of LLM time, so the fast lane saved about {} net.",
+                    format_ms(avoided),
+                    format_ms(avoided - spent)
+                ));
+            } else {
+                line.push_str(&format!(
+                    " The {used} used step(s) skipped about {} of LLM time (an LLM step averages {}), \
+                     so the fast lane cost about {} net: it is not making things faster here.",
+                    format_ms(avoided),
+                    format_ms(llm),
+                    format_ms(spent - avoided)
+                ));
+            }
+        }
+        None => line.push_str(" No LLM agent step has run yet to compare against."),
     }
-    match (llm_step, laya_call) {
-        (Some(llm), Some(laya)) if llm > laya && used > 0 => line.push_str(&format!(
-            " An LLM step averages {}, so the fast lane saved about {}.",
-            format_ms(llm),
-            format_ms((llm - laya) * used as u64)
-        )),
-        (Some(llm), Some(_)) => line.push_str(&format!(
-            " An LLM step averages {}; no time was saved on average.",
-            format_ms(llm)
-        )),
-        (None, _) => line.push_str(" No LLM agent step has run yet to compare against."),
-        (_, None) => {}
+    if pauses > 0 {
+        line.push_str(&format!(
+            " It paused itself {pauses} time(s) because asking was not paying off."
+        ));
     }
     line
 }
@@ -128,8 +149,13 @@ mod tests {
         );
     }
 
+    fn failed(mut e: TraceEvent) -> TraceEvent {
+        e.ok = false;
+        e
+    }
+
     #[test]
-    fn the_summary_counts_used_and_fallback_verdicts_and_the_time_saved() {
+    fn the_summary_reports_a_net_saving_when_laya_is_fast_and_used() {
         let events = [
             ev(TraceBackend::Llm, "agent step", 3_000, ""),
             ev(TraceBackend::Laya, "browser step", 20, ""),
@@ -149,14 +175,49 @@ mod tests {
         ];
         let text = laya_effect_summary(&events);
         assert!(text.contains("asked 2 time(s)"), "{text}");
-        assert!(text.contains("used 1 time(s); 1 fell back"), "{text}");
-        assert!(text.contains("averages 30 ms"), "{text}");
-        // (3000 - 30) * 1 used step = 2970 ms
-        assert!(text.contains("saved about 3.0 s"), "{text}");
+        assert!(
+            text.contains("used 1 time(s), declined 1 time(s)"),
+            "{text}"
+        );
+        assert!(text.contains("failed 0 time(s)"), "{text}");
+        assert!(text.contains("took 60 ms in total"), "{text}");
+        // 1 used x 3000 ms avoided - 60 ms spent = 2940 ms
+        assert!(text.contains("saved about 2.9 s net"), "{text}");
     }
 
     #[test]
-    fn a_slower_laya_is_reported_as_no_saving_not_a_negative_one() {
+    fn the_owners_real_trace_is_reported_as_a_net_loss() {
+        // 6 calls (3 timed out at 1.5 s, 3 answered in ~1.4 s), 1 used; an LLM
+        // step averaged 2.2 s. The old summary said "saved about 831 ms".
+        let mut events = vec![ev(TraceBackend::Llm, "agent step", 2_200, "")];
+        for _ in 0..3 {
+            events.push(failed(ev(TraceBackend::Laya, "browser step", 1_500, "")));
+            events.push(ev(TraceBackend::Laya, "browser step", 1_400, ""));
+        }
+        events.push(ev(
+            TraceBackend::Laya,
+            "fast-lane verdict",
+            1_400,
+            "accepted: Click",
+        ));
+        for _ in 0..2 {
+            events.push(ev(
+                TraceBackend::Laya,
+                "fast-lane verdict",
+                1_400,
+                "fell back to the LLM: low-op-confidence",
+            ));
+        }
+        let text = laya_effect_summary(&events);
+        assert!(text.contains("failed 3 time(s)"), "{text}");
+        assert!(text.contains("declined 2 time(s)"), "{text}");
+        assert!(text.contains("took 8.7 s in total"), "{text}");
+        assert!(text.contains("cost about 6.5 s net"), "{text}");
+        assert!(!text.contains("saved"), "{text}");
+    }
+
+    #[test]
+    fn a_slower_laya_is_reported_as_a_cost() {
         let events = [
             ev(TraceBackend::Llm, "agent step", 10, ""),
             ev(TraceBackend::Laya, "browser step", 500, ""),
@@ -167,7 +228,23 @@ mod tests {
                 "accepted: Click",
             ),
         ];
-        assert!(laya_effect_summary(&events).contains("no time was saved"));
+        let text = laya_effect_summary(&events);
+        assert!(text.contains("not making things faster"), "{text}");
+    }
+
+    #[test]
+    fn pauses_are_mentioned() {
+        let events = [
+            ev(TraceBackend::Llm, "agent step", 2_000, ""),
+            failed(ev(TraceBackend::Laya, "browser step", 1_500, "")),
+            ev(
+                TraceBackend::Laya,
+                "fast lane paused",
+                0,
+                "paused for 4 steps",
+            ),
+        ];
+        assert!(laya_effect_summary(&events).contains("paused itself 1 time(s)"));
     }
 
     #[test]

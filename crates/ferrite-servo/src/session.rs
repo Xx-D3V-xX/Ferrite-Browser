@@ -192,6 +192,22 @@ pub fn audit_db_path() -> std::path::PathBuf {
 #[cfg(feature = "servo")]
 pub use inner::{shutdown_engine, take_popup_sessions, HeadlessServoSession};
 
+/// Commits a runtime-guard decision to the hash-chained audit log, so the
+/// containment decision is verifiable after the fact: a `CapabilityDenied`
+/// entry (`capability` = `guard.<primitive>`, `url` = the origin) for an action
+/// the guard blocked, or a `CapabilityGranted` entry for a deviation the user
+/// approved. Allowed, expected actions are not recorded (the log would be mostly
+/// noise). Never fails the caller: a log that cannot be written is reported on
+/// stderr, because refusing to block an action over a logging error would turn
+/// a logging fault into a bypass. A no-op in a build without the Servo engine,
+/// which has no log.
+pub fn audit_guard_decision(primitive: &str, origin: Option<&str>, allowed: bool) {
+    #[cfg(feature = "servo")]
+    inner::audit_guard_decision(primitive, origin, allowed);
+    #[cfg(not(feature = "servo"))]
+    let _ = (primitive, origin, allowed);
+}
+
 #[cfg(feature = "servo")]
 mod inner {
     use std::cell::RefCell;
@@ -325,6 +341,27 @@ mod inner {
     /// their own file each, so each tab's chain overwrote the last and nothing
     /// could read them back; one chain per process, at [`super::audit_db_path`],
     /// starts fresh on each launch.
+    pub(super) fn audit_guard_decision(primitive: &str, origin: Option<&str>, allowed: bool) {
+        let kind = if allowed {
+            AuditEventKind::CapabilityGranted
+        } else {
+            AuditEventKind::CapabilityDenied
+        };
+        let result = shared_audit_log().and_then(|log| {
+            log.borrow_mut()
+                .append(
+                    kind,
+                    uuid::Uuid::new_v4(),
+                    Some(format!("guard.{primitive}")),
+                    origin.map(str::to_string),
+                )
+                .map_err(|e| e.to_string())
+        });
+        if let Err(e) = result {
+            eprintln!("[ferrite-session] audit write error (guard decision): {e}");
+        }
+    }
+
     fn shared_audit_log() -> Result<Rc<RefCell<PersistentAuditLog>>, String> {
         AUDIT_LOG.with(|cell| {
             let mut slot = cell.borrow_mut();

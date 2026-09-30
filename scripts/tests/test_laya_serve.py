@@ -243,6 +243,54 @@ class ServeConfig(unittest.TestCase):
 
 
 @unittest.skipUnless(HAVE_LAYA, "fastapi/uvicorn/laya not importable")
+class WarmUp(unittest.TestCase):
+    """serve.warm_up runs on Ferrite-shaped input and never stops the server."""
+
+    def setUp(self):
+        self.serve = load_serve()
+
+    class Warmable:
+        def __init__(self, device="mps", seconds=(0.9, 0.2, 0.2), fail=False):
+            self.device = device
+            self.cfg = {"max_len": 1024}
+            self.seconds = list(seconds)
+            self.shapes = []
+            self.fail = fail
+
+        def warmup(self, shapes=None):
+            if self.fail:
+                raise RuntimeError("kernel exploded")
+            self.shapes.append(list(shapes))
+            return self.seconds.pop(0) if len(self.seconds) > 1 else self.seconds[0]
+
+    def test_uses_ferrite_shaped_input_and_reports_the_warm_step(self):
+        agent = self.Warmable()
+        out = self.serve.warm_up(agent)
+        self.assertEqual(agent.shapes[0], [(1, 1024, 6), (2, 1024, 46)])
+        self.assertEqual(out["device"], "mps")
+        self.assertAlmostEqual(out["cold_ms"], 900.0)
+        # Best pass 200 ms over two shapes -> 100 ms per step.
+        self.assertAlmostEqual(out["warm_ms"], 100.0)
+        self.assertFalse(out["slow"])
+
+    def test_cpu_and_slow_steps_are_warned_about(self):
+        with self.assertLogs("ferrite.laya", level="WARNING") as logs:
+            out = self.serve.warm_up(self.Warmable(device="cpu", seconds=(2.0, 1.4, 1.4)))
+        self.assertTrue(out["slow"])
+        self.assertTrue(any("CPU" in line for line in logs.output))
+
+    def test_disabled_unsupported_and_failing_warmups_are_harmless(self):
+        self.assertIsNone(self.serve.warm_up(self.Warmable(), enabled=False))
+        self.assertIsNone(self.serve.warm_up(object()))
+        with self.assertLogs("ferrite.laya", level="ERROR"):
+            self.assertIsNone(self.serve.warm_up(self.Warmable(fail=True)))
+
+    def test_stops_once_the_timing_settles(self):
+        agent = self.Warmable(seconds=(1.0, 0.5, 0.5, 0.5, 0.5, 0.5))
+        self.serve.warm_up(agent)
+        self.assertLessEqual(len(agent.shapes), 1 + self.serve.WARMUP_MAX_PASSES)
+
+
 class ServeHttp(unittest.TestCase):
     def setUp(self):
         self.serve = load_serve()
