@@ -398,28 +398,10 @@ PY
     info "Downloading cklxx/laya-browser/$LAYA_CKPT from the Hugging Face Hub (needs internet; size not measured here)."
     if [ "$DRY_RUN" = 1 ]; then
       printf '  %swould:%s download the checkpoint with huggingface_hub.snapshot_download\n' "$C_YEL" "$C_OFF"
-      note "\$ $py - cklxx/laya-browser $FERRITE_LAYA_CKPT_ROOT $LAYA_CKPT   # snapshot_download(allow_patterns=['$LAYA_CKPT/*'])"
+      note "\$ $py scripts/laya/fetch_checkpoint.py cklxx/laya-browser $ckpt_dir $LAYA_CKPT   # lists the repo, then snapshot_download"
     else
       mkdir -p "$FERRITE_LAYA_CKPT_ROOT"
-      if ! "$py" - cklxx/laya-browser "$FERRITE_LAYA_CKPT_ROOT" "$LAYA_CKPT" "$FERRITE_LAYA_VENV/bin/hf" <<'PY'
-import sys
-repo, root, name, hf = sys.argv[1:5]
-try:
-    from huggingface_hub import snapshot_download
-    snapshot_download(repo, local_dir=root, allow_patterns=[name + "/*"])
-except Exception as e:  # report, do not traceback
-    text = "%s: %s" % (type(e).__name__, e)
-    print("download failed: " + text[:400], file=sys.stderr)
-    low = text.lower()
-    if any(k in low for k in ("connection", "timeout", "resolve", "proxy", "ssl", "network")):
-        print("  Looks like a network problem (huggingface.co unreachable, proxy, or VPN). "
-              "Re-run when it is reachable; the download resumes.", file=sys.stderr)
-    elif any(k in low for k in ("401", "403", "gated", "unauthorized", "forbidden", "repositorynotfound", "not found")):
-        print("  If the repo is gated or private: accept its terms on huggingface.co, then either\n"
-              "  export HF_TOKEN=<a read token from huggingface.co/settings/tokens>   or run: " + hf + " auth login\n"
-              "  and re-run this script (the download resumes).", file=sys.stderr)
-    sys.exit(1)
-PY
+      if ! "$py" "$FERRITE_REPO_ROOT/scripts/laya/fetch_checkpoint.py" cklxx/laya-browser "$ckpt_dir" "$LAYA_CKPT" "$FERRITE_LAYA_VENV/bin/hf"
       then
         fail_step "checkpoint download failed (Laya will be unavailable; the browser still works LLM-only)"
         return 0

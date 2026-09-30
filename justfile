@@ -209,3 +209,4 @@ test-local:
     bash scripts/tests/test_env_parser.sh
     bash scripts/tests/test_run_local.sh
     python3 scripts/tests/test_laya_serve.py
+    python3 scripts/tests/test_fetch_checkpoint.py

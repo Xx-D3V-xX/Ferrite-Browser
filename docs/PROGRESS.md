@@ -4360,3 +4360,26 @@ pass.
 so the key mapping against a real Servo page (IME, dead keys, layouts other
 than US, key repeat) is unobserved (T-236 widened to cover it). The page
 script still has not run on real Servo (T-235).
+
+## 2026-09-30 — coordinator — Laya checkpoint download layout fix
+
+**Reported by the owner's first `just setup-all` on macOS:** the venv and pip
+install worked (laya 0.3.22), but the checkpoint step printed `Fetching 0
+files` and failed the check for `rl_agent_config.json`/`model.safetensors`.
+Cause: the script assumed `cklxx/laya-browser` keeps the checkpoint in a
+`v10s/` sub-folder and downloaded with `allow_patterns=["v10s/*"]`; nothing
+matched. That layout was an assumption — huggingface.co is blocked in this
+sandbox, so it was never checked against the real repo.
+
+**Changed.** `scripts/laya/fetch_checkpoint.py` (called from
+`setup-local.sh`) lists the repo first and picks whichever layout matches: a
+`NAME/` sub-folder, a branch/tag called `NAME`, or the repo root. If none
+match it prints the repo's real file list and exits non-zero instead of
+finishing "successfully" with zero files. `scripts/tests/test_fetch_checkpoint.py`
+covers all layouts against a stub `huggingface_hub` (5 cases, in `just
+test-local`).
+
+**Verified:** the stub tests and the existing run-local tests pass. **Not
+verified:** against the real Hugging Face repo (unreachable here); if the
+repo's layout is none of the three, the script now prints the file list to
+fix it from.
