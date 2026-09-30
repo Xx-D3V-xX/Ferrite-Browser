@@ -54,8 +54,8 @@
 // full reasoning for this deviation from calling `run_agent_loop` directly.
 //
 // ## Keyboard shortcuts (platform-aware)
-//   macOS : Cmd+T/W/R/L/J/F, Cmd+=/-/0 (zoom), F5, F12, Alt+←/→, Esc
-//   other : Ctrl+T/W/R/L/J/F, Ctrl+=/-/0 (zoom), F5, F12, Alt+←/→, Esc
+//   macOS : Cmd+T/W/R/L/J/F, Cmd+=/-/0 (zoom), Cmd+Shift+O (new agent chat), F5, F12, Alt+←/→, Esc
+//   other : Ctrl+T/W/R/L/J/F, Ctrl+=/-/0 (zoom), Ctrl+Shift+O (new agent chat), F5, F12, Alt+←/→, Esc
 //
 // Esc is context-sensitive (C3d): it closes the find bar first if one is
 // open (`show_find_bar`), otherwise it falls through to its pre-existing
@@ -187,6 +187,7 @@ use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
+mod agent_run;
 mod icons;
 use icons::{icon, Icon};
 
@@ -194,6 +195,9 @@ use ferrite_agent::browser_loop::{
     compact_observation, execute_action, run_agent_loop, trim_message_history, AgentAction,
     LoopBudget, LoopStopReason, AGENT_LOOP_NUM_PREDICT, MAX_CONSECUTIVE_MALFORMED_STEPS,
     SYSTEM_PROMPT, SYSTEM_PROMPT_VERSION,
+};
+use ferrite_agent::chat::{
+    default_chats_dir, Chat, ChatId, ChatStore, ChatSummary, Outcome, StepRecord,
 };
 use ferrite_audit_log::{AuditEntry, AuditEventKind, PersistentAuditLog};
 use ferrite_engine_servo::BorrowedServoEngine;
@@ -1100,6 +1104,17 @@ pub enum StepFailure {
     Malformed { raw: String, message: String },
 }
 
+/// Which view the agent sidebar shows: the current chat's message thread, or
+/// the list of previous chats.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum SidebarView {
+    /// The current chat (the default).
+    #[default]
+    Thread,
+    /// Previous chats, newest first.
+    History,
+}
+
 /// State of an in-progress live agent-action loop (post-fingerprint, either
 /// bypassed straight through or after a clean/consented dry run). Lives on
 /// `FerriteBrowser` between the per-step background model calls
@@ -1276,6 +1291,34 @@ pub struct FerriteBrowser {
             tokio::sync::Mutex<tokio::sync::mpsc::UnboundedReceiver<FerriteBrowserMessage>>,
         >,
     >,
+    // ── Chats ────────────────────────────────────────────────────────────────
+    // The chat is the durable record of a conversation; `agent_log`/
+    // `agent_response`/`agent_is_running`/`live_loop` above are the *current
+    // run's* live mirror. Every ending of a run goes through `conclude_run`,
+    // which finishes the turn on `chat`, saves it and refreshes `chat_list`.
+    /// The chat the sidebar is showing and the next message continues. A fresh
+    /// empty chat is not written to disk until its first message.
+    pub chat: Chat,
+    /// Where chats are saved — resolved and opened only by `launch()`
+    /// (`default_chats_dir()`), never by `Default`, the same test-safety
+    /// discipline as `bookmarks_path`: `None` means chats live in memory only
+    /// (every test, and a machine with no resolvable home directory).
+    pub chat_store: Option<ChatStore>,
+    /// One row per saved chat, newest first — read from disk once, in
+    /// `launch()`, then kept current in memory as chats are saved and deleted.
+    pub chat_list: Vec<ChatSummary>,
+    /// Thread or History.
+    pub sidebar_view: SidebarView,
+    /// Which chat row (if any) is showing its "Delete this chat?" confirm
+    /// affordance — a delete is never one click.
+    pub pending_chat_delete: Option<ChatId>,
+    /// A small non-blocking line under the sidebar header ("Couldn't save this
+    /// chat: ...", "Stop the current run first"), dismissible.
+    pub panel_notice: Option<String>,
+    /// Expand/collapse state of thread details (a finished turn's step list, a
+    /// long answer, a long step result), by the keys `agent_panel` builds.
+    /// Cleared whenever the chat changes.
+    pub expanded: std::collections::HashSet<String>,
     // ── IPI consent state ────────────────────────────────────────────────────
     // Every field below is scoped to exactly one pending consent decision and
     // is cleared on *both* ConsentSubmitted and ConsentCancelled — approvals
@@ -1505,6 +1548,15 @@ impl Default for FerriteBrowser {
             agent_is_running: false,
             agent_event_tx: Some(agent_event_tx),
             agent_event_rx: Some(std::sync::Arc::new(tokio::sync::Mutex::new(agent_event_rx))),
+            // Test-safe by construction: no chat store (so nothing is read or
+            // written), an empty list and a fresh in-memory chat.
+            chat: Chat::new(),
+            chat_store: None,
+            chat_list: Vec::new(),
+            sidebar_view: SidebarView::Thread,
+            pending_chat_delete: None,
+            panel_notice: None,
+            expanded: std::collections::HashSet::new(),
             pending_diff: None,
             pending_expected: None,
             pending_evidence: None,
@@ -1612,6 +1664,26 @@ pub enum FerriteBrowserMessage {
     AgentCompleted(String),
     AgentFailed(String),
     StopAgent,
+    // ── Chats ─────────────────────────────────────────────────────────────────
+    /// Starts a fresh, empty chat (the sidebar's "New chat" button, and
+    /// Cmd/Ctrl+Shift+O). Refused, with a notice, while a run is active or a
+    /// consent decision is pending: a chat is never abandoned mid-run.
+    NewChat,
+    /// Opens a saved chat from the history list (loaded from the store).
+    /// Refused while a run is active, like `NewChat`.
+    OpenChat(ChatId),
+    /// First click of a delete: arms that row's confirm affordance.
+    RequestDeleteChat(ChatId),
+    /// Second, explicit click: deletes the armed chat.
+    ConfirmDeleteChat,
+    /// Disarms the delete confirm.
+    CancelDeleteChat,
+    /// Switches the sidebar between the thread and the chat list.
+    SetSidebarView(SidebarView),
+    /// Dismisses the sidebar's notice line.
+    DismissNotice,
+    /// Toggles one expandable part of the thread (see `FerriteBrowser::expanded`).
+    ToggleExpand(String),
     // ── IPI consent ───────────────────────────────────────────────────────────
     ConsentRequired {
         diff: FingerprintDiff,
@@ -2030,145 +2102,56 @@ pub fn update(
         // ── Agent sidebar ─────────────────────────────────────────────────────
         FerriteBrowserMessage::ToggleAgentSidebar => {
             state.show_agent_sidebar = !state.show_agent_sidebar;
+            // Opening the panel puts the cursor in the composer, ready to type.
+            if state.show_agent_sidebar && state.sidebar_view == SidebarView::Thread {
+                return text_input::focus(text_input::Id::new(AGENT_INPUT_ID));
+            }
         }
         FerriteBrowserMessage::AgentTaskInputChanged(s) => {
             state.agent_task_input = s;
         }
-        FerriteBrowserMessage::AgentTaskSubmitted => {
-            if state.agent_is_running {
-                return Task::none();
-            }
-            state.agent_log.clear();
-            state.agent_response = None;
-            state.agent_is_running = true;
-            state.run_id += 1;
-            let run_id = state.run_id;
-
-            let prompt = state.agent_task_input.clone();
-            let context_url = state.tab_urls.get(state.active_tab).cloned();
-            let ipi_task = IpiTask::new(prompt.clone(), context_url.clone());
-            state.pending_task = Some(prompt.clone());
-
-            let provider = state.model_provider.clone();
-            let model_tag_small = state.model_tag_small.clone();
-            let model_tag_main = state.model_tag_main.clone();
-            let event_tx = match state.agent_event_tx.clone() {
-                Some(tx) => tx,
-                None => return Task::none(),
-            };
-
-            let handle = tokio::task::spawn(async move {
-                // ── Defense-mode single decision point (Task 18) ──────────────
-                // ToolDecisionEngine::new() reads FERRITE_DEFENSE once; On is the
-                // unchanged default everywhere. Off skips straight to the real run
-                // (no sanitizer, no dry-run, no consent). SanitizerOnly runs the
-                // sanitizer but also skips straight to the real run. On runs the
-                // sanitizer and continues into the existing fingerprint/dry-run/
-                // compare/consent loop, unchanged.
-                let engine = ToolDecisionEngine::new();
-                let loop_outcome = engine.prepare_task(&ipi_task);
-                let defense_mode = match &loop_outcome {
-                    LoopOutcome::Bypassed | LoopOutcome::RanSanitizerOnly { .. } => {
-                        let _ = event_tx.send(FerriteBrowserMessage::LiveRunReady {
-                            run_id,
-                            prompt: prompt.clone(),
-                        });
-                        return;
-                    }
-                    // LoopOnly and On both continue into the fingerprint/dry-run/
-                    // compare/consent loop below. They differ only in whether the
-                    // sanitizer ran first (On) or was bypassed (LoopOnly) — a
-                    // distinction the dry-run orchestrator now acts on directly
-                    // (T-215: set_defense_mode below), so both fall through here.
-                    LoopOutcome::RanLoopOnly => DefenseMode::LoopOnly,
-                    LoopOutcome::RanFullLoop { .. } => DefenseMode::On,
-                };
-
-                // ── IPI dry run ──────────────────────────────────────────────
-                // T-224/T-229: `provider` is the real, live-configured
-                // ModelProvider constructed at startup (or MockProvider,
-                // fail-to-empty, if none is configured/reachable) — no
-                // longer a hardcoded MockProvider::new() regardless of what
-                // is actually available (T-229's exact fix).
-                let fingerprint = engine
-                    .fingerprint_from_task(provider.as_ref(), &model_tag_small, &ipi_task)
-                    .await;
-                let twin_path = std::env::temp_dir().join("ferrite-ipi-twin.enc");
-                let mut orch = ferrite_ipi::dry_run::DryRunOrchestrator::new(twin_path);
-                // T-215: derive detect_enabled AND strip_enabled together from
-                // the mode this dry run is actually running under, instead of
-                // leaving both at DryRunOrchestrator::new's defaults
-                // (detect-only, strip off) regardless of mode.
-                orch.set_defense_mode(defense_mode);
-                // BrowserLoopDryRunDriver runs the real
-                // `browser_loop::run_agent_loop` directly against the
-                // synthetic `DryRunEngine` — see that type's own docs for
-                // why this needs no GeminiAgent/EngineToolExecutor bridge
-                // now that neither this loop nor the dry run's engine
-                // depends on the old vocabulary.
-                let driver = BrowserLoopDryRunDriver {
-                    provider: provider.as_ref(),
-                    model_tag: model_tag_main.clone(),
-                    prompt: prompt.clone(),
-                };
-                let dry_record = match orch.run(&ipi_task, &driver).await {
-                    Ok(r) => r,
-                    Err(e) => {
-                        let _ = event_tx.send(FerriteBrowserMessage::AgentFailed(format!(
-                            "dry run failed: {}",
-                            e
-                        )));
-                        return;
-                    }
-                };
-                let _ = event_tx.send(FerriteBrowserMessage::AgentToolLogged(
-                    "[dry run complete — checking for unexpected activity]".to_string(),
-                ));
-                // No per-task per-capability origin-scope authoring exists yet
-                // (T-001's live-path bridge, see ferrite_ipi::comparator's
-                // module docs). The task's own declared context URL — already
-                // threaded in above as `context_url` — narrows every
-                // capability to an exact scope on it; task_open (which admits
-                // any origin) is used only when no context URL is known at
-                // all, never unconditionally.
-                let context_origin = context_url
-                    .as_deref()
-                    .and_then(|url| ferrite_core::Origin::parse(url).ok());
-                let expected =
-                    ExpectedFingerprint::from_fingerprint(&fingerprint, context_origin.as_ref());
-                let diff = compare(&expected, &dry_record);
-                if !diff.is_clean() {
-                    let _ = event_tx.send(FerriteBrowserMessage::ConsentRequired {
-                        diff,
-                        expected,
-                        evidence: Box::new(dry_record),
-                    });
-                    return;
-                }
-
-                // ── Real run ─────────────────────────────────────────────────
-                let _ = event_tx.send(FerriteBrowserMessage::LiveRunReady { run_id, prompt });
-            });
-            state.agent_handle = Some(handle);
-        }
+        FerriteBrowserMessage::AgentTaskSubmitted => return submit_task(state),
         FerriteBrowserMessage::AgentToolLogged(s) => {
             state.agent_log.push(AgentLogEntry::Note(s));
         }
         FerriteBrowserMessage::AgentCompleted(s) => {
-            state.agent_response = Some(s);
-            state.agent_is_running = false;
+            return conclude_run(state, Outcome::Answered(s));
         }
         FerriteBrowserMessage::AgentFailed(s) => {
-            state.agent_response = Some(format!("[error] {}", s));
-            state.agent_is_running = false;
+            return conclude_run(state, Outcome::Failed(s));
         }
         FerriteBrowserMessage::StopAgent => {
             state.run_id += 1;
             if let Some(handle) = state.agent_handle.take() {
                 handle.abort();
             }
-            state.live_loop = None;
-            state.agent_is_running = false;
+            return conclude_run(state, Outcome::Cancelled);
+        }
+        // ── Chats ─────────────────────────────────────────────────────────────
+        FerriteBrowserMessage::NewChat => return new_chat(state),
+        FerriteBrowserMessage::OpenChat(id) => return open_chat(state, &id),
+        FerriteBrowserMessage::RequestDeleteChat(id) => {
+            state.pending_chat_delete = Some(id);
+        }
+        FerriteBrowserMessage::ConfirmDeleteChat => {
+            if let Some(id) = state.pending_chat_delete.take() {
+                delete_chat(state, &id);
+            }
+        }
+        FerriteBrowserMessage::CancelDeleteChat => {
+            state.pending_chat_delete = None;
+        }
+        FerriteBrowserMessage::SetSidebarView(view) => {
+            state.sidebar_view = view;
+            state.pending_chat_delete = None;
+        }
+        FerriteBrowserMessage::DismissNotice => {
+            state.panel_notice = None;
+        }
+        FerriteBrowserMessage::ToggleExpand(key) => {
+            if !state.expanded.remove(&key) {
+                state.expanded.insert(key);
+            }
         }
         // ── IPI consent handlers ──────────────────────────────────────────────
         FerriteBrowserMessage::ConsentRequired {
@@ -2228,11 +2211,13 @@ pub fn update(
 
             let prompt = match state.pending_task.take() {
                 Some(p) => p,
-                None => return Task::none(),
+                // Nothing to run (the run was already concluded): make sure
+                // the chat does not keep a turn "in progress" forever.
+                None => return conclude_run(state, Outcome::Cancelled),
             };
             state.run_id += 1;
             let run_id = state.run_id;
-            start_live_loop(state, run_id, prompt, rejected, rejected_origins);
+            return start_live_loop(state, run_id, prompt, rejected, rejected_origins);
         }
         FerriteBrowserMessage::ConsentCancelled => {
             // Same clearing as ConsentSubmitted — cancelling must leave no
@@ -2241,17 +2226,18 @@ pub fn update(
             state.pending_expected = None;
             state.pending_evidence = None;
             state.pending_decision = ConsentDecision::default();
-            state.pending_task = None;
             state.show_evidence = false;
-            state.agent_is_running = false;
             state.run_id += 1;
+            // The user declined to let the run proceed: the turn ends as
+            // cancelled (and `pending_task` is cleared by the funnel).
+            return conclude_run(state, Outcome::Cancelled);
         }
         // ── Live agent loop (T-224) ──────────────────────────────────────────
         FerriteBrowserMessage::LiveRunReady { run_id, prompt } => {
             if run_id != state.run_id {
                 return Task::none();
             }
-            start_live_loop(
+            return start_live_loop(
                 state,
                 run_id,
                 prompt,
@@ -2260,114 +2246,7 @@ pub fn update(
             );
         }
         FerriteBrowserMessage::AgentStepReady { run_id, action } => {
-            if run_id != state.run_id {
-                return Task::none();
-            }
-            let Some(mut live) = state.live_loop.take() else {
-                return Task::none();
-            };
-
-            let action = match action {
-                Ok(a) => {
-                    live.consecutive_malformed = 0;
-                    a
-                }
-                Err(StepFailure::Model(reason)) => {
-                    state.agent_response = Some(format!("[error] {reason}"));
-                    state.agent_is_running = false;
-                    return Task::none();
-                }
-                Err(StepFailure::Malformed { raw, message }) => {
-                    live.consecutive_malformed += 1;
-                    if live.consecutive_malformed > MAX_CONSECUTIVE_MALFORMED_STEPS {
-                        state.agent_response = Some(format!("[error] {message} (raw: {raw})"));
-                        state.agent_is_running = false;
-                        return Task::none();
-                    }
-                    // Give the model a chance to self-correct — the same
-                    // retry-with-feedback shape `browser_loop::
-                    // run_agent_loop` uses, and for the same reason: a
-                    // truncated or malformed response is often a one-off
-                    // glitch (e.g. a `finish.answer` cut short by the
-                    // provider's output cap) a model recovers from once
-                    // told what was wrong, so ending the whole task on the
-                    // first one turned a recoverable hiccup into a hard
-                    // failure. Not counted against `budget.max_steps` — no
-                    // real browser action was taken — but independently
-                    // bounded by `MAX_CONSECUTIVE_MALFORMED_STEPS` above.
-                    live.messages
-                        .push(Message::assistant(compact_observation(raw.trim())));
-                    live.messages.push(Message::user(format!(
-                        "Observation: your last response could not be parsed as a single, \
-                         complete, valid JSON action ({message}). It may have been cut off \
-                         or included extra text. Respond with EXACTLY ONE complete, valid \
-                         JSON object and nothing else."
-                    )));
-                    trim_message_history(&mut live.messages);
-                    spawn_next_step(state, run_id, live);
-                    return Task::none();
-                }
-            };
-
-            if let AgentAction::Finish { answer } = action {
-                state.agent_response = Some(answer);
-                state.agent_is_running = false;
-                return Task::none();
-            }
-            // `ask_user` is terminal too and never reaches the engine; the
-            // question is shown as the response (the chat workstream turns
-            // it into a real prompt).
-            if let AgentAction::AskUser { question } = action {
-                state.agent_response = Some(question);
-                state.agent_is_running = false;
-                return Task::none();
-            }
-
-            // Repeated-identical-action hard stop — mirrors
-            // `browser_loop::run_agent_loop`'s own check exactly (fires
-            // *before* executing the would-be Nth repeat).
-            if live.budget.max_repeated_identical > 0 {
-                let window = live.budget.max_repeated_identical - 1;
-                if window <= live.actions_taken.len()
-                    && live.actions_taken[live.actions_taken.len() - window..]
-                        .iter()
-                        .all(|a| a == &action)
-                {
-                    state.agent_response =
-                        Some("[stopped: the same action was about to repeat]".to_string());
-                    state.agent_is_running = false;
-                    return Task::none();
-                }
-            }
-
-            let blocked = is_action_rejected(&action, &live.rejected, &live.rejected_origins);
-            let observation = if blocked {
-                "blocked by user consent".to_string()
-            } else if let Some(session) = state.servo_sessions.get_mut(&state.active_tab) {
-                let mut engine = BorrowedServoEngine::new(session, 1280, 700);
-                execute_action(&mut engine, &action)
-            } else {
-                "error: no active browser session".to_string()
-            };
-
-            state.agent_log.push(AgentLogEntry::Step {
-                icon: icon_for_action(&action),
-                label: action_label(&action),
-                detail: action_detail(&action),
-                result: observation.clone(),
-                blocked,
-            });
-            live.messages.push(Message::assistant(
-                serde_json::to_string(&action).unwrap_or_default(),
-            ));
-            let compacted_observation = compact_observation(&observation);
-            live.messages.push(Message::user(format!(
-                "Observation: {compacted_observation}"
-            )));
-            trim_message_history(&mut live.messages);
-            live.actions_taken.push(action);
-
-            spawn_next_step(state, run_id, live);
+            return handle_agent_step(state, run_id, action);
         }
         // ── Agent bridge ──────────────────────────────────────────────────────
         FerriteBrowserMessage::ServoReady => {}
@@ -2645,6 +2524,401 @@ pub fn update(
         }
     }
     Task::none()
+}
+
+// ---------------------------------------------------------------------------
+// Chats and the run lifecycle
+// ---------------------------------------------------------------------------
+
+/// `text_input::Id` of the agent composer, so New chat, a suggestion chip and
+/// opening the sidebar can put the cursor there.
+const AGENT_INPUT_ID: &str = "ferrite_agent_input";
+
+/// Whether the user may switch away from (or delete) the current chat right
+/// now. **Design choice:** switching is *blocked*, not "stop the run and
+/// switch". A run is real work against real pages; a stray click on a history
+/// row or a fumbled shortcut must not be able to cancel it, and blocking keeps
+/// the invariant that the running chat is never reloaded from disk mid-run.
+/// The view greys the controls and says why; the handlers re-check this so the
+/// keyboard shortcut and any direct message obey it too.
+fn chat_switch_blocked(state: &FerriteBrowser) -> bool {
+    state.agent_is_running || state.pending_diff.is_some()
+}
+
+/// The notice shown when a chat switch is refused.
+const SWITCH_BLOCKED_NOTICE: &str =
+    "Stop the current run (or finish reviewing it) before switching chats.";
+
+/// Clears the per-run live mirror and per-chat view state; used when the chat
+/// on screen changes.
+fn reset_chat_view(state: &mut FerriteBrowser) {
+    state.agent_log.clear();
+    state.agent_response = None;
+    state.expanded.clear();
+    state.pending_chat_delete = None;
+}
+
+/// THE place a run ends. Every ending — finished, asked the user, model or
+/// dry-run error, budget stops, the repeated-action stop, the Stop button,
+/// consent cancelled — comes here with the turn's [`Outcome`]. It updates the
+/// live mirror (`agent_response`, `agent_is_running`, `live_loop`,
+/// `pending_task`), finishes the turn on the chat, then saves the chat and
+/// refreshes the history list. A save failure is a notice, never fatal: the
+/// in-memory chat is already right.
+///
+/// A no-op on the chat when no turn is running (finishing twice cannot
+/// overwrite a real outcome — `Chat::finish_turn`'s own rule).
+fn conclude_run(state: &mut FerriteBrowser, outcome: Outcome) -> Task<FerriteBrowserMessage> {
+    if let Some(text) = agent_run::outcome_mirror_text(&outcome) {
+        state.agent_response = Some(text);
+    }
+    state.agent_is_running = false;
+    state.live_loop = None;
+    state.pending_task = None;
+    let had_running_turn = state.chat.has_running_turn();
+    state.chat.finish_turn(outcome);
+    if had_running_turn {
+        persist_chat(state);
+    }
+    Task::none()
+}
+
+/// Saves the current chat (atomically, via `ChatStore::save`) and keeps
+/// `chat_list` in step, in memory. Does nothing without a store (`Default`,
+/// tests, no home directory) or for a chat with no turns. A failure surfaces as
+/// a non-blocking notice and a log line; it never stops anything.
+fn persist_chat(state: &mut FerriteBrowser) {
+    let Some(store) = state.chat_store.as_ref() else {
+        return;
+    };
+    if state.chat.turns.is_empty() {
+        return;
+    }
+    match store.save(&state.chat) {
+        Ok(()) => agent_run::upsert_summary(&mut state.chat_list, state.chat.summary()),
+        Err(e) => {
+            eprintln!("[ferrite-ui] failed to save chat {}: {e}", state.chat.id);
+            state.panel_notice = Some(format!("Couldn't save this chat: {e}"));
+        }
+    }
+}
+
+/// `NewChat`: a fresh empty chat (not written until its first message), the
+/// thread view, the sidebar open and the cursor in the composer.
+fn new_chat(state: &mut FerriteBrowser) -> Task<FerriteBrowserMessage> {
+    if chat_switch_blocked(state) {
+        state.panel_notice = Some(SWITCH_BLOCKED_NOTICE.to_string());
+        return Task::none();
+    }
+    state.chat = Chat::new();
+    reset_chat_view(state);
+    state.panel_notice = None;
+    state.sidebar_view = SidebarView::Thread;
+    state.show_agent_sidebar = true;
+    text_input::focus(text_input::Id::new(AGENT_INPUT_ID))
+}
+
+/// `OpenChat`: loads `id` from the store into the current chat. Blocked while
+/// a run is active (see [`chat_switch_blocked`]); opening the chat already on
+/// screen only switches to its thread. A chat that cannot be loaded is
+/// reported and, if its file is gone, dropped from the list.
+fn open_chat(state: &mut FerriteBrowser, id: &ChatId) -> Task<FerriteBrowserMessage> {
+    // The chat already on screen is never reloaded — it may be mid-run, and
+    // the in-memory copy is the truth. Tapping its row just shows the thread.
+    if *id == state.chat.id {
+        state.sidebar_view = SidebarView::Thread;
+        return Task::none();
+    }
+    if chat_switch_blocked(state) {
+        state.panel_notice = Some(SWITCH_BLOCKED_NOTICE.to_string());
+        return Task::none();
+    }
+    let Some(store) = state.chat_store.as_ref() else {
+        return Task::none();
+    };
+    match store.load(id) {
+        Ok(chat) => {
+            state.chat = chat;
+            reset_chat_view(state);
+            state.panel_notice = None;
+            state.sidebar_view = SidebarView::Thread;
+            text_input::focus(text_input::Id::new(AGENT_INPUT_ID))
+        }
+        Err(e) => {
+            eprintln!("[ferrite-ui] failed to open chat {id}: {e}");
+            if matches!(e, ferrite_agent::chat::ChatError::NotFound(_)) {
+                state.chat_list.retain(|s| s.id != *id);
+            }
+            state.panel_notice = Some(format!("Couldn't open that chat: {e}"));
+            Task::none()
+        }
+    }
+}
+
+/// `ConfirmDeleteChat`: deletes `id`'s file and its list row. The chat on
+/// screen can be deleted too (when idle): it is replaced by a fresh empty one.
+/// Deleting the running chat is refused like any other switch away from it.
+fn delete_chat(state: &mut FerriteBrowser, id: &ChatId) {
+    let is_current = *id == state.chat.id;
+    if is_current && chat_switch_blocked(state) {
+        state.panel_notice = Some(SWITCH_BLOCKED_NOTICE.to_string());
+        return;
+    }
+    if let Some(store) = state.chat_store.as_ref() {
+        if let Err(e) = store.delete(id) {
+            eprintln!("[ferrite-ui] failed to delete chat {id}: {e}");
+            state.panel_notice = Some(format!("Couldn't delete that chat: {e}"));
+            return;
+        }
+    }
+    state.chat_list.retain(|s| s.id != *id);
+    if is_current {
+        state.chat = Chat::new();
+        reset_chat_view(state);
+    }
+}
+
+/// `AgentTaskSubmitted`: starts a new turn on the current chat and spawns the
+/// defense pipeline (fingerprint, dry run, compare) that ends in either
+/// `LiveRunReady` or `ConsentRequired`. Ignored while a run is active or a
+/// consent decision is pending, and for a blank message.
+fn submit_task(state: &mut FerriteBrowser) -> Task<FerriteBrowserMessage> {
+    if state.agent_is_running || state.pending_diff.is_some() {
+        return Task::none();
+    }
+    let prompt = state.agent_task_input.trim().to_string();
+    if prompt.is_empty() {
+        return Task::none();
+    }
+    let event_tx = match state.agent_event_tx.clone() {
+        Some(tx) => tx,
+        None => return Task::none(),
+    };
+
+    state.chat.begin_turn(&prompt, None);
+    persist_chat(state);
+    state.sidebar_view = SidebarView::Thread;
+    state.panel_notice = None;
+    state.agent_log.clear();
+    state.agent_response = None;
+    state.agent_task_input.clear();
+    state.agent_is_running = true;
+    state.run_id += 1;
+    let run_id = state.run_id;
+
+    let context_url = state.tab_urls.get(state.active_tab).cloned();
+    let ipi_task = IpiTask::new(prompt.clone(), context_url.clone());
+    state.pending_task = Some(prompt.clone());
+
+    let provider = state.model_provider.clone();
+    let model_tag_small = state.model_tag_small.clone();
+    let model_tag_main = state.model_tag_main.clone();
+
+    let handle = tokio::task::spawn(async move {
+        // ── Defense-mode single decision point (Task 18) ──────────────
+        // ToolDecisionEngine::new() reads FERRITE_DEFENSE once; On is the
+        // unchanged default everywhere. Off skips straight to the real run
+        // (no sanitizer, no dry-run, no consent). SanitizerOnly runs the
+        // sanitizer but also skips straight to the real run. On runs the
+        // sanitizer and continues into the existing fingerprint/dry-run/
+        // compare/consent loop, unchanged.
+        let engine = ToolDecisionEngine::new();
+        let loop_outcome = engine.prepare_task(&ipi_task);
+        let defense_mode = match &loop_outcome {
+            LoopOutcome::Bypassed | LoopOutcome::RanSanitizerOnly { .. } => {
+                let _ = event_tx.send(FerriteBrowserMessage::LiveRunReady {
+                    run_id,
+                    prompt: prompt.clone(),
+                });
+                return;
+            }
+            // LoopOnly and On both continue into the fingerprint/dry-run/
+            // compare/consent loop below. They differ only in whether the
+            // sanitizer ran first (On) or was bypassed (LoopOnly) — a
+            // distinction the dry-run orchestrator now acts on directly
+            // (T-215: set_defense_mode below), so both fall through here.
+            LoopOutcome::RanLoopOnly => DefenseMode::LoopOnly,
+            LoopOutcome::RanFullLoop { .. } => DefenseMode::On,
+        };
+
+        // ── IPI dry run ──────────────────────────────────────────────
+        // T-224/T-229: `provider` is the real, live-configured
+        // ModelProvider constructed at startup (or MockProvider,
+        // fail-to-empty, if none is configured/reachable) — no
+        // longer a hardcoded MockProvider::new() regardless of what
+        // is actually available (T-229's exact fix).
+        let fingerprint = engine
+            .fingerprint_from_task(provider.as_ref(), &model_tag_small, &ipi_task)
+            .await;
+        let twin_path = std::env::temp_dir().join("ferrite-ipi-twin.enc");
+        let mut orch = ferrite_ipi::dry_run::DryRunOrchestrator::new(twin_path);
+        // T-215: derive detect_enabled AND strip_enabled together from
+        // the mode this dry run is actually running under, instead of
+        // leaving both at DryRunOrchestrator::new's defaults
+        // (detect-only, strip off) regardless of mode.
+        orch.set_defense_mode(defense_mode);
+        // BrowserLoopDryRunDriver runs the real
+        // `browser_loop::run_agent_loop` directly against the
+        // synthetic `DryRunEngine` — see that type's own docs for
+        // why this needs no GeminiAgent/EngineToolExecutor bridge
+        // now that neither this loop nor the dry run's engine
+        // depends on the old vocabulary.
+        let driver = BrowserLoopDryRunDriver {
+            provider: provider.as_ref(),
+            model_tag: model_tag_main.clone(),
+            prompt: prompt.clone(),
+        };
+        let dry_record = match orch.run(&ipi_task, &driver).await {
+            Ok(r) => r,
+            Err(e) => {
+                let _ = event_tx.send(FerriteBrowserMessage::AgentFailed(format!(
+                    "dry run failed: {}",
+                    e
+                )));
+                return;
+            }
+        };
+        let _ = event_tx.send(FerriteBrowserMessage::AgentToolLogged(
+            "[dry run complete — checking for unexpected activity]".to_string(),
+        ));
+        // No per-task per-capability origin-scope authoring exists yet
+        // (T-001's live-path bridge, see ferrite_ipi::comparator's
+        // module docs). The task's own declared context URL — already
+        // threaded in above as `context_url` — narrows every
+        // capability to an exact scope on it; task_open (which admits
+        // any origin) is used only when no context URL is known at
+        // all, never unconditionally.
+        let context_origin = context_url
+            .as_deref()
+            .and_then(|url| ferrite_core::Origin::parse(url).ok());
+        let expected = ExpectedFingerprint::from_fingerprint(&fingerprint, context_origin.as_ref());
+        let diff = compare(&expected, &dry_record);
+        if !diff.is_clean() {
+            let _ = event_tx.send(FerriteBrowserMessage::ConsentRequired {
+                diff,
+                expected,
+                evidence: Box::new(dry_record),
+            });
+            return;
+        }
+
+        // ── Real run ─────────────────────────────────────────────────
+        let _ = event_tx.send(FerriteBrowserMessage::LiveRunReady { run_id, prompt });
+    });
+    state.agent_handle = Some(handle);
+    Task::none()
+}
+
+/// One step's model reply (or failure): validates the run, ends the run on a
+/// terminal action or a stop condition, otherwise blocks or executes the
+/// action, logs and records it, and spawns the next step.
+fn handle_agent_step(
+    state: &mut FerriteBrowser,
+    run_id: u64,
+    action: Result<AgentAction, StepFailure>,
+) -> Task<FerriteBrowserMessage> {
+    if run_id != state.run_id {
+        return Task::none();
+    }
+    let Some(mut live) = state.live_loop.take() else {
+        return Task::none();
+    };
+
+    let action = match action {
+        Ok(a) => {
+            live.consecutive_malformed = 0;
+            a
+        }
+        Err(StepFailure::Model(reason)) => {
+            return conclude_run(state, Outcome::Failed(reason));
+        }
+        Err(StepFailure::Malformed { raw, message }) => {
+            live.consecutive_malformed += 1;
+            if live.consecutive_malformed > MAX_CONSECUTIVE_MALFORMED_STEPS {
+                return conclude_run(state, Outcome::Failed(format!("{message} (raw: {raw})")));
+            }
+            // Give the model a chance to self-correct — the same
+            // retry-with-feedback shape `browser_loop::run_agent_loop` uses,
+            // and for the same reason: a truncated or malformed response is
+            // often a one-off glitch (e.g. a `finish.answer` cut short by the
+            // provider's output cap) a model recovers from once told what was
+            // wrong, so ending the whole task on the first one turned a
+            // recoverable hiccup into a hard failure. Not counted against
+            // `budget.max_steps` — no real browser action was taken — but
+            // independently bounded by `MAX_CONSECUTIVE_MALFORMED_STEPS`.
+            live.messages
+                .push(Message::assistant(compact_observation(raw.trim())));
+            live.messages.push(Message::user(format!(
+                "Observation: your last response could not be parsed as a single, \
+                 complete, valid JSON action ({message}). It may have been cut off \
+                 or included extra text. Respond with EXACTLY ONE complete, valid \
+                 JSON object and nothing else."
+            )));
+            trim_message_history(&mut live.messages);
+            return spawn_next_step(state, run_id, live);
+        }
+    };
+
+    if let AgentAction::Finish { answer } = action {
+        return conclude_run(state, Outcome::Answered(answer));
+    }
+    // `ask_user` is terminal too and never reaches the engine; the question
+    // ends the turn, and the user's next message answers it.
+    if let AgentAction::AskUser { question } = action {
+        return conclude_run(state, Outcome::AskedUser(question));
+    }
+
+    // Repeated-identical-action hard stop — mirrors
+    // `browser_loop::run_agent_loop`'s own check exactly (fires *before*
+    // executing the would-be Nth repeat).
+    if live.budget.max_repeated_identical > 0 {
+        let window = live.budget.max_repeated_identical - 1;
+        if window <= live.actions_taken.len()
+            && live.actions_taken[live.actions_taken.len() - window..]
+                .iter()
+                .all(|a| a == &action)
+        {
+            return conclude_run(
+                state,
+                Outcome::Stopped("the same action was about to repeat".to_string()),
+            );
+        }
+    }
+
+    let blocked = is_action_rejected(&action, &live.rejected, &live.rejected_origins);
+    let observation = if blocked {
+        "blocked by user consent".to_string()
+    } else if let Some(session) = state.servo_sessions.get_mut(&state.active_tab) {
+        let mut engine = BorrowedServoEngine::new(session, 1280, 700);
+        execute_action(&mut engine, &action)
+    } else {
+        "error: no active browser session".to_string()
+    };
+
+    state.agent_log.push(AgentLogEntry::Step {
+        icon: icon_for_action(&action),
+        label: action_label(&action),
+        detail: action_detail(&action),
+        result: observation.clone(),
+        blocked,
+    });
+    state.chat.record_step(StepRecord {
+        label: action_label(&action).to_string(),
+        detail: agent_run::persisted_step_detail(&action),
+        result: agent_run::step_result_text(&observation),
+        blocked,
+    });
+    live.messages.push(Message::assistant(
+        serde_json::to_string(&action).unwrap_or_default(),
+    ));
+    let compacted_observation = compact_observation(&observation);
+    live.messages.push(Message::user(format!(
+        "Observation: {compacted_observation}"
+    )));
+    trim_message_history(&mut live.messages);
+    live.actions_taken.push(action);
+
+    spawn_next_step(state, run_id, live)
 }
 
 /// Saves `state.bookmarks` to `state.bookmarks_path` if one is set (real
@@ -3952,7 +4226,7 @@ fn start_live_loop(
     prompt: String,
     rejected: std::collections::HashSet<ToolId>,
     rejected_origins: std::collections::HashSet<String>,
-) {
+) -> Task<FerriteBrowserMessage> {
     state.agent_is_running = true;
     let live = LiveAgentLoop {
         messages: vec![Message::user(prompt)],
@@ -3963,26 +4237,29 @@ fn start_live_loop(
         rejected_origins,
         consecutive_malformed: 0,
     };
-    spawn_next_step(state, run_id, live);
+    spawn_next_step(state, run_id, live)
 }
 
 /// Checks the step/wall-clock budget (mirroring
 /// `browser_loop::run_agent_loop`'s own pre-request checks exactly), then
 /// spawns the background model call for the next step. `live` is stored
 /// back onto `state.live_loop` for the resulting `AgentStepReady` to pick
-/// up; a budget stop instead ends the run with a benign, visible message —
-/// not an error, since a budget cutoff is a designed safety limit, not a
-/// failure.
-fn spawn_next_step(state: &mut FerriteBrowser, run_id: u64, live: LiveAgentLoop) {
+/// up; a budget stop instead ends the run — through `conclude_run`, like every
+/// other ending — with a benign, visible outcome, not an error, since a budget
+/// cutoff is a designed safety limit, not a failure.
+fn spawn_next_step(
+    state: &mut FerriteBrowser,
+    run_id: u64,
+    live: LiveAgentLoop,
+) -> Task<FerriteBrowserMessage> {
     if live.actions_taken.len() >= live.budget.max_steps {
-        state.agent_response = Some("[stopped: step budget exhausted]".to_string());
-        state.agent_is_running = false;
-        return;
+        return conclude_run(state, Outcome::Stopped("step budget exhausted".to_string()));
     }
     if live.started_at.elapsed() >= live.budget.max_wall_clock {
-        state.agent_response = Some("[stopped: wall-clock budget exhausted]".to_string());
-        state.agent_is_running = false;
-        return;
+        return conclude_run(
+            state,
+            Outcome::Stopped("wall-clock budget exhausted".to_string()),
+        );
     }
 
     let provider = state.model_provider.clone();
@@ -3990,7 +4267,12 @@ fn spawn_next_step(state: &mut FerriteBrowser, run_id: u64, live: LiveAgentLoop)
     let messages = live.messages.clone();
     let event_tx = match state.agent_event_tx.clone() {
         Some(tx) => tx,
-        None => return,
+        None => {
+            return conclude_run(
+                state,
+                Outcome::Failed("the agent's event channel is unavailable".to_string()),
+            );
+        }
     };
 
     let handle = tokio::task::spawn(async move {
@@ -4011,6 +4293,7 @@ fn spawn_next_step(state: &mut FerriteBrowser, run_id: u64, live: LiveAgentLoop)
 
     state.agent_handle = Some(handle);
     state.live_loop = Some(live);
+    Task::none()
 }
 
 // ---------------------------------------------------------------------------
@@ -5640,6 +5923,10 @@ fn handle_key_press(
             "l" => Some(FerriteBrowserMessage::FocusAddressBar),
             "j" => Some(FerriteBrowserMessage::ToggleJsConsole),
             "f" => Some(FerriteBrowserMessage::OpenFindBar),
+            // Cmd/Ctrl+Shift+O: new agent chat. With Shift held the OS
+            // reports the shifted character, so both cases are accepted; a
+            // bare Cmd/Ctrl+O is not bound.
+            "o" | "O" if modifiers.shift() => Some(FerriteBrowserMessage::NewChat),
             // "=" covers the common US-keyboard case where Cmd/Ctrl+Plus is
             // actually sent as Cmd/Ctrl+'=' (Plus's un-shifted key); "+" is
             // handled too for a layout/OS that does send it directly.
@@ -5802,6 +6089,7 @@ fn view_agent_sidebar(state: &FerriteBrowser) -> Element<'_, FerriteBrowserMessa
         .into()
     } else {
         text_input("Enter a task...", &state.agent_task_input)
+            .id(text_input::Id::new(AGENT_INPUT_ID))
             .width(Length::Fill)
             .padding([7, 10])
             .size(13)
@@ -6323,6 +6611,26 @@ pub fn launch() -> iced::Result {
                      bookmarks will work for this session but won't be saved"
                 );
             }
+            // Chats: resolve the real chats directory and read the list of
+            // saved chats once, here — never inside `Default` (same
+            // test-safety discipline as bookmarks). A corrupt chat file costs
+            // exactly that chat: `ChatStore::list` skips it and reports a
+            // warning, which becomes a log line here and nothing more.
+            match default_chats_dir() {
+                Some(dir) => {
+                    let store = ChatStore::new(dir);
+                    let (list, warnings) = store.list();
+                    for warning in warnings {
+                        eprintln!("[ferrite-ui] skipping an unreadable chat: {warning}");
+                    }
+                    state.chat_list = list;
+                    state.chat_store = Some(store);
+                }
+                None => eprintln!(
+                    "[ferrite-ui] cannot resolve the home directory for saved chats — \
+                     chats will work for this session but won't be saved"
+                ),
+            }
             state.downloads_dir = default_downloads_dir();
             if state.downloads_dir.is_none() {
                 eprintln!(
@@ -6390,6 +6698,9 @@ pub fn launch() -> iced::Result {
 // nothing scripted only ever returns a typed `ModelError`, never reaches a
 // socket. No live call is made, per R7.
 // ---------------------------------------------------------------------------
+#[cfg(test)]
+mod chat_tests;
+
 #[cfg(test)]
 mod tests {
     use super::*;
