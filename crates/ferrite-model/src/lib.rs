@@ -60,6 +60,7 @@ pub mod decorators;
 pub mod error;
 pub mod fixtures;
 mod guard;
+pub mod laya;
 pub mod provider;
 pub mod request;
 pub mod response;

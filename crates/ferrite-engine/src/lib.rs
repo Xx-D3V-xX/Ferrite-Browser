@@ -65,6 +65,12 @@ use ferrite_core::{Origin, Primitive};
 
 mod mock;
 
+pub mod digest;
+
+pub use digest::{
+    normalize_selector, parse_ref, ref_selector, sanitize_text, truncate_chars, DigestElement,
+    PageDigest, RenderBudget, ScrollState, REF_ATTRIBUTE,
+};
 pub use mock::{MockEngine, MOCK_HOME};
 
 #[cfg(any(test, feature = "test-util"))]

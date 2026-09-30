@@ -2583,6 +2583,7 @@ dependencies = [
  "ferrite-core",
  "ferrite-engine",
  "serde",
+ "serde_json",
  "thiserror 1.0.69",
 ]
 

@@ -26,3 +26,6 @@
 //! deleted names before this file was cut down to just this module.
 
 pub mod browser_loop;
+pub mod chat;
+pub mod context;
+pub mod decider;
