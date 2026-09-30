@@ -384,20 +384,39 @@ fn primitive_of_action(action: &AgentAction) -> ferrite_core::Primitive {
         | AgentAction::GoBack
         | AgentAction::GoForward
         | AgentAction::Reload => Primitive::Navigate,
-        AgentAction::ReadDom | AgentAction::ReadText { .. } => Primitive::DomRead,
+        AgentAction::ReadDom
+        | AgentAction::ReadPage
+        | AgentAction::ReadText { .. }
+        | AgentAction::FindText { .. }
+        | AgentAction::ExtractLinks { .. }
+        | AgentAction::ListTabs => Primitive::DomRead,
         AgentAction::Query { .. } => Primitive::DomQuery,
-        AgentAction::Click { .. } => Primitive::Click,
-        AgentAction::TypeText { .. } | AgentAction::SelectOption { .. } => Primitive::DomWrite,
+        // Same conservative mapping as `ferrite_engine::Call::primitive`:
+        // hover/set_checked/submit_form are never weaker than a click.
+        AgentAction::Click { .. }
+        | AgentAction::Hover { .. }
+        | AgentAction::SetChecked { .. }
+        | AgentAction::SubmitForm { .. } => Primitive::Click,
+        AgentAction::TypeText { .. }
+        | AgentAction::SelectOption { .. }
+        | AgentAction::PressKey { .. } => Primitive::DomWrite,
         AgentAction::FillForm { .. } => Primitive::FormFill,
-        AgentAction::Scroll { .. } => Primitive::Scroll,
-        AgentAction::WaitForSelector { .. } | AgentAction::WaitIdle => Primitive::Wait,
+        AgentAction::Scroll { .. } | AgentAction::ScrollTo { .. } => Primitive::Scroll,
+        AgentAction::WaitForSelector { .. }
+        | AgentAction::WaitIdle
+        | AgentAction::WaitMs { .. } => Primitive::Wait,
+        AgentAction::OpenTab { .. } => Primitive::TabOpen,
+        AgentAction::CloseTab { .. } => Primitive::TabClose,
+        AgentAction::SwitchTab { .. } => Primitive::Navigate,
         AgentAction::Screenshot => Primitive::Screenshot,
         AgentAction::Download { .. } => Primitive::Download,
         AgentAction::ClipboardRead => Primitive::ClipboardRead,
         AgentAction::ClipboardWrite { .. } => Primitive::ClipboardWrite,
         AgentAction::JsExecute { .. } => Primitive::JsExecute,
-        AgentAction::Finish { .. } => {
-            unreachable!("Finish is intercepted before an action is ever dispatched or logged")
+        AgentAction::Finish { .. } | AgentAction::AskUser { .. } => {
+            unreachable!(
+                "Finish/AskUser are intercepted before an action is ever dispatched or logged"
+            )
         }
     }
 }
@@ -479,6 +498,20 @@ fn action_label(action: &AgentAction) -> &'static str {
         AgentAction::ClipboardWrite { .. } => "Write clipboard",
         AgentAction::JsExecute { .. } => "Run JavaScript",
         AgentAction::Finish { .. } => "Finish",
+        AgentAction::ReadPage => "Read page",
+        AgentAction::PressKey { .. } => "Press key",
+        AgentAction::Hover { .. } => "Hover",
+        AgentAction::SetChecked { .. } => "Set checkbox",
+        AgentAction::ScrollTo { .. } => "Scroll to element",
+        AgentAction::FindText { .. } => "Find text",
+        AgentAction::ExtractLinks { .. } => "List links",
+        AgentAction::SubmitForm { .. } => "Submit form",
+        AgentAction::WaitMs { .. } => "Wait",
+        AgentAction::OpenTab { .. } => "Open tab",
+        AgentAction::SwitchTab { .. } => "Switch tab",
+        AgentAction::CloseTab { .. } => "Close tab",
+        AgentAction::ListTabs => "List tabs",
+        AgentAction::AskUser { .. } => "Ask you",
     }
 }
 
@@ -499,10 +532,27 @@ fn action_detail(action: &AgentAction) -> String {
         AgentAction::ClipboardWrite { text } => text.clone(),
         AgentAction::JsExecute { script } => script.clone(),
         AgentAction::Finish { answer } => answer.clone(),
+        AgentAction::Hover { selector }
+        | AgentAction::ScrollTo { selector }
+        | AgentAction::SetChecked { selector, .. } => selector.clone(),
+        AgentAction::PressKey { selector, key } => match selector {
+            Some(selector) => format!("{key} \u{2192} {selector}"),
+            None => key.clone(),
+        },
+        AgentAction::FindText { text } => text.clone(),
+        AgentAction::ExtractLinks { selector } | AgentAction::SubmitForm { selector } => {
+            selector.clone().unwrap_or_default()
+        }
+        AgentAction::WaitMs { ms } => format!("{ms} ms"),
+        AgentAction::OpenTab { url } => url.clone().unwrap_or_default(),
+        AgentAction::SwitchTab { tab } | AgentAction::CloseTab { tab } => format!("tab {tab}"),
+        AgentAction::AskUser { question } => question.clone(),
         AgentAction::GoBack
         | AgentAction::GoForward
         | AgentAction::Reload
         | AgentAction::ReadDom
+        | AgentAction::ReadPage
+        | AgentAction::ListTabs
         | AgentAction::WaitIdle
         | AgentAction::Screenshot
         | AgentAction::ClipboardRead => String::new(),
@@ -525,17 +575,31 @@ fn icon_for_action(action: &AgentAction) -> Icon {
         | AgentAction::GoBack
         | AgentAction::GoForward
         | AgentAction::Reload => Icon::Navigate,
-        AgentAction::ReadDom | AgentAction::ReadText { .. } | AgentAction::Query { .. } => {
-            Icon::Read
-        }
-        AgentAction::Click { .. } => Icon::Click,
+        AgentAction::ReadDom
+        | AgentAction::ReadPage
+        | AgentAction::ReadText { .. }
+        | AgentAction::Query { .. }
+        | AgentAction::FindText { .. }
+        | AgentAction::ExtractLinks { .. }
+        | AgentAction::ListTabs => Icon::Read,
+        AgentAction::Click { .. }
+        | AgentAction::Hover { .. }
+        | AgentAction::SetChecked { .. }
+        | AgentAction::SubmitForm { .. } => Icon::Click,
         AgentAction::TypeText { .. }
         | AgentAction::SelectOption { .. }
-        | AgentAction::FillForm { .. } => Icon::Write,
+        | AgentAction::FillForm { .. }
+        | AgentAction::PressKey { .. } => Icon::Write,
         AgentAction::Scroll { .. }
+        | AgentAction::ScrollTo { .. }
         | AgentAction::WaitForSelector { .. }
         | AgentAction::WaitIdle
+        | AgentAction::WaitMs { .. }
         | AgentAction::Screenshot => Icon::Activity,
+        AgentAction::OpenTab { .. }
+        | AgentAction::SwitchTab { .. }
+        | AgentAction::CloseTab { .. } => Icon::Navigate,
+        AgentAction::AskUser { .. } => Icon::Agent,
         AgentAction::Download { .. } => Icon::Download,
         AgentAction::ClipboardRead | AgentAction::ClipboardWrite { .. } => Icon::Clipboard,
         AgentAction::JsExecute { .. } => Icon::Console,
@@ -2247,6 +2311,14 @@ pub fn update(
 
             if let AgentAction::Finish { answer } = action {
                 state.agent_response = Some(answer);
+                state.agent_is_running = false;
+                return Task::none();
+            }
+            // `ask_user` is terminal too and never reaches the engine; the
+            // question is shown as the response (the chat workstream turns
+            // it into a real prompt).
+            if let AgentAction::AskUser { question } = action {
+                state.agent_response = Some(question);
                 state.agent_is_running = false;
                 return Task::none();
             }

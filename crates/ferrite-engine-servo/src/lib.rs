@@ -65,15 +65,29 @@
 //! purpose. Documented plainly here, once, rather than scattered as
 //! per-method surprises:
 //!
-//! - **`dom_snapshot` / `query` / `read_text` / `click` / `type_text` /
-//!   `select_option`** are all implemented by injecting a small JavaScript
-//!   snippet via `execute_js` that itself calls `JSON.stringify(...)`, and
-//!   parsing the returned JSON. This depends on the page's JS engine being
+//! - **Every DOM operation** — `page_digest`, `query`, `read_text`, `click`,
+//!   `type_text`, `fill_form`, `select_option`, `set_checked`, `press_key`,
+//!   `hover`, `scroll_to`, `find_text`, `extract_links`, `submit_form` — is one
+//!   operation of a single page script (`src/page_ops.js`, assembled and
+//!   checked by the private `script` module) run via `execute_js`, which
+//!   returns JSON. Every selector-taking operation first rewrites an `@12` ref
+//!   with [`ferrite_engine::normalize_selector`]; a ref that no longer
+//!   resolves is [`EngineError::ElementNotFound`] telling the model to
+//!   `read_page` again. `page_digest` stamps `data-ferrite-ref` on the live
+//!   DOM so those refs resolve. This depends on the page's JS engine being
 //!   available and reflects only what page JS can see — it will not see
 //!   content a page's own script could not see either (e.g. cross-origin
-//!   iframe internals), and it fails if the page has disabled or not yet
-//!   initialized its JS context. There is no separate, JS-independent
-//!   accessibility-tree accessor exposed by `HeadlessServoSession` today.
+//!   iframe internals; open shadow roots *are* walked), and it fails if the
+//!   page has disabled or not yet initialized its JS context. There is no
+//!   separate, JS-independent accessibility-tree accessor exposed by
+//!   `HeadlessServoSession` today. **The page script cannot run under
+//!   `cargo test`**: `scripts/page-script-check` runs it against HTML under
+//!   jsdom, and the real Servo path is unverified in an environment that
+//!   cannot build Servo. Its input events are synthetic (untrusted), so CSS
+//!   `:hover` styling and pages that require trusted events do not respond.
+//! - **`dom_snapshot`** predates the digest and stays as it was: an
+//!   accessibility-tree-shaped snapshot with a selector only for elements that
+//!   have an `id`. The agent reads pages with `page_digest` instead.
 //! - **`execute_js`'s `Ok` branch is a `Debug` rendering** of whatever
 //!   value type Servo's `evaluate_javascript` callback produces, not the
 //!   raw JS value (see `HeadlessServoSession::execute_js`'s own doc
