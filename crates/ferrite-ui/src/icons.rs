@@ -91,6 +91,19 @@ pub enum Icon {
     /// mainstream browser's own new-tab search field does — see
     /// `lib.rs::new_tab_page`.
     Search,
+    /// Agent panel: the chat-history button (a clock) and the empty-history
+    /// glyph.
+    History,
+    /// Agent panel: the composer's send button (an up arrow).
+    Send,
+    /// Agent panel: a collapsed step list / disclosure ("N steps" closed).
+    ChevronRight,
+    /// Agent panel: an expanded step list, and the "Latest" jump-to-newest pill.
+    ChevronDown,
+    /// Agent panel: the answer card's Copy button.
+    Copy,
+    /// Agent panel: delete a chat from the history list.
+    Trash,
 }
 
 // C3c left a note here that a bookmark/star icon was drawn but deliberately
@@ -137,6 +150,12 @@ pub fn icon_bytes(kind: Icon) -> &'static [u8] {
         Icon::BookmarkFilled => include_bytes!("../assets/icons/bookmark-filled.svg"),
         Icon::Menu => include_bytes!("../assets/icons/menu.svg"),
         Icon::Search => include_bytes!("../assets/icons/search.svg"),
+        Icon::History => include_bytes!("../assets/icons/history.svg"),
+        Icon::Send => include_bytes!("../assets/icons/send.svg"),
+        Icon::ChevronRight => include_bytes!("../assets/icons/chevron-right.svg"),
+        Icon::ChevronDown => include_bytes!("../assets/icons/chevron-down.svg"),
+        Icon::Copy => include_bytes!("../assets/icons/copy.svg"),
+        Icon::Trash => include_bytes!("../assets/icons/trash.svg"),
     }
 }
 
@@ -161,7 +180,7 @@ pub fn icon<'a, Message: 'a>(kind: Icon, size: f32, color: Color) -> Element<'a,
 mod tests {
     use super::*;
 
-    const ALL: [Icon; 27] = [
+    const ALL: [Icon; 33] = [
         Icon::Back,
         Icon::Forward,
         Icon::Reload,
@@ -189,6 +208,12 @@ mod tests {
         Icon::BookmarkFilled,
         Icon::Menu,
         Icon::Search,
+        Icon::History,
+        Icon::Send,
+        Icon::ChevronRight,
+        Icon::ChevronDown,
+        Icon::Copy,
+        Icon::Trash,
     ];
 
     /// Every icon variant embeds real, well-formed SVG data — catches a

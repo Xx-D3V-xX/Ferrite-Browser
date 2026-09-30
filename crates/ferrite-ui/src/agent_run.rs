@@ -213,6 +213,16 @@ pub(crate) fn next_context_mode(mode: ContextMode) -> ContextMode {
     }
 }
 
+/// The chip's short label for `mode`.
+#[must_use]
+pub(crate) fn context_mode_label(mode: ContextMode) -> &'static str {
+    match mode {
+        ContextMode::Auto => "Auto",
+        ContextMode::Always => "On",
+        ContextMode::Never => "Off",
+    }
+}
+
 /// Maps the 1-based tab number a `switch_tab`/`close_tab` action carries onto
 /// an index into the UI's tab vectors.
 ///
@@ -241,6 +251,15 @@ const FAST_MARK: &str = " \u{b7} fast lane";
 #[must_use]
 pub(crate) fn mark_fast(detail: &str) -> String {
     format!("{}{FAST_MARK}", truncate_chars(detail, 240))
+}
+
+/// Splits a recorded detail into `(detail without the marker, was_fast)`.
+#[must_use]
+pub(crate) fn split_fast_mark(detail: &str) -> (&str, bool) {
+    match detail.strip_suffix(FAST_MARK) {
+        Some(base) => (base, true),
+        None => (detail, false),
+    }
 }
 
 /// The action argument summary that is **persisted** in the chat file (and
@@ -599,10 +618,26 @@ mod tests {
     }
 
     #[test]
-    fn context_chip_modes_cycle() {
+    fn context_chip_modes_cycle_and_have_short_labels() {
         assert_eq!(next_context_mode(ContextMode::Auto), ContextMode::Always);
         assert_eq!(next_context_mode(ContextMode::Always), ContextMode::Never);
         assert_eq!(next_context_mode(ContextMode::Never), ContextMode::Auto);
+        assert_eq!(context_mode_label(ContextMode::Auto), "Auto");
+        assert_eq!(context_mode_label(ContextMode::Always), "On");
+        assert_eq!(context_mode_label(ContextMode::Never), "Off");
+    }
+
+    #[test]
+    fn a_recorded_fast_mark_round_trips_and_plain_details_are_untouched() {
+        let marked = mark_fast("@15");
+        assert_eq!(split_fast_mark(&marked), ("@15", true));
+        assert_eq!(split_fast_mark("@15"), ("@15", false));
+        // Only a trailing marker counts: a page-derived detail that merely
+        // mentions it does not turn the badge on.
+        assert_eq!(
+            split_fast_mark("typed 'fast lane' text"),
+            ("typed 'fast lane' text", false)
+        );
     }
 
     #[test]

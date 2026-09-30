@@ -1396,3 +1396,335 @@ fn tab_actions_map_onto_the_tool_ids_the_consent_gate_speaks() {
         &none
     ));
 }
+
+// ── Panel state: scroll pinning, entrance animations, suggestions ────────
+
+#[test]
+fn the_thread_only_follows_new_items_while_pinned_and_on_screen() {
+    let visible = |pinned: bool, view: SidebarView, consent: bool| FerriteBrowser {
+        show_agent_sidebar: true,
+        thread_pinned: pinned,
+        sidebar_view: view,
+        pending_diff: consent.then(FingerprintDiff::default),
+        ..FerriteBrowser::default()
+    };
+    assert!(should_snap_to_latest(&visible(
+        true,
+        SidebarView::Thread,
+        false
+    )));
+    assert!(
+        !should_snap_to_latest(&visible(false, SidebarView::Thread, false)),
+        "a user who scrolled up is not yanked back down"
+    );
+    assert!(!should_snap_to_latest(&visible(
+        true,
+        SidebarView::History,
+        false
+    )));
+    assert!(!should_snap_to_latest(&visible(
+        true,
+        SidebarView::Thread,
+        true
+    )));
+    assert!(
+        !should_snap_to_latest(&FerriteBrowser::default()),
+        "panel hidden"
+    );
+}
+
+#[test]
+fn scrolling_up_unpins_and_the_latest_button_pins_again() {
+    let mut state = FerriteBrowser::default();
+    assert!(state.thread_pinned, "a new thread starts pinned");
+    let _ = update(
+        &mut state,
+        FerriteBrowserMessage::ThreadScrolled { pinned: false },
+    );
+    assert!(!state.thread_pinned);
+    let _ = update(
+        &mut state,
+        FerriteBrowserMessage::ThreadScrolled { pinned: true },
+    );
+    assert!(state.thread_pinned);
+    let _ = update(
+        &mut state,
+        FerriteBrowserMessage::ThreadScrolled { pinned: false },
+    );
+    let _ = update(&mut state, FerriteBrowserMessage::ScrollThreadToBottom);
+    assert!(state.thread_pinned);
+}
+
+#[tokio::test]
+async fn sending_a_message_repins_a_thread_the_user_had_scrolled_up() {
+    let mut state = FerriteBrowser {
+        thread_pinned: false,
+        agent_task_input: "go".into(),
+        ..FerriteBrowser::default()
+    };
+    let _ = update(&mut state, FerriteBrowserMessage::AgentTaskSubmitted);
+    assert!(state.thread_pinned);
+}
+
+#[test]
+fn a_suggestion_chip_fills_the_composer_without_sending() {
+    let mut state = FerriteBrowser::default();
+    let _ = update(
+        &mut state,
+        FerriteBrowserMessage::SuggestionChosen("Summarize this page".into()),
+    );
+    assert_eq!(state.agent_task_input, "Summarize this page");
+    assert!(!state.agent_is_running && state.chat.turns.is_empty());
+}
+
+#[tokio::test]
+async fn new_items_start_entrance_animations_that_tick_out_and_switch_the_tick_off() {
+    let mut state = FerriteBrowser {
+        show_agent_sidebar: true,
+        run_id: 1,
+        agent_task_input: "go".into(),
+        ..FerriteBrowser::default()
+    };
+    assert!(
+        !agent_panel::thread_anim_active(&state),
+        "idle: no tick subscribed"
+    );
+
+    // Sending animates the user bubble.
+    let _ = update(&mut state, FerriteBrowserMessage::AgentTaskSubmitted);
+    let user = ItemKey {
+        turn: 0,
+        slot: SLOT_USER,
+    };
+    assert!(state.thread_anims.iter().any(|(k, _)| *k == user));
+    assert!(agent_panel::thread_anim_active(&state));
+
+    // A step card animates in under its own key.
+    state.live_loop = Some(live());
+    let run_id = state.run_id;
+    let _ = update(
+        &mut state,
+        FerriteBrowserMessage::AgentStepReady {
+            run_id,
+            action: Ok(AgentAction::ReadDom),
+        },
+    );
+    let first_step = ItemKey {
+        turn: 0,
+        slot: SLOT_STEP_BASE,
+    };
+    assert!(state.thread_anims.iter().any(|(k, _)| *k == first_step));
+
+    // The answer animates in when the run ends.
+    let _ = update(
+        &mut state,
+        FerriteBrowserMessage::AgentCompleted("done".into()),
+    );
+    let outcome = ItemKey {
+        turn: 0,
+        slot: SLOT_OUTCOME,
+    };
+    assert!(state.thread_anims.iter().any(|(k, _)| *k == outcome));
+
+    // Ticks run every animation to completion, and then the tick is off.
+    for _ in 0..40 {
+        let _ = update(&mut state, FerriteBrowserMessage::ThreadAnimTick);
+    }
+    assert!(state.thread_anims.is_empty());
+    assert!(!agent_panel::thread_anim_active(&state));
+}
+
+#[test]
+fn nothing_animates_while_the_panel_is_hidden() {
+    let mut state = FerriteBrowser {
+        show_agent_sidebar: true,
+        ..FerriteBrowser::default()
+    };
+    animate_item(&mut state, SLOT_USER); // no turn yet: nothing to animate
+    assert!(state.thread_anims.is_empty());
+    state.chat.begin_turn("q", None);
+    animate_item(&mut state, SLOT_USER);
+    assert!(agent_panel::thread_anim_active(&state));
+    let _ = update(&mut state, FerriteBrowserMessage::ToggleAgentSidebar);
+    assert!(!state.show_agent_sidebar);
+    assert!(
+        state.thread_anims.is_empty(),
+        "hiding the panel drops animations"
+    );
+}
+
+#[test]
+fn switching_chats_resets_scroll_pinning_and_animations() {
+    let mut state = FerriteBrowser {
+        thread_pinned: false,
+        ..FerriteBrowser::default()
+    };
+    state.chat.begin_turn("q", None);
+    animate_item(&mut state, SLOT_USER);
+    let _ = update(&mut state, FerriteBrowserMessage::ScrollThreadToBottom);
+    state.chat.finish_turn(Outcome::Cancelled);
+    state.thread_pinned = false;
+    let _ = update(&mut state, FerriteBrowserMessage::NewChat);
+    assert!(state.thread_pinned);
+    assert!(state.thread_anims.is_empty());
+}
+
+// ── The views build for every state (no display needed) ──────────────────
+//
+// Constructing the widget tree touches no renderer, so these catch a panic in
+// any view path (an out-of-range index, a bad slice) in the build sandbox. They
+// prove the tree can be built, not how it looks: nothing here was rendered.
+
+fn smoke_state() -> FerriteBrowser {
+    let mut state = FerriteBrowser {
+        show_agent_sidebar: true,
+        tab_urls: vec!["https://shop.example/".into()],
+        ..FerriteBrowser::default()
+    };
+    // One turn per way a turn can end, some with steps, long and hostile text.
+    let long = "word ".repeat(600) + &"x".repeat(400);
+    for (i, outcome) in [
+        Outcome::Answered(long.clone()),
+        Outcome::AskedUser("Which one do you mean?".into()),
+        Outcome::Stopped("step budget exhausted".into()),
+        Outcome::Failed("model unreachable".into()),
+        Outcome::Cancelled,
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        state.chat.begin_turn(
+            &format!("request {i} {long}"),
+            Some(ferrite_agent::chat::PageContextNote {
+                url: "https://shop.example/".into(),
+                title: "Shop \u{2014} \u{1F6D2} unicode title".into(),
+                used_full_page: i % 2 == 0,
+                reason: "because".into(),
+            }),
+        );
+        state.chat.record_step(StepRecord {
+            label: "Click".into(),
+            detail: "@3 \u{b7} fast lane".to_string(),
+            result: long.clone(),
+            blocked: false,
+        });
+        state.chat.record_step(StepRecord {
+            label: "Run JavaScript".into(),
+            detail: "1+1".into(),
+            result: "blocked by user consent".into(),
+            blocked: true,
+        });
+        state.chat.finish_turn(outcome);
+    }
+    let turn_id = state.chat.turns[0].id.to_string();
+    state.expanded.insert(format!("steps:{turn_id}"));
+    state.expanded.insert(format!("answer:{turn_id}"));
+    state.expanded.insert(format!("user:{turn_id}"));
+    state
+}
+
+#[test]
+fn the_panel_builds_for_every_kind_of_thread() {
+    for theme in [AppTheme::Dark, AppTheme::Light] {
+        let mut state = smoke_state();
+        state.theme_mode = theme;
+        let _ = agent_panel::view_agent_sidebar(&state);
+
+        // Empty chat with and without a real page (the suggestion chips).
+        let mut empty = FerriteBrowser {
+            theme_mode: theme,
+            ..FerriteBrowser::default()
+        };
+        let _ = agent_panel::view_agent_sidebar(&empty);
+        empty.tab_urls[0] = "https://a.example/".into();
+        let _ = agent_panel::view_agent_sidebar(&empty);
+
+        // A run in flight: live cards, notes, the working indicator, a live
+        // step counter, the disabled-New-chat look, a notice.
+        let mut running = smoke_state();
+        running.theme_mode = theme;
+        running.chat.begin_turn("now this", None);
+        running.agent_is_running = true;
+        running.live_loop = Some(live());
+        running.panel_notice = Some("Couldn't save this chat: disk full".into());
+        running.thread_pinned = false;
+        running
+            .agent_log
+            .push(AgentLogEntry::Note("[dry run complete]".into()));
+        running.agent_log.push(AgentLogEntry::Step {
+            icon: Icon::Click,
+            label: "Click",
+            detail: "@3".into(),
+            result: "x".repeat(500),
+            blocked: false,
+            fast: true,
+        });
+        running.agent_log.push(AgentLogEntry::Step {
+            icon: Icon::Console,
+            label: "Run JavaScript",
+            detail: "1+1".into(),
+            result: "blocked by user consent".into(),
+            blocked: true,
+            fast: false,
+        });
+        running.thread_anims = vec![
+            (
+                ItemKey {
+                    turn: 5,
+                    slot: SLOT_USER,
+                },
+                0.3,
+            ),
+            (
+                ItemKey {
+                    turn: 5,
+                    slot: SLOT_STEP_BASE + 1,
+                },
+                0.7,
+            ),
+        ];
+        let _ = agent_panel::view_agent_sidebar(&running);
+
+        // The consent panel replaces the thread; the composer is disabled.
+        let mut review = smoke_state();
+        review.theme_mode = theme;
+        let mut diff = FingerprintDiff::default();
+        diff.extra_primitives.insert(ToolId::new("js.execute"));
+        diff.out_of_scope_origins
+            .insert("https://attacker.example".into());
+        review.pending_diff = Some(diff);
+        review.pending_expected = Some(ExpectedFingerprint::empty());
+        let _ = agent_panel::view_agent_sidebar(&review);
+    }
+}
+
+#[test]
+fn the_history_view_builds_empty_full_confirming_and_blocked() {
+    let mut state = FerriteBrowser {
+        sidebar_view: SidebarView::History,
+        ..FerriteBrowser::default()
+    };
+    let _ = agent_panel::view_agent_sidebar(&state); // empty list
+
+    for i in 0..4 {
+        let mut chat = Chat::new();
+        chat.begin_turn(&format!("chat number {i} {}", "long ".repeat(40)), None);
+        chat.finish_turn(Outcome::Answered("an answer ".repeat(30)));
+        agent_run::upsert_summary(&mut state.chat_list, chat.summary());
+    }
+    let _ = agent_panel::view_agent_sidebar(&state);
+
+    state.pending_chat_delete = Some(state.chat_list[1].id.clone());
+    state.chat = Chat::new();
+    let _ = agent_panel::view_agent_sidebar(&state);
+
+    state.agent_is_running = true; // blocked: rows dimmed, hint shown
+    state.theme_mode = AppTheme::Light;
+    let _ = agent_panel::view_agent_sidebar(&state);
+}
+
+#[test]
+fn the_whole_window_builds_with_the_panel_open() {
+    let state = smoke_state();
+    let _ = view(&state);
+}

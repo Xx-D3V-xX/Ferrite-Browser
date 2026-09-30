@@ -53,6 +53,31 @@
 // `AgentStepReady` handler in `update()`. `docs/handoffs/b03.md` has the
 // full reasoning for this deviation from calling `run_agent_loop` directly.
 //
+// ## Chats, context and the fast lane (agent-context-chats-laya)
+//
+// The agent panel is a chat (`agent_panel.rs`). `FerriteBrowser::chat` is the
+// durable `ferrite_agent::chat::Chat`; `agent_log`/`agent_response`/
+// `agent_is_running`/`live_loop` are the *current run's* live mirror. Every
+// way a run ends goes through `conclude_run`, which finishes the turn, saves
+// the chat atomically (a failure is a notice, never fatal) and updates the
+// in-memory list. Chats are read from disk only in `launch()`.
+//
+// On submit (`submit_task`) the run is seeded: the chat so far, the open tabs
+// and (if the message is about it) the page digest, read on this thread via
+// the borrowed engine's `observe_page`, become the live loop's first message
+// (`pending_seed`). **The injection defense never sees that seed** — it gets
+// `trusted_task_text` (user words only), built by
+// `agent_run::ipi_task_for_run`; see the comment in `submit_task`.
+//
+// The borrowed engine cannot manage tabs, so `open_tab`/`switch_tab`/
+// `close_tab`/`list_tabs` are performed here (`run_tab_action`) through the
+// same helpers as the tab strip, after the same consent check.
+//
+// With `FERRITE_LAYA_URL` set, the optional Laya fast lane may pick a step
+// without an LLM call (`spawn_next_step` -> `agent_run::try_fast_lane` ->
+// `FastStepReady`); the step then takes exactly the same handler, consent
+// check and loop-safety limits as an LLM step. Off by default.
+//
 // ## Keyboard shortcuts (platform-aware)
 //   macOS : Cmd+T/W/R/L/J/F, Cmd+=/-/0 (zoom), Cmd+Shift+O (new agent chat), F5, F12, Alt+←/→, Esc
 //   other : Ctrl+T/W/R/L/J/F, Ctrl+=/-/0 (zoom), Ctrl+Shift+O (new agent chat), F5, F12, Alt+←/→, Esc
@@ -187,6 +212,7 @@ use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
+mod agent_panel;
 mod agent_run;
 mod icons;
 use icons::{icon, Icon};
@@ -765,6 +791,10 @@ const ICON_SIZE_SM: f32 = 12.0;
 /// the 150-250ms range typical for this kind of UI entrance transition.
 const CONSENT_ANIM_STEP: f32 = 16.0 / 200.0;
 
+/// Advance per `ThreadAnimTick` for each entering thread item's progress —
+/// ticks fire every 16ms, so an entrance takes ~220ms.
+const THREAD_ANIM_STEP: f32 = 16.0 / 220.0;
+
 /// Number of individually-lit segments in `view()`'s top-of-window loading
 /// bar — see [`progress_segment_brightness`]. Wide enough to read as a
 /// smooth sweep rather than a few chunky blocks, narrow enough that each
@@ -1123,6 +1153,21 @@ pub enum SidebarView {
     History,
 }
 
+/// Identifies one animated item of the message thread: a turn, and which part
+/// of it (`SLOT_*`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ItemKey {
+    pub turn: usize,
+    pub slot: u32,
+}
+
+/// The user's message bubble of a turn.
+pub const SLOT_USER: u32 = 0;
+/// The first live step card of a turn (`SLOT_STEP_BASE + index into agent_log`).
+pub const SLOT_STEP_BASE: u32 = 1;
+/// The turn's outcome card (answer, question, stop, failure).
+pub const SLOT_OUTCOME: u32 = u32::MAX;
+
 /// State of an in-progress live agent-action loop (post-fingerprint, either
 /// bypassed straight through or after a clean/consented dry run). Lives on
 /// `FerriteBrowser` between the per-step background model calls
@@ -1377,6 +1422,16 @@ pub struct FerriteBrowser {
     /// A small non-blocking line under the sidebar header ("Couldn't save this
     /// chat: ...", "Stop the current run first"), dismissible.
     pub panel_notice: Option<String>,
+    /// Whether the message thread is scrolled to (or within a few pixels of)
+    /// the bottom. New items pull the thread down only while this holds, so a
+    /// user who scrolled up to read is never yanked back. Updated by the
+    /// thread's `on_scroll`; set again by sending a message, opening a chat or
+    /// the "Latest" button.
+    pub thread_pinned: bool,
+    /// Entrance progress (`0.0..1.0`) of thread items that are still fading and
+    /// sliding in — advanced by `ThreadAnimTick` and empty (so the tick
+    /// subscription is off) whenever nothing is animating.
+    pub thread_anims: Vec<(ItemKey, f32)>,
     /// Expand/collapse state of thread details (a finished turn's step list, a
     /// long answer, a long step result), by the keys `agent_panel` builds.
     /// Cleared whenever the chat changes.
@@ -1622,6 +1677,8 @@ impl Default for FerriteBrowser {
             pending_chat_delete: None,
             panel_notice: None,
             expanded: std::collections::HashSet::new(),
+            thread_pinned: true,
+            thread_anims: Vec::new(),
             pending_diff: None,
             pending_expected: None,
             pending_evidence: None,
@@ -1759,6 +1816,19 @@ pub enum FerriteBrowserMessage {
     DismissNotice,
     /// The context chip: cycles Auto, On, Off.
     CycleContextMode,
+    /// An empty-state suggestion chip: puts its text in the composer.
+    SuggestionChosen(String),
+    /// The message thread scrolled; `pinned` says whether it is at the bottom.
+    ThreadScrolled {
+        pinned: bool,
+    },
+    /// The "Latest" button: re-pin and jump to the newest item.
+    ScrollThreadToBottom,
+    /// One 16ms tick advancing the thread items' entrance animations (only
+    /// subscribed to while something is animating).
+    ThreadAnimTick,
+    /// The answer card's Copy button: puts the full answer on the clipboard.
+    CopyAnswer(String),
     /// Toggles one expandable part of the thread (see `FerriteBrowser::expanded`).
     ToggleExpand(String),
     // ── IPI consent ───────────────────────────────────────────────────────────
@@ -2129,9 +2199,18 @@ pub fn update(
         // ── Agent sidebar ─────────────────────────────────────────────────────
         FerriteBrowserMessage::ToggleAgentSidebar => {
             state.show_agent_sidebar = !state.show_agent_sidebar;
-            // Opening the panel puts the cursor in the composer, ready to type.
-            if state.show_agent_sidebar && state.sidebar_view == SidebarView::Thread {
-                return text_input::focus(text_input::Id::new(AGENT_INPUT_ID));
+            if state.show_agent_sidebar {
+                // Opening the panel puts the cursor in the composer, ready to
+                // type, with the thread at its newest message.
+                if state.sidebar_view == SidebarView::Thread {
+                    return Task::batch([
+                        text_input::focus(text_input::Id::new(AGENT_INPUT_ID)),
+                        scroll_to_latest(state),
+                    ]);
+                }
+            } else {
+                // Nothing animates (or ticks) while the panel is hidden.
+                state.thread_anims.clear();
             }
         }
         FerriteBrowserMessage::AgentTaskInputChanged(s) => {
@@ -2171,12 +2250,32 @@ pub fn update(
         FerriteBrowserMessage::SetSidebarView(view) => {
             state.sidebar_view = view;
             state.pending_chat_delete = None;
+            // The thread's scrollable is rebuilt when it comes back: put it at
+            // the newest message rather than the top.
+            return scroll_to_latest(state);
         }
         FerriteBrowserMessage::DismissNotice => {
             state.panel_notice = None;
         }
         FerriteBrowserMessage::CycleContextMode => {
             state.context_mode = agent_run::next_context_mode(state.context_mode);
+        }
+        FerriteBrowserMessage::SuggestionChosen(text) => {
+            state.agent_task_input = text;
+            return text_input::focus(text_input::Id::new(AGENT_INPUT_ID));
+        }
+        FerriteBrowserMessage::ThreadScrolled { pinned } => {
+            state.thread_pinned = pinned;
+        }
+        FerriteBrowserMessage::ScrollThreadToBottom => {
+            state.thread_pinned = true;
+            return scroll_to_latest(state);
+        }
+        FerriteBrowserMessage::ThreadAnimTick => {
+            agent_panel::advance_anims(&mut state.thread_anims, THREAD_ANIM_STEP);
+        }
+        FerriteBrowserMessage::CopyAnswer(text) => {
+            return iced::clipboard::write(text);
         }
         FerriteBrowserMessage::ToggleExpand(key) => {
             if !state.expanded.remove(&key) {
@@ -2594,6 +2693,39 @@ fn reset_chat_view(state: &mut FerriteBrowser) {
     state.agent_response = None;
     state.expanded.clear();
     state.pending_chat_delete = None;
+    state.thread_anims.clear();
+    state.thread_pinned = true;
+}
+
+/// Pulls the message thread to its newest item — but only while it is pinned
+/// to the bottom (the user has not scrolled up to read), and only when the
+/// thread is what is on screen. `scrollable::snap_to` on an id that is not in
+/// the tree is a no-op, so this is safe to return from any handler.
+fn scroll_to_latest(state: &FerriteBrowser) -> Task<FerriteBrowserMessage> {
+    if should_snap_to_latest(state) {
+        scrollable::snap_to(
+            agent_panel::thread_scroll_id(),
+            scrollable::RelativeOffset::END,
+        )
+    } else {
+        Task::none()
+    }
+}
+
+/// The gate behind [`scroll_to_latest`]: the thread is what is on screen and
+/// the user has not scrolled up to read.
+fn should_snap_to_latest(state: &FerriteBrowser) -> bool {
+    state.thread_pinned
+        && state.show_agent_sidebar
+        && state.sidebar_view == SidebarView::Thread
+        && state.pending_diff.is_none()
+}
+
+/// Starts the entrance animation of a thread item.
+fn animate_item(state: &mut FerriteBrowser, slot: u32) {
+    if let Some(turn) = state.chat.turns.len().checked_sub(1) {
+        agent_panel::start_item_anim(&mut state.thread_anims, ItemKey { turn, slot });
+    }
 }
 
 /// THE place a run ends. Every ending — finished, asked the user, model or
@@ -2618,8 +2750,9 @@ fn conclude_run(state: &mut FerriteBrowser, outcome: Outcome) -> Task<FerriteBro
     state.chat.finish_turn(outcome);
     if had_running_turn {
         persist_chat(state);
+        animate_item(state, SLOT_OUTCOME);
     }
-    Task::none()
+    scroll_to_latest(state)
 }
 
 /// Saves the current chat (atomically, via `ChatStore::save`) and keeps
@@ -2681,7 +2814,10 @@ fn open_chat(state: &mut FerriteBrowser, id: &ChatId) -> Task<FerriteBrowserMess
             reset_chat_view(state);
             state.panel_notice = None;
             state.sidebar_view = SidebarView::Thread;
-            text_input::focus(text_input::Id::new(AGENT_INPUT_ID))
+            Task::batch([
+                text_input::focus(text_input::Id::new(AGENT_INPUT_ID)),
+                scroll_to_latest(state),
+            ])
         }
         Err(e) => {
             eprintln!("[ferrite-ui] failed to open chat {id}: {e}");
@@ -2771,6 +2907,8 @@ fn submit_task(state: &mut FerriteBrowser) -> Task<FerriteBrowserMessage> {
 
     state.chat.begin_turn(&prompt, Some(context.note));
     persist_chat(state);
+    state.thread_pinned = true;
+    animate_item(state, SLOT_USER);
     state.sidebar_view = SidebarView::Thread;
     state.panel_notice = None;
     state.agent_log.clear();
@@ -2894,7 +3032,7 @@ fn submit_task(state: &mut FerriteBrowser) -> Task<FerriteBrowserMessage> {
         let _ = event_tx.send(FerriteBrowserMessage::LiveRunReady { run_id, prompt });
     });
     state.agent_handle = Some(handle);
-    Task::none()
+    scroll_to_latest(state)
 }
 
 /// One step's model reply (or failure), or a fast-lane step: validates the
@@ -3039,8 +3177,16 @@ fn handle_agent_step(
     )));
     trim_message_history(&mut live.messages);
     live.actions_taken.push(action);
+    // The new step card slides in; keep the thread on the newest item.
+    animate_item(
+        state,
+        SLOT_STEP_BASE + u32::try_from(state.agent_log.len() - 1).unwrap_or(0),
+    );
 
-    spawn_next_step(state, run_id, live)
+    Task::batch([
+        spawn_next_step(state, run_id, live),
+        scroll_to_latest(state),
+    ])
 }
 
 /// Saves `state.bookmarks` to `state.bookmarks_path` if one is set (real
@@ -5959,7 +6105,7 @@ pub fn view(state: &FerriteBrowser) -> Element<'_, FerriteBrowserMessage> {
 
     // Wrap browser viewport + optional agent sidebar in a horizontal row.
     let main_content: Element<FerriteBrowserMessage> = if state.show_agent_sidebar {
-        iced::widget::row![content, view_agent_sidebar(state)]
+        iced::widget::row![content, agent_panel::view_agent_sidebar(state)]
             .width(Length::Fill)
             .height(Length::Fill)
             .into()
@@ -6216,7 +6362,7 @@ fn new_tab_page(state: &FerriteBrowser) -> Element<'_, FerriteBrowserMessage> {
 
     // ── Keyboard shortcut reference (platform-aware), unchanged content ──
     let shortcuts_text = format!(
-        "{M}+T  New tab   {M}+W  Close   {M}+L  Address   {M}+R  Reload   {M}+J  JS Console   F12  Audit",
+        "{M}+T  New tab   {M}+W  Close   {M}+L  Address   {M}+R  Reload   {M}+J  JS Console   {M}+Shift+O  New agent chat   F12  Audit",
         M = MOD_LABEL,
     );
 
@@ -6335,6 +6481,15 @@ pub fn subscription(state: &FerriteBrowser) -> Subscription<FerriteBrowserMessag
         Subscription::none()
     };
 
+    // Chat-thread entrance animations — same 16ms tick shape, gated so it only
+    // runs while an item is actually fading in.
+    let thread_anim_tick = if agent_panel::thread_anim_active(state) {
+        time::every(std::time::Duration::from_millis(16))
+            .map(|_| FerriteBrowserMessage::ThreadAnimTick)
+    } else {
+        Subscription::none()
+    };
+
     // Drain agent progress messages (AgentToolLogged, AgentCompleted, AgentFailed).
     struct AgentEventChannel;
     let agent_event_sub: Subscription<FerriteBrowserMessage> =
@@ -6361,554 +6516,13 @@ pub fn subscription(state: &FerriteBrowser) -> Subscription<FerriteBrowserMessag
             Subscription::none()
         };
 
-    Subscription::batch([keyboard_sub, servo_tick, agent_event_sub, consent_anim_tick])
-}
-
-// ---------------------------------------------------------------------------
-// Agent sidebar view
-// ---------------------------------------------------------------------------
-
-fn view_agent_sidebar(state: &FerriteBrowser) -> Element<'_, FerriteBrowserMessage> {
-    let palette = state.palette();
-    // Header: "Agent" label + optional step-progress indicator + Stop
-    // button. `live_loop` is only `Some` for the message-driven live run
-    // (not the dry-run phase, which has no per-step budget to show yet).
-    let mut header_items: Vec<Element<FerriteBrowserMessage>> = vec![text("Agent")
-        .size(16)
-        .color(palette.text)
-        .width(Length::Fill)
-        .into()];
-    if let Some(live) = &state.live_loop {
-        header_items.push(
-            text(format!(
-                "Step {}/{}",
-                live.actions_taken.len() + 1,
-                live.budget.max_steps
-            ))
-            .size(11)
-            .color(palette.text_dim)
-            .into(),
-        );
-    }
-    if state.agent_is_running {
-        header_items.push(
-            button(
-                row![
-                    icon(Icon::Stop, ICON_SIZE_SM, Color::WHITE),
-                    text("Stop").size(12)
-                ]
-                .spacing(5)
-                .align_y(iced::Alignment::Center),
-            )
-            .padding([3, 8])
-            .style(|_: &Theme, _| button::Style {
-                background: Some(Background::Color(palette.danger)),
-                text_color: Color::WHITE,
-                border: Border {
-                    radius: iced::border::Radius::new(BORDER_RADIUS),
-                    ..Border::default()
-                },
-                ..button::Style::default()
-            })
-            .on_press(FerriteBrowserMessage::StopAgent)
-            .into(),
-        );
-    }
-    let header = container(
-        row(header_items)
-            .spacing(8)
-            .align_y(iced::Alignment::Center)
-            .padding([8, 12]),
-    )
-    .width(Length::Fill)
-    .style(|_: &Theme| container::Style {
-        background: Some(Background::Color(palette.raised)),
-        ..container::Style::default()
-    });
-
-    let sep = || {
-        container(text(""))
-            .width(Length::Fill)
-            .height(Length::Fixed(1.0))
-            .style(separator_style)
-    };
-
-    // Task input — disabled (greyed container) when running.
-    let task_input: Element<FerriteBrowserMessage> = if state.agent_is_running {
-        container(
-            text(state.agent_task_input.as_str())
-                .size(13)
-                .color(palette.text_dim),
-        )
-        .width(Length::Fill)
-        .padding([7, 10])
-        .style(|_: &Theme| container::Style {
-            background: Some(Background::Color(Color {
-                a: 0.6,
-                ..palette.input
-            })),
-            border: Border {
-                radius: iced::border::Radius::new(6.0),
-                width: 1.0,
-                color: palette.divider,
-            },
-            ..container::Style::default()
-        })
-        .into()
-    } else {
-        text_input("Enter a task...", &state.agent_task_input)
-            .id(text_input::Id::new(AGENT_INPUT_ID))
-            .width(Length::Fill)
-            .padding([7, 10])
-            .size(13)
-            .style(|_: &Theme, status| {
-                let focused = matches!(status, text_input::Status::Focused);
-                text_input::Style {
-                    background: Background::Color(palette.input),
-                    border: Border {
-                        radius: iced::border::Radius::new(6.0),
-                        width: if focused { 1.5 } else { 1.0 },
-                        color: if focused {
-                            palette.accent
-                        } else {
-                            palette.divider
-                        },
-                    },
-                    icon: palette.text_dim,
-                    placeholder: palette.text_dim,
-                    value: palette.text,
-                    selection: Color {
-                        a: 0.30,
-                        ..palette.accent
-                    },
-                }
-            })
-            .on_input(FerriteBrowserMessage::AgentTaskInputChanged)
-            .on_submit(FerriteBrowserMessage::AgentTaskSubmitted)
-            .into()
-    };
-
-    let run_disabled = state.agent_is_running || state.agent_task_input.trim().is_empty();
-    let run_btn = button(
-        row![
-            icon(
-                Icon::Play,
-                ICON_SIZE_SM,
-                if run_disabled {
-                    palette.text_dim
-                } else {
-                    Color::WHITE
-                }
-            ),
-            text("Run Task").size(13),
-        ]
-        .spacing(6)
-        .align_y(iced::Alignment::Center),
-    )
-    .padding([7, 0])
-    .width(Length::Fill)
-    .style(if run_disabled {
-        panel_btn_inactive
-    } else {
-        accent_btn_style
-    })
-    .on_press_maybe((!run_disabled).then_some(FerriteBrowserMessage::AgentTaskSubmitted));
-
-    // ── Consent panel (shown instead of log+response when diff is pending) ──
-    //
-    // This is the security surface (`docs/REBUILD_DIRECTIVE.md` §6/A10): it
-    // is built entirely from `iced_widget` native widgets, laid out by this
-    // function from Rust values (`diff`/`expected`/`evidence` — plain Rust
-    // structs, never page-supplied markup). Servo's page content only ever
-    // reaches this process as a decoded pixel buffer (`session.get_frame()`,
-    // rendered elsewhere as an `iced_widget::image`) — there is no code path
-    // by which a page's HTML/CSS/text is parsed into a style, position, or
-    // z-order for *this* panel. See `page_content_cannot_reach_the_consent_panels_inputs`
-    // for the structural argument this session verified, not merely assumed.
-    let body: Element<FerriteBrowserMessage> = if let Some(diff) = &state.pending_diff {
-        let items = consent_items(diff, state.pending_expected.as_ref());
-
-        let mut item_rows: Vec<Element<FerriteBrowserMessage>> = items
-            .iter()
-            .map(|item| {
-                let approved = state.pending_decision.approved.contains(&item.id);
-                let rejected = state.pending_decision.rejected.contains(&item.id);
-
-                let approve_style = move |_: &Theme, _| button::Style {
-                    background: Some(Background::Color(if approved {
-                        palette.safe
-                    } else {
-                        Color {
-                            a: 0.25,
-                            ..palette.safe
-                        }
-                    })),
-                    text_color: Color::WHITE,
-                    border: Border {
-                        radius: iced::border::Radius::new(4.0),
-                        ..Border::default()
-                    },
-                    ..button::Style::default()
-                };
-                let reject_style = move |_: &Theme, _| button::Style {
-                    background: Some(Background::Color(if rejected {
-                        palette.danger
-                    } else {
-                        Color {
-                            a: 0.25,
-                            ..palette.danger
-                        }
-                    })),
-                    text_color: Color::WHITE,
-                    border: Border {
-                        radius: iced::border::Radius::new(4.0),
-                        ..Border::default()
-                    },
-                    ..button::Style::default()
-                };
-
-                let approve_id = item.id.to_string();
-                let reject_id = item.id.to_string();
-                // Reject is listed and styled first: iced 0.13's `button`
-                // widget does not implement the `Focusable` operation (only
-                // `text_input`/`text_editor` do — verified against
-                // `iced_core::widget::operation::focusable`), so a literal
-                // keyboard-focus-ring default onto Reject is not achievable
-                // against this pinned version's public API. This is the
-                // available equivalent: reject reads first, and — the
-                // property that actually matters — `consent_is_complete`
-                // never lets Proceed fire while any item, including this
-                // one, is undecided, so there is no path to a silent
-                // approve-by-default.
-                // An out-of-scope-origin item gets a small external-link
-                // glyph ahead of its summary — the one place this crate
-                // renders `Icon::Origin`, distinguishing "contacted an
-                // unauthorized origin" rows from "used an unexpected tool"
-                // rows at a glance, on top of the text difference already
-                // in `item.summary` itself.
-                let summary_row: Element<FerriteBrowserMessage> =
-                    if origin_item_origin(&item.id).is_some() {
-                        row![
-                            icon(Icon::Origin, ICON_SIZE_SM, palette.text_dim),
-                            text(item.summary.clone())
-                                .size(12)
-                                .color(palette.text)
-                                .width(Length::Fill),
-                        ]
-                        .spacing(6)
-                        .align_y(iced::Alignment::Start)
-                        .into()
-                    } else {
-                        text(item.summary.clone())
-                            .size(12)
-                            .color(palette.text)
-                            .width(Length::Fill)
-                            .into()
-                    };
-
-                column![
-                    summary_row,
-                    row![
-                        button(
-                            row![
-                                icon(Icon::Reject, 11.0, Color::WHITE),
-                                text("Reject").size(11)
-                            ]
-                            .spacing(4)
-                            .align_y(iced::Alignment::Center)
-                        )
-                        .padding([3, 7])
-                        .style(reject_style)
-                        .on_press(FerriteBrowserMessage::RejectTool(reject_id)),
-                        button(
-                            row![
-                                icon(Icon::Approve, 11.0, Color::WHITE),
-                                text("Approve").size(11)
-                            ]
-                            .spacing(4)
-                            .align_y(iced::Alignment::Center)
-                        )
-                        .padding([3, 7])
-                        .style(approve_style)
-                        .on_press(FerriteBrowserMessage::ApproveTool(approve_id)),
-                    ]
-                    .spacing(6)
-                    .align_y(iced::Alignment::Center),
-                ]
-                .spacing(4)
-                .width(Length::Fill)
-                .into()
-            })
-            .collect();
-
-        let complete = consent_is_complete(diff, &state.pending_decision);
-        let proceed_btn = button(text("Proceed with approved").size(12))
-            .padding([7, 10])
-            .width(Length::Fill)
-            .style(if complete {
-                accent_btn_style
-            } else {
-                panel_btn_inactive
-            })
-            .on_press_maybe(complete.then_some(FerriteBrowserMessage::ConsentSubmitted));
-
-        let cancel_btn = button(text("Cancel").size(12))
-            .padding([7, 10])
-            .width(Length::Fill)
-            .style(|_: &Theme, _| button::Style {
-                background: Some(Background::Color(palette.raised)),
-                text_color: palette.text_dim,
-                border: Border {
-                    radius: iced::border::Radius::new(BORDER_RADIUS),
-                    width: 1.0,
-                    color: palette.divider,
-                },
-                ..button::Style::default()
-            })
-            .on_press(FerriteBrowserMessage::ConsentCancelled);
-
-        let mut panel_items: Vec<Element<FerriteBrowserMessage>> = vec![
-            row![
-                icon(Icon::Warning, ICON_SIZE, palette.danger),
-                text("Unexpected Activity Detected")
-                    .size(14)
-                    .color(palette.danger)
-                    .width(Length::Fill),
-            ]
-            .spacing(8)
-            .align_y(iced::Alignment::Center)
-            .into(),
-            text(diff.summary()).size(12).color(palette.text_dim).into(),
-            sep().into(),
-            text("Review each item:")
-                .size(12)
-                .color(palette.text)
-                .into(),
-        ];
-        panel_items.append(&mut item_rows);
-        panel_items.push(sep().into());
-
-        // ── Dry-run evidence, collapsed by default ──────────────────────
-        let evidence_toggle = button(
-            text(if state.show_evidence {
-                "v Hide dry-run evidence"
-            } else {
-                "> Show dry-run evidence"
-            })
-            .size(11),
-        )
-        .padding([3, 7])
-        .style(panel_btn_inactive)
-        .on_press(FerriteBrowserMessage::ToggleEvidence);
-        panel_items.push(evidence_toggle.into());
-        if state.show_evidence {
-            if let Some(evidence) = &state.pending_evidence {
-                let lines: Vec<Element<FerriteBrowserMessage>> = dry_run_evidence_lines(evidence)
-                    .into_iter()
-                    .map(|line| text(line).size(11).color(palette.text_dim).into())
-                    .collect();
-                panel_items.push(
-                    container(column(lines).spacing(2))
-                        .padding([6, 8])
-                        .width(Length::Fill)
-                        .style(|_: &Theme| container::Style {
-                            background: Some(Background::Color(palette.input)),
-                            border: Border {
-                                radius: iced::border::Radius::new(6.0),
-                                width: 1.0,
-                                color: palette.divider,
-                            },
-                            ..container::Style::default()
-                        })
-                        .into(),
-                );
-            }
-        }
-
-        panel_items.push(sep().into());
-        panel_items.push(proceed_btn.into());
-        panel_items.push(cancel_btn.into());
-
-        // ── Entrance transition (C1) ─────────────────────────────────────
-        // A brief slide-in-and-settle plus a background-tint fade, driven
-        // by `consent_panel_anim` (advanced 16ms at a time by
-        // `ConsentPanelTick`, see `subscription()`) through `ease_out_cubic`.
-        // Purely decorative: every item's own text above is already at full
-        // opacity/its final position from the very first frame — only this
-        // outer wrapper's background tint and top inset animate, so nothing
-        // about what the user is being asked to approve is ever delayed,
-        // dimmed, or obscured while this plays out (~200ms total).
-        let anim_t = ease_out_cubic(state.consent_panel_anim);
-        let slide_offset = (1.0 - anim_t) * 16.0;
-
-        scrollable(
-            container(column(panel_items).spacing(8).padding(Padding {
-                top: 8.0 + slide_offset,
-                right: 12.0,
-                bottom: 8.0,
-                left: 12.0,
-            }))
-            .width(Length::Fill)
-            .style(move |_: &Theme| container::Style {
-                background: Some(Background::Color(Color {
-                    r: palette.warn.r,
-                    g: palette.warn.g,
-                    b: palette.warn.b,
-                    a: 0.08 * anim_t,
-                })),
-                ..container::Style::default()
-            }),
-        )
-        .height(Length::Fill)
-        .into()
-    } else {
-        // ── Live activity feed (C2) ─────────────────────────────────────────────
-        // One card per `AgentLogEntry::Step` — icon (see `icon_for_action`),
-        // title, the action's own parameter, and the real result
-        // `execute_action` returned — not just the fact that some action
-        // ran, which is all the pre-C2 flat-string log showed. A blocked
-        // step (the user rejected it in consent) is styled in the danger
-        // color throughout, so it reads as "this did NOT happen" rather
-        // than blending in with a normal completed step.
-        let dots = match ((state.progress_offset * 3.0) as usize) % 4 {
-            0 => "",
-            1 => ".",
-            2 => "..",
-            _ => "...",
-        };
-        let log_items: Vec<Element<FerriteBrowserMessage>> = if state.agent_log.is_empty()
-            && !state.agent_is_running
-        {
-            vec![text("No active session.")
-                .size(12)
-                .color(palette.text_dim)
-                .into()]
-        } else {
-            let mut items: Vec<Element<_>> = state
-                .agent_log
-                .iter()
-                .map(|entry| match entry {
-                    AgentLogEntry::Note(s) => container(
-                        row![
-                            text("->").size(12).color(palette.accent),
-                            text(s.as_str()).size(12).color(palette.text_dim),
-                        ]
-                        .spacing(4),
-                    )
-                    .padding([2, 0])
-                    .width(Length::Fill)
-                    .into(),
-                    AgentLogEntry::Step {
-                        icon: step_icon,
-                        label,
-                        detail,
-                        result,
-                        blocked,
-                        fast,
-                    } => {
-                        let accent = if *blocked {
-                            palette.danger
-                        } else {
-                            palette.accent
-                        };
-                        let mut title_row: Vec<Element<FerriteBrowserMessage>> = vec![
-                            icon(*step_icon, ICON_SIZE_SM, accent),
-                            text(*label).size(12).color(palette.text).into(),
-                        ];
-                        if *fast {
-                            title_row.push(text("fast").size(9).color(palette.accent).into());
-                        }
-                        let mut lines: Vec<Element<FerriteBrowserMessage>> = vec![row(title_row)
-                            .spacing(6)
-                            .align_y(iced::Alignment::Center)
-                            .into()];
-                        if !detail.is_empty() {
-                            lines.push(
-                                text(truncate(detail, 70))
-                                    .size(11)
-                                    .color(palette.text_dim)
-                                    .into(),
-                            );
-                        }
-                        lines.push(
-                            text(truncate(result, 90))
-                                .size(11)
-                                .color(if *blocked {
-                                    palette.danger
-                                } else {
-                                    palette.text_dim
-                                })
-                                .into(),
-                        );
-                        container(column(lines).spacing(2))
-                            .padding([5, 0])
-                            .width(Length::Fill)
-                            .into()
-                    }
-                })
-                .collect();
-            if state.agent_is_running {
-                items.push(
-                    text(format!("Working{}", dots))
-                        .size(12)
-                        .color(palette.text_dim)
-                        .into(),
-                );
-            }
-            items
-        };
-
-        let mut log_col_items = log_items;
-        if let Some(response) = &state.agent_response {
-            log_col_items.push(sep().into());
-            log_col_items.push(
-                container(
-                    column![
-                        text("Answer").size(13).color(palette.text_dim),
-                        text(response.as_str()).size(13).color(palette.text),
-                    ]
-                    .spacing(4)
-                    .padding([8, 12]),
-                )
-                .width(Length::Fill)
-                .into(),
-            );
-        }
-
-        scrollable(
-            column(log_col_items)
-                .spacing(2)
-                .width(Length::Fill)
-                .padding([4, 8]),
-        )
-        .height(Length::Fill)
-        .into()
-    };
-
-    // Assemble column.
-    let col_items: Vec<Element<FerriteBrowserMessage>> = vec![
-        header.into(),
-        sep().into(),
-        container(column![task_input, run_btn].spacing(6).padding([8, 12]))
-            .width(Length::Fill)
-            .into(),
-        sep().into(),
-        body,
-    ];
-
-    container(column(col_items).width(Length::Fill))
-        .width(Length::Fixed(320.0))
-        .height(Length::Fill)
-        .style(|_: &Theme| container::Style {
-            background: Some(Background::Color(palette.surface)),
-            border: Border {
-                color: palette.divider,
-                width: 1.0,
-                radius: iced::border::Radius::new(0.0),
-            },
-            ..container::Style::default()
-        })
-        .into()
+    Subscription::batch([
+        keyboard_sub,
+        servo_tick,
+        agent_event_sub,
+        consent_anim_tick,
+        thread_anim_tick,
+    ])
 }
 
 // ---------------------------------------------------------------------------
