@@ -143,3 +143,18 @@ fn a_bare_local_address_gets_http_and_a_bare_site_gets_https() {
     assert_eq!(resolve_url("https://example.org"), "https://example.org");
     assert!(resolve_url("rust async").contains("duckduckgo"));
 }
+
+#[test]
+fn the_library_and_the_agent_drawers_are_never_open_together() {
+    let mut state = FerriteBrowser::default();
+    let _ = update(&mut state, FerriteBrowserMessage::ToggleAgentSidebar);
+    assert!(state.show_agent_sidebar);
+    let _ = update(&mut state, FerriteBrowserMessage::ToggleLibraryPanel);
+    assert!(state.show_library_panel && !state.show_agent_sidebar);
+    let _ = update(&mut state, FerriteBrowserMessage::ToggleAgentSidebar);
+    assert!(state.show_agent_sidebar && !state.show_library_panel);
+    // Each view still renders.
+    let _ = view(&state);
+    let _ = update(&mut state, FerriteBrowserMessage::ToggleLibraryPanel);
+    let _ = view(&state);
+}

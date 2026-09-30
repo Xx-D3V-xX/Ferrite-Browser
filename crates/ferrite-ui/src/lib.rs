@@ -491,7 +491,13 @@ fn action_url(action: &AgentAction) -> Option<&str> {
 fn origin_of_url(url: &str) -> Option<String> {
     let parsed = url::Url::parse(url).ok()?;
     let host = parsed.host_str()?;
-    Some(format!("{}://{}", parsed.scheme(), host).to_ascii_lowercase())
+    Some(
+        match parsed.port() {
+            Some(port) => format!("{}://{}:{}", parsed.scheme(), host, port),
+            None => format!("{}://{}", parsed.scheme(), host),
+        }
+        .to_ascii_lowercase(),
+    )
 }
 
 /// Whether `action` is blocked by the user's consent decision — checked
@@ -770,6 +776,11 @@ const FIND_INPUT_ID: &str = "ferrite_find_input";
 
 const TOOLBAR_HEIGHT: f32 = 46.0;
 const TAB_BAR_HEIGHT: f32 = 36.0;
+/// Width of the Library drawer on the right of the page.
+const SIDE_PANEL_WIDTH: f32 = 380.0;
+/// Every tab is this wide, so the favicon, title and close button line up
+/// from tab to tab instead of each tab taking whatever its title needs.
+const TAB_WIDTH: f32 = 190.0;
 const BORDER_RADIUS: f32 = 8.0;
 const PANEL_PADDING: u16 = 12;
 
@@ -2286,6 +2297,7 @@ pub fn update(
         FerriteBrowserMessage::ToggleAgentSidebar => {
             state.show_agent_sidebar = !state.show_agent_sidebar;
             if state.show_agent_sidebar {
+                state.show_library_panel = false;
                 // Opening the panel puts the cursor in the composer, ready to
                 // type, with the thread at its newest message.
                 if state.sidebar_view == SidebarView::Thread {
@@ -2527,6 +2539,14 @@ pub fn update(
                 }
             }
 
+            // Tabs pages opened themselves (window.open, target=_blank, sign-in
+            // popups) become real tabs, and the newest takes the front.
+            for session in ferrite_servo::session::take_popup_sessions() {
+                let index = push_tab_state(state);
+                state.servo_sessions.insert(index, session);
+                sync_active_webview(state);
+            }
+
             // Pump engine once, then sync every tab's state and read pixels
             // — unless a resize just fired this tick (see above), in which
             // case every session's frame is skipped for `resize_settle_ticks`
@@ -2739,6 +2759,8 @@ pub fn update(
             if state.show_library_panel {
                 state.show_audit_panel = false;
                 state.show_js_console = false;
+                // Both are right-hand drawers: one at a time.
+                state.show_agent_sidebar = false;
             }
         }
         FerriteBrowserMessage::SelectLibraryTab(tab) => {
@@ -4761,9 +4783,100 @@ fn decode_favicon_rgba(bytes: &[u8]) -> Option<(u32, u32, Vec<u8>)> {
 /// bookkeeping, purely so the one real network call in this module has a
 /// single, obvious call site.
 async fn fetch_favicon_bytes(url: &str) -> Option<Vec<u8>> {
-    let response = reqwest::Client::new().get(url).send().await.ok()?;
+    let response = favicon_client().get(url).send().await.ok()?;
     let response = response.error_for_status().ok()?;
     response.bytes().await.ok().map(|b| b.to_vec())
+}
+
+/// The HTTP client for favicon fetches: a short timeout, and a User-Agent —
+/// several sites (Wikipedia among them) refuse requests that carry none.
+fn favicon_client() -> reqwest::Client {
+    reqwest::Client::builder()
+        .user_agent("Mozilla/5.0 (compatible; Ferrite favicon fetch)")
+        .timeout(std::time::Duration::from_secs(8))
+        .build()
+        .unwrap_or_else(|_| reqwest::Client::new())
+}
+
+/// The icon URLs a page's HTML declares (`<link rel="icon" href=...>` and the
+/// like), resolved against `base`, best candidates first: plain icons before
+/// `apple-touch-icon`, and `.svg` ones last (the decoder cannot read SVG).
+/// A deliberately small scanner, not an HTML parser: it only has to find
+/// `<link` tags in the first bytes of a home page.
+fn icon_links_in_html(html: &str, base: &url::Url) -> Vec<url::Url> {
+    let lower = html.to_ascii_lowercase();
+    let mut found: Vec<(u8, url::Url)> = Vec::new();
+    let mut from = 0;
+    while let Some(start) = lower[from..].find("<link") {
+        let begin = from + start;
+        let end = lower[begin..].find('>').map_or(lower.len(), |e| begin + e);
+        let tag = &html[begin..end];
+        from = end.max(begin + 5);
+        let attr = |name: &str| -> Option<String> {
+            let tag_lower = tag.to_ascii_lowercase();
+            let key = format!("{name}=");
+            let at = tag_lower.find(&key)?;
+            let rest = &tag[at + key.len()..];
+            let quote = rest.chars().next().filter(|c| *c == '"' || *c == '\'');
+            match quote {
+                Some(q) => rest[1..].split(q).next().map(str::to_string),
+                None => rest
+                    .split(|c: char| c.is_whitespace() || c == '>')
+                    .next()
+                    .map(str::to_string),
+            }
+        };
+        let (Some(rel), Some(href)) = (attr("rel"), attr("href")) else {
+            continue;
+        };
+        let rel = rel.to_ascii_lowercase();
+        if !rel
+            .split_whitespace()
+            .any(|r| r == "icon" || r == "apple-touch-icon")
+        {
+            continue;
+        }
+        let Ok(resolved) = base.join(href.trim()) else {
+            continue;
+        };
+        let rank = if resolved.path().ends_with(".svg") {
+            2
+        } else if rel.contains("apple-touch-icon") {
+            1
+        } else {
+            0
+        };
+        if !found.iter().any(|(_, u)| *u == resolved) {
+            found.push((rank, resolved));
+        }
+    }
+    found.sort_by_key(|(rank, _)| *rank);
+    found.into_iter().map(|(_, u)| u).collect()
+}
+
+/// Fetches and decodes a site's icon: `/favicon.ico` first, then whatever its
+/// home page declares. Returns the raw bytes that decoded (for the cache) and
+/// the pixels.
+async fn fetch_decodable_favicon(favicon_url: &str) -> Option<(Vec<u8>, (u32, u32, Vec<u8>))> {
+    if let Some(bytes) = fetch_favicon_bytes(favicon_url).await {
+        if let Some(pixels) = decode_favicon_rgba(&bytes) {
+            return Some((bytes, pixels));
+        }
+    }
+    let mut home = url::Url::parse(favicon_url).ok()?;
+    home.set_path("/");
+    home.set_query(None);
+    let response = favicon_client().get(home.clone()).send().await.ok()?;
+    let html = response.text().await.ok()?;
+    let html: String = html.chars().take(131_072).collect();
+    for link in icon_links_in_html(&html, &home).into_iter().take(4) {
+        if let Some(bytes) = fetch_favicon_bytes(link.as_str()).await {
+            if let Some(pixels) = decode_favicon_rgba(&bytes) {
+                return Some((bytes, pixels));
+            }
+        }
+    }
+    None
 }
 
 /// The background task `FetchTileFavicons` spawns once per tile
@@ -4797,15 +4910,15 @@ async fn fetch_tile_favicon(
     cache_path: PathBuf,
     tx: tokio::sync::mpsc::UnboundedSender<FerriteBrowserMessage>,
 ) {
-    let (bytes, from_cache) = match tokio::fs::read(&cache_path).await {
-        Ok(cached) => (cached, true),
-        Err(_) => match fetch_favicon_bytes(&favicon_url).await {
-            Some(fetched) => (fetched, false),
-            None => return,
-        },
+    let cached = match tokio::fs::read(&cache_path).await {
+        Ok(cached) => decode_favicon_rgba(&cached).map(|pixels| (cached, pixels)),
+        Err(_) => None,
     };
-
-    let Some((width, height, rgba)) = decode_favicon_rgba(&bytes) else {
+    let from_cache = cached.is_some();
+    let Some((bytes, (width, height, rgba))) = (match cached {
+        Some(hit) => Some(hit),
+        None => fetch_decodable_favicon(&favicon_url).await,
+    }) else {
         return;
     };
 
@@ -5012,19 +5125,40 @@ pub fn view(state: &FerriteBrowser) -> Element<'_, FerriteBrowserMessage> {
                 favicon_dot(true)
             } else {
                 match state.tab_favicons.get(i).and_then(|f| f.as_ref()) {
-                    Some(handle) => ServoImage::new(handle.clone())
-                        .width(Length::Fixed(14.0))
-                        .height(Length::Fixed(14.0))
-                        .into(),
+                    // On the dark theme a light backing keeps dark icons visible.
+                    Some(handle) => container(
+                        ServoImage::new(handle.clone())
+                            .width(Length::Fixed(14.0))
+                            .height(Length::Fixed(14.0)),
+                    )
+                    .center(Length::Fixed(18.0))
+                    .style(move |_: &Theme| container::Style {
+                        background: (!is_light_theme).then_some(Background::Color(Color {
+                            a: 0.92,
+                            ..Color::WHITE
+                        })),
+                        border: Border {
+                            radius: iced::border::Radius::new(5.0),
+                            ..Border::default()
+                        },
+                        ..container::Style::default()
+                    })
+                    .into(),
                     None => favicon_dot(false),
                 }
             };
 
-            let label_elem = text(truncate(label, 22)).size(13).color(if is_active {
-                palette.text
-            } else {
-                palette.text_dim
-            });
+            let label_elem = text(truncate(label, 20))
+                .size(13)
+                .width(Length::Fill)
+                .color(if is_active {
+                    palette.text
+                } else {
+                    palette.text_dim
+                });
+            // The favicon (or its placeholder dot) always occupies the same
+            // 18 px slot, so titles start at the same x on every tab.
+            let favicon_slot = container(favicon).center(Length::Fixed(18.0));
 
             // Close-button-on-hover: visible for the active tab (always
             // reachable without a hover) and for whichever tab the pointer
@@ -5047,11 +5181,11 @@ pub fn view(state: &FerriteBrowser) -> Element<'_, FerriteBrowserMessage> {
             };
 
             let content_row = container(
-                row![favicon, label_elem, close_btn]
+                row![favicon_slot, label_elem, close_btn]
                     .spacing(5)
                     .align_y(iced::Alignment::Center),
             )
-            .width(Length::Shrink)
+            .width(Length::Fixed(TAB_WIDTH))
             .height(Length::Fixed(TAB_INNER_H))
             .padding([0, 10])
             .align_y(iced::Alignment::Center)
@@ -5093,7 +5227,7 @@ pub fn view(state: &FerriteBrowser) -> Element<'_, FerriteBrowserMessage> {
             mouse_area(
                 column![content_row, underline]
                     .spacing(0)
-                    .width(Length::Shrink)
+                    .width(Length::Fixed(TAB_WIDTH))
                     .height(Length::Fixed(TAB_BAR_HEIGHT)),
             )
             .on_press(FerriteBrowserMessage::SelectTab(i))
@@ -5820,19 +5954,29 @@ pub fn view(state: &FerriteBrowser) -> Element<'_, FerriteBrowserMessage> {
                 .on_press(FerriteBrowserMessage::SelectLibraryTab(tab))
         };
         let hdr = container(
-            row![
-                text("  Library")
-                    .size(12)
-                    .color(palette.text)
-                    .width(Length::Fill),
-                lib_tab_btn("Bookmarks", LibraryTab::Bookmarks),
-                lib_tab_btn("History", LibraryTab::History),
-                lib_tab_btn("Downloads", LibraryTab::Downloads),
-                lib_tab_btn("Settings", LibraryTab::Settings),
+            column![
+                row![
+                    text("Library")
+                        .size(14)
+                        .font(font_weight(iced::font::Weight::Semibold))
+                        .color(palette.text)
+                        .width(Length::Fill),
+                    button(icon(Icon::Close, 10.0, palette.text_dim))
+                        .padding(5)
+                        .style(close_btn_style)
+                        .on_press(FerriteBrowserMessage::ToggleLibraryPanel),
+                ]
+                .align_y(iced::Alignment::Center),
+                row![
+                    lib_tab_btn("Bookmarks", LibraryTab::Bookmarks),
+                    lib_tab_btn("History", LibraryTab::History),
+                    lib_tab_btn("Downloads", LibraryTab::Downloads),
+                    lib_tab_btn("Settings", LibraryTab::Settings),
+                ]
+                .spacing(6),
             ]
-            .spacing(6)
-            .align_y(iced::Alignment::Center)
-            .padding([5, PANEL_PADDING]),
+            .spacing(10)
+            .padding([10, PANEL_PADDING]),
         )
         .width(Length::Fill)
         .style(|_: &Theme| container::Style {
@@ -6053,18 +6197,19 @@ pub fn view(state: &FerriteBrowser) -> Element<'_, FerriteBrowserMessage> {
                     .padding([4, PANEL_PADDING])
                     .into(),
                     container(
-                        row![
+                        column![
                             text("Default zoom for new tabs")
                                 .size(12)
-                                .color(palette.text_dim)
-                                .width(Length::Fixed(140.0)),
-                            zoom_preset_btn(75),
-                            zoom_preset_btn(100),
-                            zoom_preset_btn(125),
-                            zoom_preset_btn(150),
+                                .color(palette.text_dim),
+                            row![
+                                zoom_preset_btn(75),
+                                zoom_preset_btn(100),
+                                zoom_preset_btn(125),
+                                zoom_preset_btn(150),
+                            ]
+                            .spacing(6),
                         ]
-                        .spacing(6)
-                        .align_y(iced::Alignment::Center),
+                        .spacing(6),
                     )
                     .padding([4, PANEL_PADDING])
                     .into(),
@@ -6072,14 +6217,25 @@ pub fn view(state: &FerriteBrowser) -> Element<'_, FerriteBrowserMessage> {
             }
         };
 
+        // A right-hand drawer like the agent's, so the page keeps its height
+        // and the panel's content is not stranded at the far left of a
+        // full-width bar.
         Some(
             container(column![
                 hdr,
                 scrollable(column(body_rows).spacing(0)).height(Length::Fill)
             ])
-            .width(Length::Fill)
-            .height(280)
-            .style(bottom_panel_style)
+            .width(Length::Fixed(SIDE_PANEL_WIDTH))
+            .height(Length::Fill)
+            .style(|_: &Theme| container::Style {
+                background: Some(Background::Color(palette.surface)),
+                border: Border {
+                    color: palette.divider,
+                    width: 1.0,
+                    radius: iced::border::Radius::new(0.0),
+                },
+                ..container::Style::default()
+            })
             .into(),
         )
     } else {
@@ -6225,25 +6381,25 @@ pub fn view(state: &FerriteBrowser) -> Element<'_, FerriteBrowserMessage> {
     }
     layout.push(sep_bottom.into());
 
-    // The library drawer opens under the toolbar; the audit and JS panels are
-    // developer-style drawers and sit below the page, like browser devtools.
+    // The audit and JS panels are developer-style drawers and sit below the
+    // page, like browser devtools; the library is a drawer on the right.
     let bottom_panel = if audit_panel.is_some() {
         audit_panel
     } else {
         js_panel
     };
-    if bottom_panel.is_none() {
-        if let Some(p) = library_panel {
-            layout.push(p);
-        }
-    }
 
     if let Some(bar) = find_bar {
         layout.push(bar);
     }
 
     // Wrap browser viewport + optional agent sidebar in a horizontal row.
-    let main_content: Element<FerriteBrowserMessage> = if state.show_agent_sidebar {
+    let main_content: Element<FerriteBrowserMessage> = if let Some(library) = library_panel {
+        iced::widget::row![content, library]
+            .width(Length::Fill)
+            .height(Length::Fill)
+            .into()
+    } else if state.show_agent_sidebar {
         iced::widget::row![content, agent_panel::view_agent_sidebar(state)]
             .width(Length::Fill)
             .height(Length::Fill)
@@ -6295,19 +6451,36 @@ fn tile_glyph<'a>(
     monogram: &str,
     accent: Color,
 ) -> Element<'a, FerriteBrowserMessage> {
+    // A real favicon sits on a light tile so a dark icon (GitHub's, Rust's) is
+    // still visible on the dark theme; a monogram sits on a quiet tint.
+    let has_icon = favicon.is_some();
     let backdrop_style = move |_: &Theme| container::Style {
-        background: Some(Background::Color(Color { a: 0.14, ..accent })),
+        background: Some(Background::Color(if has_icon {
+            Color {
+                a: 0.96,
+                ..Color::WHITE
+            }
+        } else {
+            Color { a: 0.14, ..accent }
+        })),
         border: Border {
             radius: iced::border::Radius::new(11.0),
             width: 1.0,
-            color: Color { a: 0.30, ..accent },
+            color: if has_icon {
+                Color {
+                    a: 0.20,
+                    ..Color::BLACK
+                }
+            } else {
+                Color { a: 0.30, ..accent }
+            },
         },
         ..container::Style::default()
     };
     let inner: Element<'a, FerriteBrowserMessage> = match favicon {
         Some(handle) => ServoImage::new(handle.clone())
-            .width(Length::Fixed(22.0))
-            .height(Length::Fixed(22.0))
+            .width(Length::Fixed(24.0))
+            .height(Length::Fixed(24.0))
             .into(),
         None => text(monogram.to_string()).size(16).color(accent).into(),
     };
@@ -6575,6 +6748,22 @@ fn page_key_target(state: &FerriteBrowser) -> Option<&HeadlessServoSession> {
     state.servo_sessions.get(&state.active_tab)
 }
 
+/// Whether a key press that a focused widget captured is nevertheless one of
+/// the browser's own shortcuts: Cmd/Ctrl plus a letter or symbol, or F5/F12.
+/// Editing combinations (Cmd/Ctrl+A/C/V/X/Z) are not in
+/// [`handle_key_press`]'s table, so they still reach the field.
+fn is_captured_chrome_shortcut(key: &keyboard::Key, modifiers: keyboard::Modifiers) -> bool {
+    #[cfg(target_os = "macos")]
+    let mod_active = modifiers.command();
+    #[cfg(not(target_os = "macos"))]
+    let mod_active = modifiers.control();
+    match key {
+        keyboard::Key::Character(_) => mod_active,
+        keyboard::Key::Named(keyboard::key::Named::F5 | keyboard::key::Named::F12) => true,
+        _ => false,
+    }
+}
+
 /// `event::listen_with` filter for [`FerriteBrowserMessage::PageKey`]. Only
 /// events no widget captured (a focused `text_input` captures what it types,
 /// which is exactly how "typing in the address bar" never reaches the page)
@@ -6584,12 +6773,25 @@ fn page_key_from_event(
     status: iced::event::Status,
     _window: window::Id,
 ) -> Option<FerriteBrowserMessage> {
-    if status != iced::event::Status::Ignored {
-        return None;
-    }
     let iced::Event::Keyboard(key_event) = event else {
         return None;
     };
+    if status != iced::event::Status::Ignored {
+        // A focused text field (the address bar, the agent box) captures every
+        // key, which used to leave Cmd/Ctrl+T, +L, +W, +R and friends dead
+        // whenever one of them had focus — right after typing an address, say.
+        // The browser's own shortcuts are honoured even then; `on_key_press`
+        // (in `subscription`) already covers the uncaptured case, so this is
+        // only for captured events and nothing is handled twice.
+        return match &key_event {
+            keyboard::Event::KeyPressed { key, modifiers, .. }
+                if is_captured_chrome_shortcut(key, *modifiers) =>
+            {
+                handle_key_press(key.clone(), *modifiers)
+            }
+            _ => None,
+        };
+    }
     let (key, modifiers) = match &key_event {
         keyboard::Event::KeyPressed { key, modifiers, .. }
         | keyboard::Event::KeyReleased { key, modifiers, .. } => (key.clone(), *modifiers),
@@ -8805,6 +9007,37 @@ mod tests {
     #[test]
     fn decode_favicon_rgba_is_none_for_empty_bytes() {
         assert_eq!(decode_favicon_rgba(&[]), None);
+    }
+
+    #[test]
+    fn icon_links_are_found_resolved_and_ranked() {
+        let base = url::Url::parse("https://example.org/").unwrap();
+        let html = r#"<html><head>
+            <link rel="stylesheet" href="/s.css">
+            <LINK REL="apple-touch-icon" HREF="/touch.png">
+            <link rel='shortcut icon' href='/static/fav.ico'>
+            <link rel="icon" type="image/svg+xml" href="/logo.svg">
+            <link rel=icon href=//cdn.example.net/a.png>
+            </head>"#;
+        let links: Vec<String> = icon_links_in_html(html, &base)
+            .into_iter()
+            .map(|u| u.to_string())
+            .collect();
+        assert_eq!(
+            links,
+            vec![
+                "https://example.org/static/fav.ico",
+                "https://cdn.example.net/a.png",
+                "https://example.org/touch.png",
+                "https://example.org/logo.svg",
+            ]
+        );
+    }
+
+    #[test]
+    fn a_page_with_no_icon_links_yields_none() {
+        let base = url::Url::parse("https://example.org/").unwrap();
+        assert!(icon_links_in_html("<html><link rel=stylesheet href=x.css>", &base).is_empty());
     }
 
     #[test]

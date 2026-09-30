@@ -190,7 +190,7 @@ pub fn audit_db_path() -> std::path::PathBuf {
 }
 
 #[cfg(feature = "servo")]
-pub use inner::{shutdown_engine, HeadlessServoSession};
+pub use inner::{shutdown_engine, take_popup_sessions, HeadlessServoSession};
 
 #[cfg(feature = "servo")]
 mod inner {
@@ -303,6 +303,17 @@ mod inner {
     // and share it (via `Clone`, which is a cheap `Rc` bump) across all tabs.
     thread_local! {
         static SERVO_ENGINE: RefCell<Option<Servo>> = const { RefCell::new(None) };
+    }
+
+    thread_local! {
+        /// Tabs that pages opened (`window.open`, `target="_blank"`), waiting
+        /// for the UI to adopt them.
+        static POPUP_SESSIONS: RefCell<Vec<HeadlessServoSession>> = const { RefCell::new(Vec::new()) };
+    }
+
+    /// Takes the tabs pages have opened since the last call, oldest first.
+    pub fn take_popup_sessions() -> Vec<HeadlessServoSession> {
+        POPUP_SESSIONS.with(|q| std::mem::take(&mut *q.borrow_mut()))
     }
 
     thread_local! {
@@ -547,6 +558,30 @@ mod inner {
             }
         }
 
+        /// A page asked for a new WebView (`window.open`, `target="_blank"`,
+        /// a sign-in popup). Build it as a tab of its own and queue it for the
+        /// UI to adopt (`take_popup_sessions`); ignoring the request would
+        /// silently break every such link and most "Sign in with ..." flows.
+        fn request_create_new(
+            &self,
+            _parent: servo::WebView,
+            request: servo::CreateNewWebViewRequest,
+        ) {
+            match HeadlessServoSession::assemble(
+                1280,
+                700,
+                |_servo, rendering_context, delegate| {
+                    request
+                        .builder(rendering_context)
+                        .delegate(delegate)
+                        .build()
+                },
+            ) {
+                Ok(session) => POPUP_SESSIONS.with(|q| q.borrow_mut().push(session)),
+                Err(e) => eprintln!("[ferrite-session] cannot open a page-requested tab: {e}"),
+            }
+        }
+
         fn load_web_resource(&self, _webview: servo::WebView, load: servo::WebResourceLoad) {
             let url = load.request().url.to_string();
             if let Err(e) = self.audit_log.borrow_mut().append(
@@ -638,6 +673,40 @@ mod inner {
         }
 
         fn new_inner(width: u32, height: u32) -> Result<Self, String> {
+            let session = Self::assemble(width, height, |servo, rendering_context, delegate| {
+                WebViewBuilder::new(servo, rendering_context)
+                    .delegate(delegate)
+                    .url(url::Url::parse("about:blank").unwrap())
+                    .build()
+            })?;
+            // Let the tab's initial about:blank finish loading before handing
+            // the session out: a `navigate` issued while it is still in flight
+            // is lost to it (the tab stays blank), which is what a tab opened
+            // and immediately pointed somewhere — by the agent's `open_tab`,
+            // say — would hit.
+            let settle_deadline =
+                std::time::Instant::now() + std::time::Duration::from_millis(1500);
+            while *session.shared_load_status.borrow() != LoadStatus::Complete
+                && std::time::Instant::now() < settle_deadline
+            {
+                session.servo.spin_event_loop();
+                std::thread::sleep(std::time::Duration::from_millis(5));
+            }
+            Ok(session)
+        }
+
+        /// Builds a session around a WebView made by `make` — the shared part
+        /// of opening a fresh tab and of accepting a page-opened one
+        /// (`window.open`, `target="_blank"`).
+        fn assemble(
+            width: u32,
+            height: u32,
+            make: impl FnOnce(
+                &Servo,
+                Rc<SoftwareRenderingContext>,
+                Rc<HeadlessDelegate>,
+            ) -> servo::WebView,
+        ) -> Result<Self, String> {
             // ── rustls crypto provider ─────────────────────────────────────
             let _ = aws_lc_rs::default_provider().install_default();
 
@@ -680,26 +749,10 @@ mod inner {
                 console_errors: shared_console_errors.clone(),
                 favicon: shared_favicon.clone(),
             });
-            let webview = WebViewBuilder::new(&servo, rendering_context.clone())
-                .delegate(delegate)
-                .url(url::Url::parse("about:blank").unwrap())
-                .build();
+            let webview = make(&servo, rendering_context.clone(), delegate);
 
             webview.resize(PhysicalSize { width, height });
             servo.spin_event_loop();
-            // Let the tab's initial about:blank finish loading before handing
-            // the session out: a `navigate` issued while it is still in flight
-            // is lost to it (the tab stays blank), which is what a tab opened
-            // and immediately pointed somewhere — by the agent's `open_tab`,
-            // say — would hit.
-            let settle_deadline =
-                std::time::Instant::now() + std::time::Duration::from_millis(1500);
-            while *shared_load_status.borrow() != LoadStatus::Complete
-                && std::time::Instant::now() < settle_deadline
-            {
-                servo.spin_event_loop();
-                std::thread::sleep(std::time::Duration::from_millis(5));
-            }
 
             Ok(Self {
                 servo,
@@ -1239,6 +1292,12 @@ mod inner {
 /// Without the `servo` feature there is no engine to shut down.
 #[cfg(not(feature = "servo"))]
 pub fn shutdown_engine() {}
+
+/// Without the `servo` feature no page can open a tab.
+#[cfg(not(feature = "servo"))]
+pub fn take_popup_sessions() -> Vec<HeadlessServoSession> {
+    Vec::new()
+}
 
 #[cfg(not(feature = "servo"))]
 pub struct HeadlessServoSession;

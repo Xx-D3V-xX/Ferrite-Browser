@@ -167,7 +167,13 @@ pub(crate) fn extract_origin(url: &str) -> String {
         .ok()
         .and_then(|u| {
             let host = u.host_str()?.to_string();
-            Some(format!("{}://{}", u.scheme(), host))
+            // A non-default port is part of the origin (`Origin::parse` keeps
+            // it); dropping it made a local server on `:8099` look like a
+            // different origin from the one the task named.
+            Some(match u.port() {
+                Some(port) => format!("{}://{}:{}", u.scheme(), host, port),
+                None => format!("{}://{}", u.scheme(), host),
+            })
         })
         .unwrap_or_else(|| url.to_string())
 }
@@ -175,6 +181,22 @@ pub(crate) fn extract_origin(url: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_non_default_port_is_part_of_the_origin_and_a_default_port_is_not() {
+        assert_eq!(
+            extract_origin("http://127.0.0.1:8099/a?b=1"),
+            "http://127.0.0.1:8099"
+        );
+        assert_eq!(
+            extract_origin("https://Example.com:443/x"),
+            "https://example.com"
+        );
+        assert_eq!(
+            extract_origin("https://example.com/x"),
+            "https://example.com"
+        );
+    }
 
     #[test]
     fn seq_is_monotonic_and_matches_call_order() {

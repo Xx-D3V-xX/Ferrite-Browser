@@ -114,3 +114,40 @@ fn clicking_the_page_takes_focus_from_the_address_bar() {
     let _ = update(&mut state, FerriteBrowserMessage::ServoMousePress);
     assert!(!state.address_bar_focused);
 }
+
+#[test]
+fn chrome_shortcuts_work_even_when_a_text_field_captured_the_key() {
+    // Cmd on macOS, Ctrl elsewhere.
+    #[cfg(target_os = "macos")]
+    let mods = Modifiers::LOGO;
+    #[cfg(not(target_os = "macos"))]
+    let mods = Modifiers::CTRL;
+    let new_tab = key_event(Key::Character("t".into()), mods, None);
+    assert!(matches!(
+        page_key_from_event(new_tab, iced::event::Status::Captured, wid()),
+        Some(FerriteBrowserMessage::AddTab)
+    ));
+    let focus_bar = key_event(Key::Character("l".into()), mods, None);
+    assert!(matches!(
+        page_key_from_event(focus_bar, iced::event::Status::Captured, wid()),
+        Some(FerriteBrowserMessage::FocusAddressBar)
+    ));
+}
+
+#[test]
+fn a_captured_editing_combination_is_left_to_the_field() {
+    #[cfg(target_os = "macos")]
+    let mods = Modifiers::LOGO;
+    #[cfg(not(target_os = "macos"))]
+    let mods = Modifiers::CTRL;
+    for letter in ["a", "c", "v", "x", "z"] {
+        let e = key_event(Key::Character(letter.into()), mods, None);
+        assert!(
+            page_key_from_event(e, iced::event::Status::Captured, wid()).is_none(),
+            "{letter}"
+        );
+    }
+    // A plain captured letter is never a shortcut either.
+    let plain = key_event(Key::Character("t".into()), Modifiers::empty(), Some("t"));
+    assert!(page_key_from_event(plain, iced::event::Status::Captured, wid()).is_none());
+}

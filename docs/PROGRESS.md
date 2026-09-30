@@ -4524,3 +4524,44 @@ probes `input_probe`, `digest_probe`, `profile_probe` pass (release, headless
 Linux). **Not verified:** macOS; any real website, Google Forms or Google
 sign-in in particular; the release-profile exit segfault in probes that do not
 shut the engine down; the new-tab page beyond the dark theme.
+
+## 2026-09-30 — coordinator — favicons, alignment, shortcuts, popups
+
+**Reported by the owner:** after the last round the site icons were not
+visible and things were misaligned ("some to the left"); he asked how to sign
+in with Google and for every fixable issue to be fixed. No screenshot this
+time, so the app was rendered here (headless, Linux) and every screen looked
+at, including favicons (seeded through the cache directory), several tabs,
+the Library drawer, the agent drawer and the light theme.
+
+**Found and fixed.**
+- *Icons invisible:* real favicons were drawn on a near-transparent tint, so
+  dark icons (GitHub, Rust) vanished on the dark theme. They now sit on a
+  light tile (tiles and tab strip; light theme unchanged). The favicon
+  download also sent no User-Agent (Wikipedia and others refuse that) and
+  had no fallback when `/favicon.ico` was missing; it now sends one, times out
+  after 8 s and falls back to the icons the home page declares
+  (`icon_links_in_html`, tested).
+- *Alignment:* tabs each took the width their title needed, so favicons,
+  titles and close buttons sat at different x on every tab; all tabs are now
+  190 px with a fixed favicon slot. The Library was a full-width bar with its
+  contents stranded at the far left and pushing the page down; it is now a
+  380 px drawer on the right like the agent's (one at a time). Settings'
+  zoom row wrapped ("150 / %"); fixed.
+- *Shortcuts dead in a text field:* a focused text field captures every key,
+  so Cmd/Ctrl+T, +L, +W and +R did nothing right after typing an address
+  (seen: the next URL was typed into the middle of the old one). Browser
+  shortcuts now work from a captured key too; editing combinations still go
+  to the field.
+- *Popups and `target=_blank`:* Servo was asked for a new WebView and the
+  request was ignored, so such links and sign-in popups did nothing. They now
+  open as real tabs (seen: `window.open` and typing in the new tab).
+- *T-242:* consent origins now keep non-default ports (done).
+- `FERRITE_USER_AGENT` documented in `scripts/local.env.example`.
+
+**Verified:** fmt; clippy (workspace, and the servo feature for
+`ferrite-servo` and `ferrite-engine-servo`'s lib and examples); 1002 tests, 0
+failures; machete; deny; all of the above seen in the rendered app.
+**Not verified:** macOS; real favicon downloads (the cache was seeded with
+generated icons, the network path is covered only by the link-parsing tests);
+Google sign-in (no internet); Cmd+Q still skips the clean shutdown.
