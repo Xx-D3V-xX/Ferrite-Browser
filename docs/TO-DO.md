@@ -23,10 +23,10 @@ Status enum: `open` / `in-progress` / `done <SHA>` / `dropped <reason>` /
 
 ## Summary for a v0.1.0 reader (added by A13, T-113; counts updated by B3,
 then by C1 for T-231, then for T-210's 2026-09-24 owner decision, then by
-C3d for T-232, then by the new-tab hero pass for T-233, then by the agent-context/Laya pass for T-234–T-238 — re-tallied
+C3d for T-232, then by the new-tab hero pass for T-233, then by the agent-context/Laya pass for T-234–T-238, then T-239 — re-tallied
 directly against every row below, not carried forward)
 
-**65 rows total: 44 done, 1 in-progress, 17 open, 1 held, 1 dropped, 1
+**66 rows total: 44 done, 1 in-progress, 18 open, 1 held, 1 dropped, 1
 needing owner confirmation.**
 
 - **All 14 D1–D14 defects (T-001–T-014) are done.** All 11 completed agent
@@ -167,6 +167,7 @@ One row per charter. Each charter's own exit gate (`docs/REBUILD_DIRECTIVE.md`
 | T-236 | open | found by the agent-context/Laya pass | **The chat UI was never rendered.** `crates/ferrite-ui/src/agent_panel.rs` (chat thread, history, context chip, entrance animation, snap-to-bottom scrolling, 360 px sidebar) is checked only by widget-tree smoke tests and code reading; spacing, wrapping in bubbles, tooltip placement, animation feel and iced's post-rebuild operation ordering for `snap_to` are unobserved. **Keyboard forwarding to pages (typing in inputs, Cmd/Ctrl+C/X/V) is likewise compile-checked against real Servo only, never exercised: non-US layouts, IME, dead keys and key repeat are unobserved.** Same for the live tab-action paths (`open_tab` navigating on the UI thread, session re-indexing on `close_tab`) which need a real Servo session. |
 | T-237 | open | found by the agent-context/Laya pass | **Three small defense/robustness gaps left as found.** (1) `press_key` maps to `dom.write`, but Enter in a form submits (a click-class effect) — decide whether the comparator should treat it as `click`. (2) A scheme-less `navigate` URL is not caught by a rejected-origin check because `origin_of_url` returns `None` for it (`open_tab` sidesteps this by requiring an absolute http(s) URL). (3) `AgentFailed`/`AgentCompleted` carry no `run_id`, so a late message from an aborted dry run could conclude the current turn (Stop aborts the task, so unlikely). |
 | T-238 | open | found by the agent-context/Laya pass | **`decide_page_use` is English-centric and defaults toward including the page when unsure** (non-English prompts with no cue are ambiguous -> use page; "search for X" is a confident *no* though on a search site the user may mean the site's own box). 88-prompt table test is the spec; revisit with real usage, and only then consider a measured model-based tie-breaker. |
+| T-239 | open | reported by the owner on his Mac | **A Google Form loaded in the real-Servo app but did not respond to input (not even scrolling), and pressing reload then segfaulted (exit 139).** Root cause not established: it may be Servo itself (a heavy Google page hanging the script/paint threads, then crashing in `WebView::reload`), not Ferrite's input path. Two real defects that could contribute were fixed without a repro (each click was sent to Servo twice; zoom reset left `transform: scale(1)` on `<html>`). Needs the top of the run log and a check against simple pages (does typing/scrolling/checkboxes work on a plain HTML form?) to separate the two. |
 
 ## Notes for whoever picks up A1 next
 

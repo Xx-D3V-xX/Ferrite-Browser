@@ -911,23 +911,6 @@ mod inner {
                 .notify_input_event(InputEvent::MouseMove(MouseMoveEvent::new(point)));
         }
 
-        /// Send a mouse-button down+up (click) at pixel coordinates `(x, y)`.
-        pub fn send_mouse_click(&self, x: f32, y: f32) {
-            let point = WebViewPoint::Device(DevicePoint::new(x, y));
-            self.webview
-                .notify_input_event(InputEvent::MouseButton(MouseButtonEvent::new(
-                    MouseButtonAction::Down,
-                    MouseButton::Left,
-                    point,
-                )));
-            self.webview
-                .notify_input_event(InputEvent::MouseButton(MouseButtonEvent::new(
-                    MouseButtonAction::Up,
-                    MouseButton::Left,
-                    point,
-                )));
-        }
-
         /// Send a right mouse-button click at pixel coordinates `(x, y)`.
         pub fn send_right_click(&self, x: f32, y: f32) {
             let point = WebViewPoint::Device(DevicePoint::new(x, y));
@@ -1197,7 +1180,6 @@ impl HeadlessServoSession {
 
     pub fn send_key(&self, _event: &PageKeyEvent) {}
     pub fn send_mouse_move(&self, _x: f32, _y: f32) {}
-    pub fn send_mouse_click(&self, _x: f32, _y: f32) {}
     pub fn send_right_click(&self, _x: f32, _y: f32) {}
     pub fn send_scroll(&self, _x: f32, _y: f32, _dx: f64, _dy: f64) {}
     pub fn send_mouse_down(&self, _x: f32, _y: f32) {}

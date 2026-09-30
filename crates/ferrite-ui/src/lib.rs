@@ -2180,6 +2180,9 @@ pub fn update(
             let (x, y) = state.cursor_pos;
             let scale = state.scale_factor;
             if let Some(session) = state.servo_sessions.get(&state.active_tab) {
+                // Re-assert the pointer position first so the press hit-tests
+                // where the cursor visually is even if no move event preceded it.
+                session.send_mouse_move(x * scale, y * scale);
                 session.send_mouse_down(x * scale, y * scale);
             }
         }
@@ -2192,9 +2195,11 @@ pub fn update(
             let (x, y) = state.cursor_pos;
             let scale = state.scale_factor;
             if let Some(session) = state.servo_sessions.get(&state.active_tab) {
-                // Up event first, then a synthesised click for hit-testing.
+                // One down (ServoMousePress) + one up is a complete click:
+                // Servo raises `click` itself. A second synthesised
+                // down/up pair here made every click arrive twice, so
+                // checkboxes and radios toggled back and links fired twice.
                 session.send_mouse_up(x * scale, y * scale);
-                session.send_mouse_click(x * scale, y * scale);
             }
         }
         FerriteBrowserMessage::ServoScroll { delta_x, delta_y } => {
@@ -4123,6 +4128,19 @@ fn prev_zoom_level(current: f32) -> f32 {
 /// keeps a `level > 1.0` page's content reachable by scrolling rather than
 /// clipped at the original viewport width.
 fn zoom_script(level: f32) -> String {
+    // At 100% the inline styles are removed rather than set to `scale(1)`: a
+    // non-`none` transform on the root element makes it a containing block and
+    // stacking context, which can change scrolling and hit-testing for the
+    // whole page, so "reset" must leave no trace.
+    if (level - 1.0).abs() <= f32::EPSILON {
+        return "(function(){\
+                  var el = document.documentElement;\
+                  el.style.removeProperty('transform');\
+                  el.style.removeProperty('transform-origin');\
+                  el.style.removeProperty('width');\
+                })()"
+            .to_string();
+    }
     format!(
         "(function(){{\
            var el = document.documentElement;\
@@ -8285,6 +8303,13 @@ mod tests {
              this script's own `transform`/`width` keywords would otherwise false-positive on"
         );
         assert!(!script.contains("el.style.zoom"));
+    }
+
+    #[test]
+    fn zoom_script_at_100_percent_removes_the_root_transform() {
+        let script = zoom_script(1.0);
+        assert!(script.contains("removeProperty('transform')"), "{script}");
+        assert!(!script.contains("scale("), "{script}");
     }
 
     #[test]

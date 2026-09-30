@@ -4383,3 +4383,29 @@ test-local`).
 verified:** against the real Hugging Face repo (unreachable here); if the
 repo's layout is none of the three, the script now prints the file list to
 fix it from.
+
+## 2026-09-30 — coordinator — page clicks sent twice; zoom reset transform
+
+**Reported by the owner:** on his Mac (real Servo build) a Google Form loaded
+but would not respond to input, not even scrolling; pressing reload then
+segfaulted (`Segmentation fault: 11`, exit 139). The log tail showed only
+`[ferrite-js] execute: 149 chars` lines, which is `zoom_script` at a level
+of 100% or below.
+
+**Not established:** the cause of the freeze and the segfault. No display or
+route to Google from the sandbox and not enough disk for a full Servo build,
+so nothing was reproduced. Filed as T-239.
+
+**Fixed (found by reading the input path, not by reproducing the report):**
+- Every click reached Servo twice: `ServoMousePress` sent a down,
+  `ServoMouseRelease` sent an up *and* a second synthesised down+up. Checkbox
+  and radio controls toggled twice and links fired twice. Release now sends
+  only the up; press re-asserts the pointer position first. `send_mouse_click`
+  had no other caller and is removed.
+- `zoom_script` at 100% now removes the root `transform`/`width` instead of
+  setting `scale(1)`; a leftover transform on `<html>` can change scrolling
+  and hit-testing for the whole page. Test added.
+
+**Verified:** `cargo clippy --workspace --all-targets -D warnings` and
+`clippy -p ferrite-servo --features servo` clean; `ferrite-ui` 234 tests pass.
+**Not verified:** none of this has been seen on a real page.
