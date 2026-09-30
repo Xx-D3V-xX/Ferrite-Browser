@@ -53,15 +53,12 @@ fn running_state(dir: &TempDir, prompt: &str) -> FerriteBrowser {
 }
 
 fn live() -> LiveAgentLoop {
-    LiveAgentLoop {
-        messages: vec![Message::user("go")],
-        actions_taken: Vec::new(),
-        started_at: std::time::Instant::now(),
-        budget: LoopBudget::default(),
-        rejected: Default::default(),
-        rejected_origins: Default::default(),
-        consecutive_malformed: 0,
-    }
+    LiveAgentLoop::new(
+        "go".to_string(),
+        "go".to_string(),
+        Default::default(),
+        Default::default(),
+    )
 }
 
 fn step(state: &mut FerriteBrowser, action: Result<AgentAction, StepFailure>) {

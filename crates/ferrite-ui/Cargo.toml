@@ -61,3 +61,8 @@ chrono = { workspace = true }
 # from_rgba` — see the workspace `Cargo.toml`'s own comment on this
 # dependency for why this adds no new version to the dependency graph.
 image = { workspace = true }
+
+[dev-dependencies]
+# The fast-lane tests run a loopback-only mock Laya server (127.0.0.1:0, owned
+# by the test, no external network - R7), which needs tokio's `net` feature.
+tokio = { workspace = true, features = ["net"] }

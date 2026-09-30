@@ -22,14 +22,23 @@
 //!   predicted from trusted intent alone. [`ipi_task_for_run`] is the one place
 //!   the defense's input is built, so the safe path is the only path.
 
+use std::collections::hash_map::DefaultHasher;
+use std::hash::{Hash, Hasher};
+use std::sync::Arc;
+use std::time::Duration;
+
 use ferrite_agent::browser_loop::AgentAction;
 use ferrite_agent::chat::{Chat, ChatSummary, Outcome, PageContextNote};
 use ferrite_agent::context::{
     build_seed, decide_page_use, trusted_task_text, ContextBudget, ContextMode, SeedContext,
     TabInfo,
 };
+use ferrite_agent::decider::{
+    generate_field_text, plan_fast_lane, FastAction, FastLane, HistoryItem, LayaStepDecider,
+};
 use ferrite_engine::{sanitize_text, truncate_chars, PageDigest};
 use ferrite_ipi::IpiTask;
+use ferrite_model::{EnvSource, ModelProvider, ModelTier};
 
 use super::action_detail;
 
@@ -224,6 +233,16 @@ pub(crate) fn resolve_tab_number(tab: u64, tab_count: usize) -> Result<usize, St
 // Recording a step
 // ---------------------------------------------------------------------------
 
+/// Suffix marking a fast-lane step in `StepRecord::detail`.
+const FAST_MARK: &str = " \u{b7} fast lane";
+
+/// `detail` with the fast-lane marker appended (the base is bounded first so
+/// `Chat::record_step`'s own truncation can never cut the marker off).
+#[must_use]
+pub(crate) fn mark_fast(detail: &str) -> String {
+    format!("{}{FAST_MARK}", truncate_chars(detail, 240))
+}
+
 /// The action argument summary that is **persisted** in the chat file (and
 /// echoed into later seeds). Like [`action_detail`], except that text the
 /// agent typed or wrote to the clipboard is recorded as a length only: chat
@@ -280,6 +299,189 @@ pub(crate) fn upsert_summary(list: &mut Vec<ChatSummary>, summary: ChatSummary) 
             .cmp(&a.updated_at)
             .then_with(|| a.id.cmp(&b.id))
     });
+}
+
+// ---------------------------------------------------------------------------
+// Laya fast lane
+// ---------------------------------------------------------------------------
+
+/// Most recent-action items kept for Laya's `recent_actions`.
+pub(crate) const MAX_HISTORY_ITEMS: usize = 10;
+
+/// How long the small model gets to write the text for a `TYPE_TEXT` step
+/// before the step falls back to the normal LLM.
+const FIELD_TEXT_TIMEOUT: Duration = Duration::from_secs(20);
+
+/// A stable hash of what a page currently shows (URL, title, text, and each
+/// element's ref, label and value), so consecutive digests can be compared
+/// for Laya's `page_changed`.
+#[must_use]
+pub(crate) fn page_signature(digest: &PageDigest) -> u64 {
+    let mut hasher = DefaultHasher::new();
+    digest.url.hash(&mut hasher);
+    digest.title.hash(&mut hasher);
+    digest.text.hash(&mut hasher);
+    for element in &digest.elements {
+        element.ref_id.hash(&mut hasher);
+        element.label.hash(&mut hasher);
+        element.value.hash(&mut hasher);
+    }
+    hasher.finish()
+}
+
+/// A history item for a step the LLM (not Laya) chose: an approximate one, in
+/// the "acted-on thing" shape Laya's history uses. Typed text is left out (a
+/// value the user may consider private is not sent to a second server).
+#[must_use]
+pub(crate) fn llm_history_item(action: &AgentAction, label: &str) -> HistoryItem {
+    let detail = match action {
+        AgentAction::TypeText { .. } | AgentAction::ClipboardWrite { .. } => String::new(),
+        other => action_detail(other),
+    };
+    let action_text = if detail.is_empty() {
+        label.to_string()
+    } else {
+        format!("{label} {detail}")
+    };
+    HistoryItem::new(truncate_chars(&action_text, 120), "", None)
+}
+
+/// Everything the background fast-lane attempt needs, all owned so it can move
+/// into the spawned task.
+pub(crate) struct FastLaneInputs {
+    pub decider: Arc<LayaStepDecider>,
+    /// The page as it is right now (taken on the UI thread after the previous
+    /// action ran).
+    pub digest: PageDigest,
+    /// The user's goal: the trusted task text (user words only).
+    pub goal: String,
+    pub history: Vec<HistoryItem>,
+    /// The fast-lane action executed immediately before, if the previous step
+    /// was one (drives Laya's repeat suppression).
+    pub previous: Option<FastAction>,
+    pub provider: Arc<dyn ModelProvider>,
+    /// Model tag for [`ModelTier::Small`], used to write field text.
+    pub small_model_tag: String,
+}
+
+/// Asks Laya for the next step and returns it only if it clears every gate:
+/// `Some((action, history item))` means "execute this instead of an LLM
+/// call"; `None` means "run the normal LLM step". *Every* failure is `None`:
+/// a Laya error or timeout, no decision, low confidence, `DONE`/`BLOCKED`, a
+/// repeat, a stale target, or a text helper that declined or failed. A Laya
+/// problem can never end a run.
+///
+/// `TYPE_TEXT` steps get their text from the **small** model
+/// ([`ModelTier::Small`]) — Laya's own design ("a small LLM will supply the
+/// value from the goal"): the value is short, bounded by the goal, and the
+/// whole point of the fast lane is to avoid a full-context main-model call. A
+/// value the small model cannot produce (`{"text": null}`, missing data,
+/// sensitive field) falls back to the main LLM step, which can ask the user.
+pub(crate) async fn try_fast_lane(inputs: &FastLaneInputs) -> Option<(FastAction, HistoryItem)> {
+    let decision = match inputs
+        .decider
+        .decide(&inputs.goal, &inputs.digest, &inputs.history)
+        .await
+    {
+        Ok(Some(decision)) => decision,
+        Ok(None) | Err(_) => return None,
+    };
+    let fast = match plan_fast_lane(
+        &decision,
+        inputs.decider.config(),
+        &inputs.digest,
+        inputs.previous.as_ref(),
+    ) {
+        FastLane::Act(action) => action,
+        FastLane::Fallback(_) => return None,
+        FastLane::NeedsText { target_ref } => {
+            let field = inputs.digest.element(target_ref)?;
+            let text = tokio::time::timeout(
+                FIELD_TEXT_TIMEOUT,
+                generate_field_text(
+                    inputs.provider.as_ref(),
+                    &inputs.small_model_tag,
+                    ModelTier::Small,
+                    &inputs.goal,
+                    field,
+                    &inputs.digest.text,
+                    &inputs.history,
+                ),
+            )
+            .await
+            .ok()?
+            .ok()??;
+            FastAction::TypeText { target_ref, text }
+        }
+    };
+    let history = fast.history_item(&inputs.digest);
+    Some((fast, history))
+}
+
+/// Resolves the optional Laya decider from the environment, returning it (if
+/// enabled) and the startup log lines to print: whether the fast lane is on,
+/// off, or misconfigured, and — once — a warning if the server is not on this
+/// machine, because every fast-lane step sends page text, the URL and element
+/// labels to it. A bad configuration disables the fast lane (logged once); it
+/// never aborts startup.
+#[must_use]
+pub(crate) fn resolve_laya(env: &dyn EnvSource) -> (Option<Arc<LayaStepDecider>>, Vec<String>) {
+    match LayaStepDecider::from_env(env) {
+        Ok(Some(decider)) => {
+            let base = decider.config().base_url.clone();
+            let mut log = vec![format!(
+                "[ferrite-ui] Laya fast lane enabled ({})",
+                display_host(&base)
+            )];
+            if !laya_url_is_loopback(&base) {
+                log.push(format!(
+                    "[ferrite-ui] WARNING: FERRITE_LAYA_URL points at {}, which is not this \
+                     machine: page text, URLs and element labels are sent there on every \
+                     agent step",
+                    display_host(&base)
+                ));
+            }
+            (Some(Arc::new(decider)), log)
+        }
+        Ok(None) => (
+            None,
+            vec!["[ferrite-ui] Laya fast lane disabled (FERRITE_LAYA_URL is not set)".to_string()],
+        ),
+        Err(e) => (
+            None,
+            vec![format!(
+                "[ferrite-ui] Laya fast lane disabled, invalid configuration: {e}"
+            )],
+        ),
+    }
+}
+
+/// `host[:port]` of `url` for logging (never userinfo, path or query).
+fn display_host(url: &str) -> String {
+    match url::Url::parse(url) {
+        Ok(parsed) => match (parsed.host_str(), parsed.port()) {
+            (Some(host), Some(port)) => format!("{host}:{port}"),
+            (Some(host), None) => host.to_string(),
+            _ => "an unparseable address".to_string(),
+        },
+        Err(_) => "an unparseable address".to_string(),
+    }
+}
+
+/// Whether `url`'s host is this machine (`localhost`, `127.0.0.0/8`, `::1`).
+/// Whole-host match on the parsed host, never a prefix, so
+/// `localhost.evil.example` is remote; an unparseable URL is treated as remote.
+#[must_use]
+pub(crate) fn laya_url_is_loopback(url: &str) -> bool {
+    match url::Url::parse(url)
+        .ok()
+        .and_then(|u| u.host().map(|h| h.to_owned()))
+    {
+        Some(url::Host::Domain(domain)) => domain.eq_ignore_ascii_case("localhost"),
+        Some(url::Host::Ipv4(ip)) => ip.is_loopback(),
+        Some(url::Host::Ipv6(ip)) => ip.is_loopback(),
+        None => false,
+    }
 }
 
 #[cfg(test)]

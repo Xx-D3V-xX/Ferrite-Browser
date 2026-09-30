@@ -199,7 +199,8 @@ use ferrite_agent::browser_loop::{
 use ferrite_agent::chat::{
     default_chats_dir, Chat, ChatId, ChatStore, ChatSummary, Outcome, StepRecord,
 };
-use ferrite_agent::context::ContextMode;
+use ferrite_agent::context::{trusted_task_text, ContextMode};
+use ferrite_agent::decider::{FastAction, HistoryItem, LayaStepDecider};
 use ferrite_audit_log::{AuditEntry, AuditEventKind, PersistentAuditLog};
 use ferrite_engine::{BrowserEngine, PageDigest};
 use ferrite_engine_servo::BorrowedServoEngine;
@@ -1085,6 +1086,9 @@ pub enum AgentLogEntry {
         /// `view_agent_sidebar`) so a blocked step doesn't read as if it
         /// succeeded.
         blocked: bool,
+        /// Whether the optional Laya fast lane chose this step (no LLM call)
+        /// rather than the model — shown as a small "fast" badge.
+        fast: bool,
     },
 }
 
@@ -1150,6 +1154,44 @@ pub struct LiveAgentLoop {
     /// `MAX_CONSECUTIVE_MALFORMED_STEPS`, the run ends with the parse error
     /// instead of retrying again. See `AgentStepReady`'s handler.
     consecutive_malformed: u32,
+    /// The user's goal for Laya (the fast lane): `trusted_task_text` — user
+    /// words only — never the seed or anything page-derived.
+    goal: String,
+    /// Laya's `recent_actions`: the steps taken so far (fast-lane steps
+    /// precisely, LLM steps approximately), newest last, bounded.
+    history: Vec<HistoryItem>,
+    /// The fast-lane action executed immediately before the step being
+    /// decided, if the previous step was a fast-lane one — Laya's repeat
+    /// suppression. `None` after an LLM step.
+    previous_fast: Option<FastAction>,
+    /// Signature of the page as of the last fast-lane digest, to tell Laya
+    /// whether the previous action changed the page.
+    last_page_sig: Option<u64>,
+}
+
+impl LiveAgentLoop {
+    /// A fresh loop: `first_message` is the run's first user message (the
+    /// seed), `goal` the trusted task text for the fast lane.
+    fn new(
+        first_message: String,
+        goal: String,
+        rejected: std::collections::HashSet<ToolId>,
+        rejected_origins: std::collections::HashSet<String>,
+    ) -> Self {
+        Self {
+            messages: vec![Message::user(first_message)],
+            actions_taken: Vec::new(),
+            started_at: std::time::Instant::now(),
+            budget: LoopBudget::default(),
+            rejected,
+            rejected_origins,
+            consecutive_malformed: 0,
+            goal,
+            history: Vec::new(),
+            previous_fast: None,
+            last_page_sig: None,
+        }
+    }
 }
 
 pub struct FerriteBrowser {
@@ -1311,6 +1353,11 @@ pub struct FerriteBrowser {
     /// One row per saved chat, newest first — read from disk once, in
     /// `launch()`, then kept current in memory as chats are saved and deleted.
     pub chat_list: Vec<ChatSummary>,
+    /// The optional Laya step decider (the fast lane), resolved once by
+    /// `launch()` from `FERRITE_LAYA_URL` and `None` — fast lane off, agent
+    /// behaves exactly as before — everywhere else (`Default`, tests, unset or
+    /// invalid configuration).
+    pub laya: Option<Arc<LayaStepDecider>>,
     /// Thread or History.
     pub sidebar_view: SidebarView,
     /// The context chip's setting: Auto decides per message whether the
@@ -1569,6 +1616,7 @@ impl Default for FerriteBrowser {
             chat_store: None,
             chat_list: Vec::new(),
             sidebar_view: SidebarView::Thread,
+            laya: None,
             context_mode: ContextMode::Auto,
             pending_seed: None,
             pending_chat_delete: None,
@@ -1672,6 +1720,16 @@ pub enum FerriteBrowserMessage {
     AgentStepReady {
         run_id: u64,
         action: Result<AgentAction, StepFailure>,
+    },
+    /// The Laya fast lane chose this step (no LLM call). Handled by exactly
+    /// the same code as `AgentStepReady` — the same consent check, execution,
+    /// logging and loop-safety bookkeeping — plus the fast-lane bookkeeping
+    /// (`fast` for repeat suppression, `history` for Laya's recent actions).
+    FastStepReady {
+        run_id: u64,
+        action: AgentAction,
+        fast: FastAction,
+        history: HistoryItem,
     },
     // ── Agent sidebar ─────────────────────────────────────────────────────────
     ToggleAgentSidebar,
@@ -2218,7 +2276,15 @@ pub fn update(
             );
         }
         FerriteBrowserMessage::AgentStepReady { run_id, action } => {
-            return handle_agent_step(state, run_id, action);
+            return handle_agent_step(state, run_id, action, None);
+        }
+        FerriteBrowserMessage::FastStepReady {
+            run_id,
+            action,
+            fast,
+            history,
+        } => {
+            return handle_agent_step(state, run_id, Ok(action), Some((fast, history)));
         }
         // ── Agent bridge ──────────────────────────────────────────────────────
         FerriteBrowserMessage::ServoReady => {}
@@ -2831,13 +2897,18 @@ fn submit_task(state: &mut FerriteBrowser) -> Task<FerriteBrowserMessage> {
     Task::none()
 }
 
-/// One step's model reply (or failure): validates the run, ends the run on a
-/// terminal action or a stop condition, otherwise blocks or executes the
-/// action, logs and records it, and spawns the next step.
+/// One step's model reply (or failure), or a fast-lane step: validates the
+/// run, ends the run on a terminal action or a stop condition, otherwise
+/// blocks or executes the action, logs and records it, and spawns the next
+/// step. A fast-lane action (`fast`) is an ordinary [`AgentAction`] and takes
+/// exactly this path — the repeated-action stop, the consent check
+/// (`is_action_rejected`), execution, the step budget — so Laya can never
+/// widen what a run is allowed to do or outrun its loop-safety limits.
 fn handle_agent_step(
     state: &mut FerriteBrowser,
     run_id: u64,
     action: Result<AgentAction, StepFailure>,
+    fast: Option<(FastAction, HistoryItem)>,
 ) -> Task<FerriteBrowserMessage> {
     if run_id != state.run_id {
         return Task::none();
@@ -2922,19 +2993,43 @@ fn handle_agent_step(
         "error: no active browser session".to_string()
     };
 
+    let is_fast = fast.is_some();
     state.agent_log.push(AgentLogEntry::Step {
         icon: icon_for_action(&action),
         label: action_label(&action),
         detail: action_detail(&action),
         result: observation.clone(),
         blocked,
+        fast: is_fast,
     });
+    let recorded_detail = agent_run::persisted_step_detail(&action);
     state.chat.record_step(StepRecord {
         label: action_label(&action).to_string(),
-        detail: agent_run::persisted_step_detail(&action),
+        detail: if is_fast {
+            agent_run::mark_fast(&recorded_detail)
+        } else {
+            recorded_detail
+        },
         result: agent_run::step_result_text(&observation),
         blocked,
     });
+    // Laya bookkeeping. Even a blocked fast step counts as the previous one,
+    // so Laya is not allowed to propose the same blocked click again.
+    match fast {
+        Some((fast_action, history)) => {
+            live.history.push(history);
+            live.previous_fast = Some(fast_action);
+        }
+        None => {
+            live.history
+                .push(agent_run::llm_history_item(&action, action_label(&action)));
+            live.previous_fast = None;
+        }
+    }
+    if live.history.len() > agent_run::MAX_HISTORY_ITEMS {
+        let excess = live.history.len() - agent_run::MAX_HISTORY_ITEMS;
+        live.history.drain(..excess);
+    }
     live.messages.push(Message::assistant(
         serde_json::to_string(&action).unwrap_or_default(),
     ));
@@ -4471,16 +4566,9 @@ fn start_live_loop(
     // tabs, page, then the request); the plain prompt only if there is none.
     // Both the direct start and the post-consent start come through here, so
     // both use the same seed.
+    let goal = trusted_task_text(Some(&state.chat), &prompt);
     let first_message = state.pending_seed.take().unwrap_or(prompt);
-    let live = LiveAgentLoop {
-        messages: vec![Message::user(first_message)],
-        actions_taken: Vec::new(),
-        started_at: std::time::Instant::now(),
-        budget: LoopBudget::default(),
-        rejected,
-        rejected_origins,
-        consecutive_malformed: 0,
-    };
+    let live = LiveAgentLoop::new(first_message, goal, rejected, rejected_origins);
     spawn_next_step(state, run_id, live)
 }
 
@@ -4494,7 +4582,7 @@ fn start_live_loop(
 fn spawn_next_step(
     state: &mut FerriteBrowser,
     run_id: u64,
-    live: LiveAgentLoop,
+    mut live: LiveAgentLoop,
 ) -> Task<FerriteBrowserMessage> {
     if live.actions_taken.len() >= live.budget.max_steps {
         return conclude_run(state, Outcome::Stopped("step budget exhausted".to_string()));
@@ -4519,7 +4607,43 @@ fn spawn_next_step(
         }
     };
 
+    // The optional Laya fast lane: only when it is configured AND the active
+    // page can be read right now (the digest is taken on this thread, after
+    // the previous action ran). Anything less and this step is exactly the
+    // normal LLM step.
+    let fast_inputs = state.laya.clone().and_then(|decider| {
+        let digest = observe_active_page(state)?;
+        let signature = agent_run::page_signature(&digest);
+        if let (Some(last), Some(previous)) = (live.history.last_mut(), live.last_page_sig) {
+            if last.page_changed.is_none() {
+                last.page_changed = Some(previous != signature);
+            }
+        }
+        live.last_page_sig = Some(signature);
+        Some(agent_run::FastLaneInputs {
+            decider,
+            digest,
+            goal: live.goal.clone(),
+            history: live.history.clone(),
+            previous: live.previous_fast.clone(),
+            provider: state.model_provider.clone(),
+            small_model_tag: state.model_tag_small.clone(),
+        })
+    });
+
     let handle = tokio::task::spawn(async move {
+        if let Some(inputs) = fast_inputs {
+            if let Some((fast, history)) = agent_run::try_fast_lane(&inputs).await {
+                let action = fast.to_agent_action();
+                let _ = event_tx.send(FerriteBrowserMessage::FastStepReady {
+                    run_id,
+                    action,
+                    fast,
+                    history,
+                });
+                return;
+            }
+        }
         let request = CompletionRequest::new(model_tag_main, ModelTier::Main, messages)
             .with_system_prompt(SYSTEM_PROMPT, SYSTEM_PROMPT_VERSION)
             .with_options(SamplingOptions::default().with_num_predict(AGENT_LOOP_NUM_PREDICT));
@@ -6652,81 +6776,87 @@ fn view_agent_sidebar(state: &FerriteBrowser) -> Element<'_, FerriteBrowserMessa
             2 => "..",
             _ => "...",
         };
-        let log_items: Vec<Element<FerriteBrowserMessage>> =
-            if state.agent_log.is_empty() && !state.agent_is_running {
-                vec![text("No active session.")
-                    .size(12)
-                    .color(palette.text_dim)
-                    .into()]
-            } else {
-                let mut items: Vec<Element<_>> = state
-                    .agent_log
-                    .iter()
-                    .map(|entry| match entry {
-                        AgentLogEntry::Note(s) => container(
-                            row![
-                                text("->").size(12).color(palette.accent),
-                                text(s.as_str()).size(12).color(palette.text_dim),
-                            ]
-                            .spacing(4),
-                        )
-                        .padding([2, 0])
-                        .width(Length::Fill)
-                        .into(),
-                        AgentLogEntry::Step {
-                            icon: step_icon,
-                            label,
-                            detail,
-                            result,
-                            blocked,
-                        } => {
-                            let accent = if *blocked {
-                                palette.danger
-                            } else {
-                                palette.accent
-                            };
-                            let mut lines: Vec<Element<FerriteBrowserMessage>> = vec![row![
-                                icon(*step_icon, ICON_SIZE_SM, accent),
-                                text(*label).size(12).color(palette.text),
-                            ]
+        let log_items: Vec<Element<FerriteBrowserMessage>> = if state.agent_log.is_empty()
+            && !state.agent_is_running
+        {
+            vec![text("No active session.")
+                .size(12)
+                .color(palette.text_dim)
+                .into()]
+        } else {
+            let mut items: Vec<Element<_>> = state
+                .agent_log
+                .iter()
+                .map(|entry| match entry {
+                    AgentLogEntry::Note(s) => container(
+                        row![
+                            text("->").size(12).color(palette.accent),
+                            text(s.as_str()).size(12).color(palette.text_dim),
+                        ]
+                        .spacing(4),
+                    )
+                    .padding([2, 0])
+                    .width(Length::Fill)
+                    .into(),
+                    AgentLogEntry::Step {
+                        icon: step_icon,
+                        label,
+                        detail,
+                        result,
+                        blocked,
+                        fast,
+                    } => {
+                        let accent = if *blocked {
+                            palette.danger
+                        } else {
+                            palette.accent
+                        };
+                        let mut title_row: Vec<Element<FerriteBrowserMessage>> = vec![
+                            icon(*step_icon, ICON_SIZE_SM, accent),
+                            text(*label).size(12).color(palette.text).into(),
+                        ];
+                        if *fast {
+                            title_row.push(text("fast").size(9).color(palette.accent).into());
+                        }
+                        let mut lines: Vec<Element<FerriteBrowserMessage>> = vec![row(title_row)
                             .spacing(6)
                             .align_y(iced::Alignment::Center)
                             .into()];
-                            if !detail.is_empty() {
-                                lines.push(
-                                    text(truncate(detail, 70))
-                                        .size(11)
-                                        .color(palette.text_dim)
-                                        .into(),
-                                );
-                            }
+                        if !detail.is_empty() {
                             lines.push(
-                                text(truncate(result, 90))
+                                text(truncate(detail, 70))
                                     .size(11)
-                                    .color(if *blocked {
-                                        palette.danger
-                                    } else {
-                                        palette.text_dim
-                                    })
+                                    .color(palette.text_dim)
                                     .into(),
                             );
-                            container(column(lines).spacing(2))
-                                .padding([5, 0])
-                                .width(Length::Fill)
-                                .into()
                         }
-                    })
-                    .collect();
-                if state.agent_is_running {
-                    items.push(
-                        text(format!("Working{}", dots))
-                            .size(12)
-                            .color(palette.text_dim)
-                            .into(),
-                    );
-                }
-                items
-            };
+                        lines.push(
+                            text(truncate(result, 90))
+                                .size(11)
+                                .color(if *blocked {
+                                    palette.danger
+                                } else {
+                                    palette.text_dim
+                                })
+                                .into(),
+                        );
+                        container(column(lines).spacing(2))
+                            .padding([5, 0])
+                            .width(Length::Fill)
+                            .into()
+                    }
+                })
+                .collect();
+            if state.agent_is_running {
+                items.push(
+                    text(format!("Working{}", dots))
+                        .size(12)
+                        .color(palette.text_dim)
+                        .into(),
+                );
+            }
+            items
+        };
 
         let mut log_col_items = log_items;
         if let Some(response) = &state.agent_response {
@@ -6875,6 +7005,14 @@ pub fn launch() -> iced::Result {
                      chats will work for this session but won't be saved"
                 ),
             }
+            // Optional Laya fast lane: resolved here only (never in `Default`).
+            // Logs, once, whether it is on and — if the server is not on this
+            // machine — that page text, URLs and element labels leave it.
+            let (laya, laya_log) = agent_run::resolve_laya(&ferrite_model::SystemEnv);
+            for line in laya_log {
+                eprintln!("{line}");
+            }
+            state.laya = laya;
             state.downloads_dir = default_downloads_dir();
             if state.downloads_dir.is_none() {
                 eprintln!(
@@ -6944,6 +7082,8 @@ pub fn launch() -> iced::Result {
 // ---------------------------------------------------------------------------
 #[cfg(test)]
 mod chat_tests;
+#[cfg(test)]
+mod fast_lane_tests;
 
 #[cfg(test)]
 mod tests {
@@ -7044,15 +7184,12 @@ mod tests {
     /// rejections — the shape `start_live_loop` builds for a
     /// bypassed/clean-dry-run task.
     fn fresh_live_loop() -> LiveAgentLoop {
-        LiveAgentLoop {
-            messages: vec![Message::user("go")],
-            actions_taken: Vec::new(),
-            started_at: std::time::Instant::now(),
-            budget: LoopBudget::default(),
-            rejected: Default::default(),
-            rejected_origins: Default::default(),
-            consecutive_malformed: 0,
-        }
+        LiveAgentLoop::new(
+            "go".to_string(),
+            "go".to_string(),
+            Default::default(),
+            Default::default(),
+        )
     }
 
     // ── consent_items: the plain-English summary snapshot ───────────────
@@ -7586,7 +7723,9 @@ mod tests {
                 detail,
                 result,
                 blocked,
+                fast,
             } => {
+                assert!(!fast, "an LLM-chosen step is not a fast-lane step");
                 assert_eq!(*step_icon, Icon::Click);
                 assert_eq!(*label, "Click");
                 assert_eq!(detail, "#submit");
