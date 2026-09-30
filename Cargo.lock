@@ -2542,12 +2542,14 @@ name = "ferrite-agent"
 version = "0.1.0"
 dependencies = [
  "chrono",
+ "dirs 5.0.1",
  "ferrite-core",
  "ferrite-engine",
  "ferrite-model",
  "serde",
  "serde_json",
  "tokio",
+ "uuid",
 ]
 
 [[package]]
