@@ -1728,3 +1728,21 @@ fn the_whole_window_builds_with_the_panel_open() {
     let state = smoke_state();
     let _ = view(&state);
 }
+
+#[test]
+fn the_switch_blocked_notice_clears_when_the_run_ends_but_other_notices_stay() {
+    let mut state = FerriteBrowser {
+        run_id: 1,
+        agent_is_running: true,
+        ..FerriteBrowser::default()
+    };
+    state.chat.begin_turn("q", None);
+    let _ = update(&mut state, FerriteBrowserMessage::NewChat);
+    assert!(state.panel_notice.is_some(), "refused with a notice");
+    let _ = update(&mut state, FerriteBrowserMessage::StopAgent);
+    assert!(state.panel_notice.is_none(), "stale once the run is over");
+
+    state.panel_notice = Some("Couldn't save this chat: disk full".into());
+    let _ = conclude_run(&mut state, Outcome::Cancelled);
+    assert!(state.panel_notice.is_some(), "a save failure is not stale");
+}

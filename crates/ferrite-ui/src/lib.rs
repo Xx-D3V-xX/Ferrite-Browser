@@ -2746,6 +2746,11 @@ fn conclude_run(state: &mut FerriteBrowser, outcome: Outcome) -> Task<FerriteBro
     state.live_loop = None;
     state.pending_task = None;
     state.pending_seed = None;
+    // "Stop the current run before switching chats" is stale the moment the
+    // run is over.
+    if state.panel_notice.as_deref() == Some(SWITCH_BLOCKED_NOTICE) {
+        state.panel_notice = None;
+    }
     let had_running_turn = state.chat.has_running_turn();
     state.chat.finish_turn(outcome);
     if had_running_turn {
@@ -2874,6 +2879,10 @@ fn submit_task(state: &mut FerriteBrowser) -> Task<FerriteBrowserMessage> {
     // The open tabs, and (when the message is about the current page) the
     // page itself, read on this thread through the borrowed engine. Fail-soft:
     // no digest just means the seed carries the tab list and a page header.
+    // Whether the page is wanted is the deterministic `decide_page_use`
+    // heuristic alone: Laya's `refine_page_use` second opinion is deliberately
+    // left unwired (its own docs call it an unmeasured experiment, likely no
+    // better than chance), so nothing here calls Laya for page relevance.
     let tabs = agent_run::tab_infos(
         &state.tab_titles,
         &state.tab_urls,

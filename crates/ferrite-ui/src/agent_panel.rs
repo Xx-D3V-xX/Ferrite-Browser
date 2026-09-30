@@ -1323,11 +1323,15 @@ fn history_body(state: &FerriteBrowser) -> Element<'_, FerriteBrowserMessage> {
             column![
                 icon(Icon::History, 22.0, palette.text_dim),
                 text("No chats yet").size(14).color(palette.text),
-                text("Your conversations with the agent are saved here.")
-                    .size(12)
-                    .color(palette.text_dim)
-                    .align_x(iced::alignment::Horizontal::Center)
-                    .width(Length::Fill),
+                text(if state.chat_store.is_some() {
+                    "Your conversations with the agent are saved here."
+                } else {
+                    "Chats work for this session but cannot be saved on this machine."
+                })
+                .size(12)
+                .color(palette.text_dim)
+                .align_x(iced::alignment::Horizontal::Center)
+                .width(Length::Fill),
             ]
             .spacing(8)
             .align_x(iced::Alignment::Center)
