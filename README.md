@@ -198,6 +198,7 @@ requires.
 | `just laya-serve` | only the Laya server, in the foreground |
 | `just laya-verify` | sends one recorded browser step to the running server, prints its decision and latency |
 | `just probe-input` / `just probe-engine` / `just probe-profile` | drive a real headless Servo session against a built-in page and report what works: scrolling, clicks, typing, reload, two tabs; the page digest and `@ref` actions; cookies and storage surviving a restart (real Servo build only; on Linux run under `xvfb-run`) |
+| `just crash-report` | after a crash (exit 139): prints the exception and the crashing thread's stack from the newest macOS crash report, for bug reports |
 | `just test-local` | tests for these scripts (no network; the Python ones skip unless `fastapi`, `uvicorn` and `laya` import) |
 
 Settings live in `$FERRITE_HOME/env.local` (plain `KEY=VALUE`, read as data,

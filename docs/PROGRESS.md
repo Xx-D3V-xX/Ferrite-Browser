@@ -4589,3 +4589,24 @@ the best-supported cause in his evidence (the only failing form was the zoomed
 one; every `execute_js` runs a nested event loop on the UI thread inside a
 heavy page), but nothing here reaches Google, so it is unproven (T-239).
 Verified: fmt, clippy (workspace and servo feature), 1000 tests, 0 failures.
+
+## 2026-09-30 — coordinator — native zoom did not fix Google Forms
+
+**Reported by the owner:** after the native-zoom change (no `[ferrite-js]`
+lines any more) the Google Form still showed "File unavailable" and the app
+crashed again (exit 139, dev profile; the log also prints Apple's
+`GLD_TEXTURE_INDEX_2D is unloadable` GL warning).
+
+**So the zoom hypothesis in the previous entry was wrong**, or at least not
+sufficient. A scratch probe (headless Linux, release) that does
+`location.reload()`, `location.href = location.href`, `history.go(0)` and
+five toolbar reloads on a page using fetch, workers, IndexedDB, a service
+worker and BroadcastChannel did not crash and exited cleanly, so the crash
+is not simply "reload" in this engine; it is specific to that page, to macOS,
+or to both. The cause is unknown.
+
+**Added so the next report has evidence:** script errors a page logs are now
+printed as `[page console error] tab N: …` (they were silently dropped), and
+`just crash-report` / `scripts/crash_report.py` prints the exception and the
+crashing thread's stack from the newest macOS crash report (tested on a
+synthetic report only). Verified: fmt, clippy, 1000 tests.

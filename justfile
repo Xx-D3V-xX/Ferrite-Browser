@@ -215,6 +215,11 @@ laya-serve:
 laya-verify:
     ./scripts/run-local.sh --verify
 
+# Needs python3 only. Prints the exception and the crashing thread's stack.
+# After a crash (exit 139): where did the newest ferrite-shell crash happen?
+crash-report *ARGS:
+    python3 scripts/crash_report.py {{ARGS}}
+
 # Exit 1 only if something FAILs. `just doctor --fix-hints` says how to fix.
 # Checklist of what is ready: tools, build, env, keys, Laya, disk.
 doctor *ARGS:

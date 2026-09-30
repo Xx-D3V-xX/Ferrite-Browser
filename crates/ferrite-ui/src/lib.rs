@@ -2564,6 +2564,14 @@ pub fn update(
                         // A background tab's pixels are never shown.
                         session.sync_state();
                     }
+                    // Script errors a page logs are the first clue when a site
+                    // misbehaves; surface them instead of dropping them.
+                    for message in session.take_console_errors().into_iter().take(20) {
+                        eprintln!(
+                            "[page console error] tab {index}: {}",
+                            truncate(&message, 300)
+                        );
+                    }
                 }
             }
             let active = state.active_tab;
