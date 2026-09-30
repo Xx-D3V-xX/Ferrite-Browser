@@ -39,7 +39,7 @@ Build choices:
                  target dir (docs/BUILD_BUDGET.md measured 15m31s and 6.4 GB for
                  a DEBUG Servo build added to an existing build). Needs the gstreamer
                  brew package. FERRITE_PROFILE=release builds the release
-                 profile instead; it is slower to build and not yet verified.
+                 profile instead (slower to build).
 
 What it may write, and where:
   \$FERRITE_HOME     (default <repo>/.ferrite, gitignored): the Laya venv, the

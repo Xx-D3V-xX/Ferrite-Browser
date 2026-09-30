@@ -26,10 +26,10 @@ FERRITE_LAYA_PIDFILE=$FERRITE_LAYA_DIR/serve.pid
 FERRITE_LAYA_LOG=$FERRITE_LAYA_DIR/serve.log
 FERRITE_BUILD_MODE_FILE=$FERRITE_HOME/build.mode
 
-# Cargo profile for the browser: `dev` (default) or `release`. The default is
-# `dev` on purpose: the real-Servo app was verified in that profile (typing,
-# clicks, scrolling and reload against a real page, examples/input_probe.rs);
-# `release` (opt-level 3, thin LTO, codegen-units 1) has not been. Opt in with
+# Cargo profile for the browser: `dev` (default) or `release`. `dev` is the
+# default because it matches the builds the app was known to work in and it
+# builds faster; both profiles pass the headless Servo probes
+# (examples/input_probe.rs, digest_probe.rs). Opt in with
 # FERRITE_PROFILE=release. Servo's dependencies are already optimised in `dev`
 # (see [profile.dev.package."*"] in Cargo.toml).
 FERRITE_PROFILE=${FERRITE_PROFILE:-dev}

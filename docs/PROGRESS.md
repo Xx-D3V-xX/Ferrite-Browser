@@ -4437,13 +4437,19 @@ px vs 300 px). Earlier this round: every click sent twice; zoom reset left
 `transform: scale(1)` on `<html>`.
 
 **Cause of the owner's failure: not established.** The one variable that
-differs between his working and failing runs is the Cargo profile: the setup
-scripts built and ran `--release` (opt-level 3, thin LTO, codegen-units 1),
-his earlier runs were dev builds, and every probe above ran in dev. So
-`FERRITE_PROFILE` now defaults to `dev` in `setup-local.sh`/`run-local.sh`/
-`doctor.sh` (`FERRITE_PROFILE=release` opts back in). This is a hypothesis
-and a safer default, not a demonstrated fix. Google Forms itself could not be
-loaded (no internet). Tracked as T-239.
+differed between his working and failing runs looked like the Cargo profile
+(the setup scripts built and ran `--release`, his earlier runs were dev
+builds). That was tested and **ruled out**: a full release build of Servo
+here passes the same two probes as the dev build, and a further stress run in
+release (iframes, a 30k-node DOM, a 3 s busy script, five rapid reloads per
+page, two tabs sharing the engine) never crashed on reload. The setup scripts
+still default to `dev` (`FERRITE_PROFILE=release` opts back in) because that
+matches his earlier working runs, not because of any measured difference.
+Google Forms itself could not be loaded (no internet). Tracked as T-239, with
+the log and a plain-form check still needed from him. Both probes exit with a
+segfault at process teardown (`pthread_mutex_destroy failed`, Servo threads
+still alive); not investigated. Found on the way: the audit panel reads a
+database nothing creates (T-240).
 
 **Also changed.** Agent prompt v3: search with DuckDuckGo Lite, never Google
 (Google's results page does not render in this engine), and go elsewhere
@@ -4456,5 +4462,4 @@ gradient, per-tile hue rotation and its HSL helpers are gone.
 warnings` and `clippy -p ferrite-servo --features servo --all-targets`
 clean; 970 tests pass; both probes pass; script tests pass. **Not verified:**
 the new-tab page has not been rendered (no display for iced here) — only
-compiled and covered by the existing widget-tree tests; the release profile;
-macOS; any real website.
+compiled and covered by the existing widget-tree tests; macOS; any real website.
