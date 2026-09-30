@@ -4240,3 +4240,82 @@ bytes that merely compile via `include_bytes!`. The user's own relaunch
 is the only way to confirm this actually reads better.
 
 **Commits:** `762c7b2`.
+
+## 2026-09-30 — coordinator — agent context, chats, more actions, Laya fast lane, local setup (branch `feat/agent-context-chats-laya`)
+
+**Scope (owner request, four parts + UX):** (1) the agent must take the
+current site and the open tabs as context, deciding automatically whether
+the page is relevant; (2) chats — new chat, history, per-message steps, and
+follow-up messages that carry the chat's earlier turns plus the current
+page; (3) more agent operations and much better page understanding; (4)
+use Laya where it is faster, and ship a local setup script; keep the UI's
+look but make it smooth.
+
+**Root cause of "the agent doesn't take context", found by reading the live
+path:** `read_dom`'s observation was literally `dom snapshot at <origin>:
+root role=<role>` — the model never received a single element or line of
+page text — and `DomNode::selector` is only set for elements with an `id`,
+so nothing was reliably clickable. Every run also started from just the
+task string (`vec![Message::user(prompt)]`); there was no memory at all.
+
+**What landed** (built as five workstreams in isolated worktrees, merged,
+19 commits, every one authored and committed by Rayan Jain):
+- `5c318ac` `ferrite-engine::digest` — `PageDigest` with numbered `@N`
+  element refs, `normalize_selector`, sanitizing/bounded rendering,
+  password values never emitted.
+- Engine + actions (`8e3c1ea`, `a982a8c`, `faefb99`): real digest script for
+  both Servo engines (`page_ops.js`, stable refs stamped as
+  `data-ferrite-ref`), every selector op accepts `@N`, `select_option`
+  matches value or label, robust click/type/fill; 14 new actions
+  (`read_page press_key hover set_checked scroll_to find_text extract_links
+  submit_form wait_ms open_tab switch_tab close_tab list_tabs ask_user`);
+  every state-changing action's observation now carries a fresh compact page
+  table; system prompt v2. The IPI dry-run engine's `observe_page` logs
+  nothing (ADR-010).
+- Chats + context (`4fdbb10`, `d2f7454`): persistent `ChatStore` (one
+  atomic JSON file per chat, corrupt files skipped), `decide_page_use`
+  (88-prompt table test), `build_seed`, `trusted_task_text`.
+- Laya (`7ba6d00`, `08152bb`): strict client for a laya-serve-compatible
+  server and a confidence-gated step decider in the jev-ultrafast request
+  format (ADR-009).
+- Local toolchain (`29ee565`, `57e0baa`, `060fa07`): `scripts/setup-local.sh`,
+  `run-local.sh`, `doctor.sh`, `laya/serve.py`, `laya/verify.py`, justfile
+  recipes (`just setup`, `just run-local`, `just doctor`, `just laya-verify`).
+- UI (`8300c35`, `b4157f5`, `ac1c872`, `22c97b0`, `b473d0c`): chat state and
+  a single `conclude_run` funnel every run ends through; context seed wiring
+  with the IPI defense fed `trusted_task_text` only; tab actions intercepted
+  in the live loop (consent-checked, last-tab refusal); optional Laya fast
+  lane through the same rejection/budget path; new `agent_panel.rs` (chat
+  thread, history with confirm-delete, context chip Auto/On/Off, suggestion
+  chips, copy, entrance animation, auto-scroll that respects scroll-up),
+  Cmd/Ctrl+Shift+O = new chat, six icons. Also fixed a real bug found in
+  the tab refactor: closing an earlier tab jumped to the wrong tab.
+
+**Laya, honestly.** Researched from its README, the `cklxx/laya-browser`
+write-up, jev-ultrafast (MIT) and the PyPI source. It is used only as a
+gated fast lane for ordinary click/select/scroll steps; the LLM keeps
+planning, typing text, answers, and the whole security path (ADR-009 has the
+stage-by-stage table). It could not be run here (huggingface.co is blocked
+in this sandbox, no GPU), so its accuracy and latency in this app are
+**unmeasured** — the numbers quoted in the code are the authors' own.
+
+**Verified (this tree, independently re-run by the coordinator):** `cargo
+build`/`fmt --check`/`clippy --workspace --all-targets -D warnings`/`test`
+— 949 tests, 0 failures (`ferrite-ui` 117 → 217); `cargo machete` clean;
+`cargo deny check` (`advisories ok, bans ok, licenses ok, sources ok`);
+`check_purge.sh`/`check_no_archive_links.sh` clean. The page script was run
+against real HTML in jsdom (32 checks). The setup scripts have shell/Python
+tests (env-file parser, run-local with a fake cargo, a real laya server app
+with a fake router) and shellcheck clean.
+
+**Not verified — stated plainly:** no UI was ever rendered (no display); the
+real `servo` feature was not built, so the page script never ran in
+SpiderMonkey; no real Laya checkpoint was downloaded or run; the setup
+scripts never ran on macOS or with real downloads. Filed rather than
+dropped: T-234 (Laya unmeasured), T-235 (page script on real Servo), T-236
+(chat UI never rendered), T-237 (press_key mapping, scheme-less navigate,
+run-id-less stale messages), T-238 (heuristic is English-centric).
+
+**Commits:** `5c318ac`, `4fdbb10`, `d2f7454`, `7ba6d00`, `08152bb`,
+`29ee565`, `57e0baa`, `060fa07`, `8e3c1ea`, `a982a8c`, `faefb99`, `8300c35`,
+`b4157f5`, `ac1c872`, `22c97b0`, `b473d0c` (plus merge commits).

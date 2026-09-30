@@ -242,3 +242,70 @@ grandfathered in as already-valid: they get re-labelled under the ADR-006
 type-level carrier partition (D6), and count toward the 10%
 double-authoring / Cohen's κ ≥ 0.8 requirement in directive §13.3 like any
 newly authored case.
+
+
+---
+
+## ADR-009 — Laya is an optional, confidence-gated accelerator for ordinary browsing steps; never part of the security boundary
+
+**Date:** 2026-09-30, implemented by `7ba6d00`/`08152bb` (client + step decider), `ac1c872` (live-loop fast lane). **Status:** live, **off by default** (`FERRITE_LAYA_URL` unset = behaviour identical to before).
+
+Laya ([NandhaKishorM/laya](https://github.com/NandhaKishorM/laya)) is a
+non-autoregressive "System 1" decision model: typed `choice`/`score`/`noul`
+answers in one forward pass (the authors report ~33 ms), no generation, so
+nothing to parse or hallucinate. The question this ADR answers is *where in
+this agent's pipeline that is, and is not, the right tool*.
+
+| Stage | Decider | Why |
+| --- | --- | --- |
+| Fingerprint prediction, comparator, consent (the IPI defense) | LLM (small tier) + deterministic code — **never Laya** | ADR-000: the defense's premise is fail-to-empty on any model doubt. Laya's own "Honest limits" say base checkpoints are ~chance zero-shot on new label sets (0.362 vs 0.318 random on typed-decisions), are confidently wrong off-distribution, and can select the negated option (issue #377). A confident-but-wrong classifier in this position is a bypass, not an accelerator. |
+| "Should the current page be context?" | Deterministic heuristic (`context::decide_page_use`) | Microseconds, auditable, 88-prompt table test. `decider::refine_page_use` exists but is deliberately **unwired**: it asks a question no head was trained on. |
+| Next operation + target element on ordinary pages | **Laya browser head** (`cklxx/laya-browser`) as a gated fast lane, LLM fallback | The one documented fit: the authors report element top-1 0.66 among ~45 candidates, operation accuracy 0.88, 62% on 16 live tasks at 17–23 ms/step (their pages, their measurements; not reproduced here). Gated on operation *and* target probability, refuses to repeat the previous fast action, and any error/timeout/abstention falls through to the normal LLM step. |
+| Text to type, final answers, summaries, extraction, planning, `ask_user` | LLM | Laya cannot generate text (its own browser-agent write-up uses a small LLM for `TYPE_TEXT` too). `TYPE_TEXT` = Laya picks the field, the small-tier model writes the value; a declined value falls back to the full LLM step. |
+| `DONE` / `BLOCKED` | LLM | Laya's write-up states a `DONE` still needs independent outcome verification; the LLM writes the final answer anyway. |
+
+**Consequences.** Fast-lane actions use the same vocabulary as LLM actions and
+go through the identical rejection/consent/step-budget/repeat-stop path, so
+Laya can steer *which* element a page-controlled label leads to but cannot
+widen what is allowed. A request sends page URL, title, visible text and
+element labels to `FERRITE_LAYA_URL`; the default is a loopback server and a
+non-loopback URL logs a warning at startup. The locally served browser head
+occupies laya-serve's `typed-decisions` router slot (only three names exist) —
+a workaround documented in `scripts/laya/serve.py`. Gates (0.80 op / 0.60
+target) are conservative **untuned** defaults; the authors also report that
+confidence-gated escalation to a bigger LLM did *not* help on their pages, so
+no claim is made here that gating improves outcomes. A real-trace A/B (fast
+lane on vs off) must precede any default-on (T-234).
+
+---
+
+## ADR-010 — Agent memory and page context are untrusted data; only user-authored text may feed the fingerprint
+
+**Date:** 2026-09-30, implemented by `d2f7454` (`context.rs`) and `b4157f5` (wiring). **Status:** live.
+
+Multi-turn chats and page digests give the live loop far more context — and
+far more attack surface: earlier agent answers and page text can carry
+injected instructions, and persisting them into later prompts would let one
+poisoned page shape every future run in the chat.
+
+- The live loop's first message (`build_seed`) delimits **CONVERSATION SO
+  FAR**, **OPEN TABS** and **CURRENT PAGE** as untrusted data, sanitizes and
+  bounds every page-/agent-derived string, and never truncates the user
+  request. Password values are never read into a digest.
+- The IPI defense (`IpiTask`, sanitizer input, fingerprint prediction, the
+  dry-run driver's prompt) receives **`trusted_task_text`** only: the new
+  prompt plus up to five earlier *user* messages. Never the seed, page text,
+  agent output or steps. A test enforces this structurally on the spawned
+  defense task and another feeds it a hostile chat.
+- The harness's per-step page observation (`observe_page`) is not an
+  agent-initiated primitive: `DryRunEngine` implements it without logging a
+  call. Logging it would put `dom.read` in nearly every dry-run record, flag a
+  deviation on almost every task and train users to click through consent.
+  The agent-initiated `read_page` goes through the logged `page_digest`.
+- Typed text is not persisted in chat files (`@3 -> 7 chars`): they are plain
+  text on disk and are re-read into later seeds.
+
+**Known cost:** the dry run sees no page content and only prior user text, so
+follow-ups such as "do the same for the second one" predict a looser
+fingerprint and may raise more consent prompts. That is the fail-safe
+direction and is accepted.
