@@ -15,12 +15,16 @@ ferrite-agent = { workspace = true }
 ferrite-ipi = { workspace = true }
 # B3 (docs/TO-DO.md T-224/T-220): BorrowedServoEngine gives the live tab's
 # HeadlessServoSession a BrowserEngine face; ferrite_agent::browser_loop
-# drives it (AgentAction/execute_action/run_agent_loop). This crate never
-# names `ferrite_engine::BrowserEngine` itself (`execute_action`/
-# `run_agent_loop` are plain functions generic over it, not trait methods
-# called here) — a direct `ferrite-engine` dependency was unused
-# (`cargo machete`-flagged; C1 removed it, docs/TO-DO.md).
+# drives it (AgentAction/execute_action/run_agent_loop). C1 removed a then-
+# unused direct `ferrite-engine` dependency (`cargo machete`-flagged,
+# docs/TO-DO.md); the agent-context wiring below is what needs it back.
 ferrite-engine-servo = { workspace = true }
+# Agent context wiring: the UI thread asks the borrowed engine for the active
+# page's `PageDigest` (`BrowserEngine::observe_page`) to seed a run and to feed
+# the optional Laya fast lane, so this crate now names the trait and the digest
+# type directly (`ferrite-engine` sits below `ferrite-agent` and `ferrite-ui`
+# in the dependency direction, so this is not an upward import).
+ferrite-engine = { workspace = true }
 # B1 (docs/TO-DO.md T-221): ToolDecisionEngine::{generate_fingerprint,
 # fingerprint_from_task} now take a &dyn ModelProvider explicitly. B3
 # (T-224/T-229): also used to construct the real live ModelProvider at

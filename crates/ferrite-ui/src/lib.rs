@@ -192,14 +192,16 @@ mod icons;
 use icons::{icon, Icon};
 
 use ferrite_agent::browser_loop::{
-    compact_observation, execute_action, run_agent_loop, trim_message_history, AgentAction,
-    LoopBudget, LoopStopReason, AGENT_LOOP_NUM_PREDICT, MAX_CONSECUTIVE_MALFORMED_STEPS,
-    SYSTEM_PROMPT, SYSTEM_PROMPT_VERSION,
+    compact_observation, execute_action, run_agent_loop, trim_message_history,
+    with_page_observation, AgentAction, LoopBudget, LoopStopReason, AGENT_LOOP_NUM_PREDICT,
+    MAX_CONSECUTIVE_MALFORMED_STEPS, SYSTEM_PROMPT, SYSTEM_PROMPT_VERSION,
 };
 use ferrite_agent::chat::{
     default_chats_dir, Chat, ChatId, ChatStore, ChatSummary, Outcome, StepRecord,
 };
+use ferrite_agent::context::ContextMode;
 use ferrite_audit_log::{AuditEntry, AuditEventKind, PersistentAuditLog};
+use ferrite_engine::{BrowserEngine, PageDigest};
 use ferrite_engine_servo::BorrowedServoEngine;
 use ferrite_ipi::comparator::{compare, ConsentDecision, ExpectedFingerprint, FingerprintDiff};
 use ferrite_ipi::dry_run::DryRunRecord;
@@ -439,6 +441,8 @@ fn action_tool_id(action: &AgentAction) -> ToolId {
 fn action_url(action: &AgentAction) -> Option<&str> {
     match action {
         AgentAction::Navigate { url } | AgentAction::Download { url } => Some(url.as_str()),
+        // A tab opened at a rejected origin is a navigation to it.
+        AgentAction::OpenTab { url: Some(url) } => Some(url.as_str()),
         _ => None,
     }
 }
@@ -1309,6 +1313,17 @@ pub struct FerriteBrowser {
     pub chat_list: Vec<ChatSummary>,
     /// Thread or History.
     pub sidebar_view: SidebarView,
+    /// The context chip's setting: Auto decides per message whether the
+    /// current page is context, On always attaches it, Off never does. Per
+    /// session only (not persisted).
+    pub context_mode: ContextMode,
+    /// The text of the *live* loop's first message for the run in flight — the
+    /// seed (`build_seed`: chat history, open tabs, page digest, all labelled
+    /// untrusted, then the user's request). Set by `submit_task`, taken by
+    /// `start_live_loop` (from either `LiveRunReady` or the post-consent
+    /// `ConsentSubmitted`, so both start from the same seed). It is
+    /// deliberately never given to the IPI defense — see `submit_task`.
+    pub pending_seed: Option<String>,
     /// Which chat row (if any) is showing its "Delete this chat?" confirm
     /// affordance — a delete is never one click.
     pub pending_chat_delete: Option<ChatId>,
@@ -1554,6 +1569,8 @@ impl Default for FerriteBrowser {
             chat_store: None,
             chat_list: Vec::new(),
             sidebar_view: SidebarView::Thread,
+            context_mode: ContextMode::Auto,
+            pending_seed: None,
             pending_chat_delete: None,
             panel_notice: None,
             expanded: std::collections::HashSet::new(),
@@ -1682,6 +1699,8 @@ pub enum FerriteBrowserMessage {
     SetSidebarView(SidebarView),
     /// Dismisses the sidebar's notice line.
     DismissNotice,
+    /// The context chip: cycles Auto, On, Off.
+    CycleContextMode,
     /// Toggles one expandable part of the thread (see `FerriteBrowser::expanded`).
     ToggleExpand(String),
     // ── IPI consent ───────────────────────────────────────────────────────────
@@ -1806,66 +1825,16 @@ pub fn update(
 ) -> Task<FerriteBrowserMessage> {
     match message {
         FerriteBrowserMessage::AddTab => {
-            state.tabs.push("New Tab".to_string());
-            state.tab_urls.push("about:blank".to_string());
-            state.tab_error.push(None);
-            state.tab_titles.push("New Tab".to_string());
-            state.tab_favicons.push(None);
-            state.tab_zoom.push(state.default_zoom);
-            let new_idx = state.tabs.len() - 1;
-            state.active_tab = new_idx;
-            state.address_bar_input = String::new();
-            state.is_loading = false;
-            state.can_go_back = false;
-            state.can_go_forward = false;
-            match HeadlessServoSession::new(1280, 700) {
-                Ok(session) => {
-                    state.servo_sessions.insert(new_idx, session);
-                }
-                Err(e) => eprintln!("[ferrite-ui] Servo session tab {}: {}", new_idx, e),
+            let (index, session_error) = add_tab(state);
+            if let Some(e) = session_error {
+                eprintln!("[ferrite-ui] Servo session tab {index}: {e}");
             }
         }
         FerriteBrowserMessage::CloseTab(i) => {
-            // Every later tab's index shifts by one — a stale hovered index
-            // would otherwise show the close-on-hover button on the wrong
-            // tab until the next real hover event.
-            state.hovered_tab = None;
-            if state.tabs.len() > 1 {
-                state.tabs.remove(i);
-                state.tab_urls.remove(i);
-                if i < state.tab_error.len() {
-                    state.tab_error.remove(i);
-                }
-                if i < state.tab_titles.len() {
-                    state.tab_titles.remove(i);
-                }
-                if i < state.tab_favicons.len() {
-                    state.tab_favicons.remove(i);
-                }
-                if i < state.tab_zoom.len() {
-                    state.tab_zoom.remove(i);
-                }
-                state.servo_sessions.remove(&i);
-                let keys_to_shift: Vec<usize> = state
-                    .servo_sessions
-                    .keys()
-                    .copied()
-                    .filter(|&k| k > i)
-                    .collect();
-                for k in keys_to_shift {
-                    if let Some(session) = state.servo_sessions.remove(&k) {
-                        state.servo_sessions.insert(k - 1, session);
-                    }
-                }
-            }
-            state.active_tab = state.active_tab.min(state.tabs.len().saturating_sub(1));
-            state.address_bar_input = state.tab_urls[state.active_tab].clone();
-            sync_nav_state(state);
+            close_tab_at(state, i);
         }
         FerriteBrowserMessage::SelectTab(i) => {
-            state.active_tab = i;
-            state.address_bar_input = state.tab_urls[i].clone();
-            sync_nav_state(state);
+            select_tab_at(state, i);
         }
         FerriteBrowserMessage::AddressBarChanged(s) => {
             state.address_bar_input = s;
@@ -2147,6 +2116,9 @@ pub fn update(
         }
         FerriteBrowserMessage::DismissNotice => {
             state.panel_notice = None;
+        }
+        FerriteBrowserMessage::CycleContextMode => {
+            state.context_mode = agent_run::next_context_mode(state.context_mode);
         }
         FerriteBrowserMessage::ToggleExpand(key) => {
             if !state.expanded.remove(&key) {
@@ -2575,6 +2547,7 @@ fn conclude_run(state: &mut FerriteBrowser, outcome: Outcome) -> Task<FerriteBro
     state.agent_is_running = false;
     state.live_loop = None;
     state.pending_task = None;
+    state.pending_seed = None;
     let had_running_turn = state.chat.has_running_turn();
     state.chat.finish_turn(outcome);
     if had_running_turn {
@@ -2695,7 +2668,42 @@ fn submit_task(state: &mut FerriteBrowser) -> Task<FerriteBrowserMessage> {
         None => return Task::none(),
     };
 
-    state.chat.begin_turn(&prompt, None);
+    // ── Context for this run ──────────────────────────────────────────────
+    // The open tabs, and (when the message is about the current page) the
+    // page itself, read on this thread through the borrowed engine. Fail-soft:
+    // no digest just means the seed carries the tab list and a page header.
+    let tabs = agent_run::tab_infos(
+        &state.tab_titles,
+        &state.tab_urls,
+        state.active_tab,
+        state.is_loading,
+    );
+    let active_url = state
+        .tab_urls
+        .get(state.active_tab)
+        .cloned()
+        .unwrap_or_default();
+    let wants_page = ferrite_agent::context::decide_page_use(
+        &prompt,
+        &state.chat.turns,
+        &active_url,
+        state.context_mode,
+    )
+    .use_page;
+    let digest = if wants_page {
+        observe_active_page(state)
+    } else {
+        None
+    };
+    let context = agent_run::build_run_context(
+        &state.chat,
+        &tabs,
+        digest.as_ref(),
+        &prompt,
+        state.context_mode,
+    );
+
+    state.chat.begin_turn(&prompt, Some(context.note));
     persist_chat(state);
     state.sidebar_view = SidebarView::Thread;
     state.panel_notice = None;
@@ -2707,8 +2715,21 @@ fn submit_task(state: &mut FerriteBrowser) -> Task<FerriteBrowserMessage> {
     let run_id = state.run_id;
 
     let context_url = state.tab_urls.get(state.active_tab).cloned();
-    let ipi_task = IpiTask::new(prompt.clone(), context_url.clone());
+    // SECURITY — do not feed the seed to the defense. The injection defense's
+    // premise is that the expected tool/origin fingerprint is predicted from
+    // *trusted user intent alone*, and that whatever the agent then does is
+    // compared against it. The seed holds earlier agent output, tab titles and
+    // page text — all attacker-influenced — so it must never reach the
+    // sanitizer, the fingerprint predictor or the dry run (which also runs on
+    // synthetic data and must not be handed real page content or real chat
+    // outputs). `ipi_task_for_run` builds the defense's input from
+    // `trusted_task_text` (the user's own words, this message plus earlier user
+    // messages) and nothing else. Only the LIVE loop's first message is the
+    // seed, and it is held in `pending_seed` — this function's spawned task
+    // below never captures it.
+    let ipi_task: IpiTask = agent_run::ipi_task_for_run(&state.chat, &prompt, context_url.clone());
     state.pending_task = Some(prompt.clone());
+    state.pending_seed = Some(context.seed.text);
 
     let provider = state.model_provider.clone();
     let model_tag_small = state.model_tag_small.clone();
@@ -2766,7 +2787,8 @@ fn submit_task(state: &mut FerriteBrowser) -> Task<FerriteBrowserMessage> {
         let driver = BrowserLoopDryRunDriver {
             provider: provider.as_ref(),
             model_tag: model_tag_main.clone(),
-            prompt: prompt.clone(),
+            // The defense's own trusted text — never the seed (see above).
+            prompt: ipi_task.prompt.clone(),
         };
         let dry_record = match orch.run(&ipi_task, &driver).await {
             Ok(r) => r,
@@ -2888,6 +2910,11 @@ fn handle_agent_step(
     let blocked = is_action_rejected(&action, &live.rejected, &live.rejected_origins);
     let observation = if blocked {
         "blocked by user consent".to_string()
+    } else if agent_run::is_tab_action(&action) {
+        // The borrowed engine wraps one externally-owned tab and cannot do tab
+        // management, so the UI performs these itself, through the same
+        // helpers as the tab strip.
+        run_tab_action(state, &action)
     } else if let Some(session) = state.servo_sessions.get_mut(&state.active_tab) {
         let mut engine = BorrowedServoEngine::new(session, 1280, 700);
         execute_action(&mut engine, &action)
@@ -3020,6 +3047,218 @@ fn sync_nav_state(state: &mut FerriteBrowser) {
         state.can_go_back = false;
         state.can_go_forward = false;
     }
+}
+
+// ---------------------------------------------------------------------------
+// Tabs — one set of helpers behind both the user's tab strip (`AddTab`/
+// `SelectTab`/`CloseTab`) and the agent's `open_tab`/`switch_tab`/`close_tab`,
+// so the two can never drift apart (the per-tab `Vec`s and `servo_sessions`
+// are kept in step in exactly one place).
+// ---------------------------------------------------------------------------
+
+/// Pushes a fresh, blank tab onto every per-tab `Vec`, makes it the active one
+/// and resets the navigation flags. Returns its index. Creates no session.
+fn push_tab_state(state: &mut FerriteBrowser) -> usize {
+    state.tabs.push("New Tab".to_string());
+    state.tab_urls.push("about:blank".to_string());
+    state.tab_error.push(None);
+    state.tab_titles.push("New Tab".to_string());
+    state.tab_favicons.push(None);
+    state.tab_zoom.push(state.default_zoom);
+    let new_idx = state.tabs.len() - 1;
+    state.active_tab = new_idx;
+    state.address_bar_input = String::new();
+    state.is_loading = false;
+    state.can_go_back = false;
+    state.can_go_forward = false;
+    new_idx
+}
+
+/// Opens a new tab with its own Servo session — what the "+" button does.
+/// Returns the tab's index and, if the session could not be created, why (the
+/// tab still exists then, exactly as `AddTab` always behaved).
+fn add_tab(state: &mut FerriteBrowser) -> (usize, Option<String>) {
+    let index = push_tab_state(state);
+    match HeadlessServoSession::new(1280, 700) {
+        Ok(session) => {
+            state.servo_sessions.insert(index, session);
+            (index, None)
+        }
+        Err(e) => (index, Some(e.to_string())),
+    }
+}
+
+/// Makes tab `i` the active one. `false` (and no change) if there is no such
+/// tab.
+fn select_tab_at(state: &mut FerriteBrowser, i: usize) -> bool {
+    if i >= state.tabs.len() || i >= state.tab_urls.len() {
+        return false;
+    }
+    state.active_tab = i;
+    state.address_bar_input = state.tab_urls[i].clone();
+    sync_nav_state(state);
+    true
+}
+
+/// Closes tab `i`, shifting every later tab's per-tab data and session down by
+/// one and keeping the *same tab* active when an earlier one closes. The last
+/// remaining tab is never closed. Returns whether a tab was removed.
+fn close_tab_at(state: &mut FerriteBrowser, i: usize) -> bool {
+    // Every later tab's index shifts by one — a stale hovered index would
+    // otherwise show the close-on-hover button on the wrong tab until the
+    // next real hover event.
+    state.hovered_tab = None;
+    let removed = state.tabs.len() > 1 && i < state.tabs.len();
+    if removed {
+        state.tabs.remove(i);
+        state.tab_urls.remove(i);
+        if i < state.tab_error.len() {
+            state.tab_error.remove(i);
+        }
+        if i < state.tab_titles.len() {
+            state.tab_titles.remove(i);
+        }
+        if i < state.tab_favicons.len() {
+            state.tab_favicons.remove(i);
+        }
+        if i < state.tab_zoom.len() {
+            state.tab_zoom.remove(i);
+        }
+        state.servo_sessions.remove(&i);
+        let keys_to_shift: Vec<usize> = state
+            .servo_sessions
+            .keys()
+            .copied()
+            .filter(|&k| k > i)
+            .collect();
+        for k in keys_to_shift {
+            if let Some(session) = state.servo_sessions.remove(&k) {
+                state.servo_sessions.insert(k - 1, session);
+            }
+        }
+        if i < state.active_tab {
+            state.active_tab -= 1;
+        }
+    }
+    state.active_tab = state.active_tab.min(state.tabs.len().saturating_sub(1));
+    state.address_bar_input = state.tab_urls[state.active_tab].clone();
+    sync_nav_state(state);
+    removed
+}
+
+/// The active tab's page as the agent would see it, taken on the UI thread
+/// through the borrowed engine's `observe_page` (the harness's own
+/// observation: not an agent action, nothing to record). `None` — never an
+/// error — when there is no session or the page cannot be read: callers fall
+/// back to "header only".
+fn observe_active_page(state: &mut FerriteBrowser) -> Option<PageDigest> {
+    let session = state.servo_sessions.get_mut(&state.active_tab)?;
+    let mut engine = BorrowedServoEngine::new(session, 1280, 700);
+    engine.observe_page().ok().map(|(digest, _origin)| digest)
+}
+
+/// Appends a fresh compact page table for whichever tab is active *now* to
+/// `observation` (unchanged when there is no session or nothing readable).
+fn with_active_page_observation(state: &mut FerriteBrowser, observation: String) -> String {
+    match state.servo_sessions.get_mut(&state.active_tab) {
+        Some(session) => {
+            let mut engine = BorrowedServoEngine::new(session, 1280, 700);
+            with_page_observation(&mut engine, observation)
+        }
+        None => observation,
+    }
+}
+
+/// Performs one of the agent's tab actions (`open_tab`, `switch_tab`,
+/// `close_tab`, `list_tabs` — the borrowed engine cannot: it wraps a single
+/// externally-owned tab) through the same helpers the tab strip uses, and
+/// returns an honest observation for the model. Tab numbers are the 1-based
+/// positions `list_tabs` shows. State-changing actions end with a fresh page
+/// table for the tab that is active afterwards, so the next step's session is
+/// looked up from `state.active_tab` as it is *now* (the step handler reads it
+/// afresh every step).
+///
+/// The caller has already applied the consent check
+/// (`is_action_rejected`), which sees these actions as `tab.open`/`tab.close`
+/// (and, like the engine's own `Call::primitive`, `switch_tab` as
+/// `navigate`).
+fn run_tab_action(state: &mut FerriteBrowser, action: &AgentAction) -> String {
+    let count = state.tabs.len();
+    match action {
+        AgentAction::ListTabs => {
+            agent_run::format_tab_list(&state.tab_titles, &state.tab_urls, state.active_tab)
+        }
+        AgentAction::SwitchTab { tab } => match agent_run::resolve_tab_number(*tab, count) {
+            Err(message) => message,
+            Ok(index) => {
+                select_tab_at(state, index);
+                let observation = format!("switched to tab {tab}: {}", state.tab_urls[index]);
+                with_active_page_observation(state, observation)
+            }
+        },
+        AgentAction::CloseTab { tab } => {
+            if count <= 1 {
+                return "error: cannot close the last remaining tab".to_string();
+            }
+            match agent_run::resolve_tab_number(*tab, count) {
+                Err(message) => message,
+                Ok(index) => {
+                    close_tab_at(state, index);
+                    // Later tabs were renumbered: say how they are now.
+                    let observation = format!(
+                        "closed tab {tab}\n{}",
+                        agent_run::format_tab_list(
+                            &state.tab_titles,
+                            &state.tab_urls,
+                            state.active_tab
+                        )
+                    );
+                    with_active_page_observation(state, observation)
+                }
+            }
+        }
+        AgentAction::OpenTab { url } => open_tab_for_agent(state, url.as_deref()),
+        _ => "error: not a tab action".to_string(),
+    }
+}
+
+/// `open_tab`: a new tab (a blank one, or navigated to `url` — an absolute
+/// http(s) URL, see [`agent_run::validate_open_url`]) that becomes the active
+/// one. If a session cannot be created the tab is rolled back and the model is
+/// told, rather than leaving a dead tab behind.
+fn open_tab_for_agent(state: &mut FerriteBrowser, url: Option<&str>) -> String {
+    let target = match url.map(agent_run::validate_open_url).transpose() {
+        Ok(target) => target,
+        Err(message) => return format!("error: {message}"),
+    };
+    let previous = state.active_tab;
+    let (index, session_error) = add_tab(state);
+    if let Some(e) = session_error {
+        close_tab_at(state, index);
+        select_tab_at(state, previous.min(state.tabs.len().saturating_sub(1)));
+        return format!("error: could not open a new tab: {e}");
+    }
+    let mut observation = format!(
+        "opened tab {}: {}",
+        index + 1,
+        target.as_deref().unwrap_or("blank page")
+    );
+    if let Some(target) = target {
+        // Blocks until the page has loaded, like the agent's own `navigate`.
+        let navigated = state
+            .servo_sessions
+            .get_mut(&index)
+            .map(|session| BorrowedServoEngine::new(session, 1280, 700).navigate(&target));
+        match navigated {
+            Some(Ok(_)) => {
+                state.tab_urls[index] = target.clone();
+                state.address_bar_input = target;
+            }
+            Some(Err(e)) => observation.push_str(&format!(" (navigation failed: {e})")),
+            None => observation.push_str(" (navigation failed: no session)"),
+        }
+    }
+    with_active_page_observation(state, observation)
 }
 
 // ---------------------------------------------------------------------------
@@ -4228,8 +4467,13 @@ fn start_live_loop(
     rejected_origins: std::collections::HashSet<String>,
 ) -> Task<FerriteBrowserMessage> {
     state.agent_is_running = true;
+    // The run's first message is the seed built at submit time (chat history,
+    // tabs, page, then the request); the plain prompt only if there is none.
+    // Both the direct start and the post-consent start come through here, so
+    // both use the same seed.
+    let first_message = state.pending_seed.take().unwrap_or(prompt);
     let live = LiveAgentLoop {
-        messages: vec![Message::user(prompt)],
+        messages: vec![Message::user(first_message)],
         actions_taken: Vec::new(),
         started_at: std::time::Instant::now(),
         budget: LoopBudget::default(),

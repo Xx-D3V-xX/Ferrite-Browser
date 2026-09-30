@@ -2700,6 +2700,7 @@ dependencies = [
  "ferrite-agent",
  "ferrite-audit-log",
  "ferrite-core",
+ "ferrite-engine",
  "ferrite-engine-servo",
  "ferrite-ipi",
  "ferrite-model",
