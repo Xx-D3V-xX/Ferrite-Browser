@@ -529,6 +529,23 @@ mod inner {
                     dom_adoptedstylesheet_enabled: true,
                     dom_fontface_enabled: true,
                     layout_css_attr_enabled: true,
+                    // Swept one at a time against a battery page (every
+                    // default-off boolean preference, each alone, then the
+                    // survivors together). Kept because each exposes a working
+                    // API that sites feature-detect and that fails soft:
+                    // credentials/wake lock reject rather than hang, the rest
+                    // resolve. Left off, with the reason, in `docs/TO-DO.md`
+                    // T-265: WebRTC (`getUserMedia` resolves with no consent
+                    // prompt), geolocation (the request never settles),
+                    // service workers (a non-script response still "registers"),
+                    // Web Animations (`animate()` returns no `finished`).
+                    dom_credential_management_enabled: true,
+                    dom_wakelock_enabled: true,
+                    dom_storage_manager_api_enabled: true,
+                    dom_offscreen_canvas_enabled: true,
+                    dom_sanitizer_enabled: true,
+                    dom_visual_viewport_enabled: true,
+                    dom_exec_command_enabled: true,
                     ..servo::Preferences::default()
                 };
                 // Some sites (Google's sign-in among them) decide whether a
