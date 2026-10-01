@@ -5,6 +5,14 @@ use ferrite_model::trace::{global, TraceBackend, TraceEvent};
 
 use super::*;
 
+/// The model-activity trace is one process-wide log shared by every test in
+/// this binary, and `ClearTrace` empties it. A test that records an event and
+/// reads it back, or that clears the log, must hold this for its whole body, or
+/// a parallel test can wipe the event in between (seen on macOS, where the
+/// threads interleave differently). Async tests take it with `.lock().await`,
+/// sync ones with `.blocking_lock()`.
+pub(crate) static TRACE_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+
 #[test]
 fn the_blank_page_shows_an_empty_address_bar() {
     assert_eq!(address_bar_text("about:blank"), "");
@@ -80,6 +88,7 @@ fn toggling_a_trace_event_expands_then_collapses_it() {
 
 #[test]
 fn opening_the_audit_panel_loads_the_trace_and_switching_tabs_keeps_it_fresh() {
+    let _trace = TRACE_LOCK.blocking_lock();
     let mut event = TraceEvent::new(TraceBackend::Agent, "ui-test marker", "");
     event.request = "marker".to_string();
     global().record(event);
@@ -101,6 +110,7 @@ fn opening_the_audit_panel_loads_the_trace_and_switching_tabs_keeps_it_fresh() {
 
 #[test]
 fn clearing_the_trace_empties_the_view_and_collapses_any_open_event() {
+    let _trace = TRACE_LOCK.blocking_lock();
     let mut state = FerriteBrowser {
         trace_events: vec![TraceEvent::new(TraceBackend::Llm, "x", "m")],
         trace_expanded: Some(0),

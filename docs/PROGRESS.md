@@ -4803,3 +4803,7 @@ were already green. **Not verified:** a Windows run after this change.
 
 **README:** the Status bullets that said the live app runs on the pre-rebuild path and that the corpus has 29 cases were out of date (T-224 and T-220's live-app half are closed; the corpus is 938); corrected from the ledger.
 
+## 2026-10-01 — coordinator — macOS CI: a race on the shared activity trace (T-260)
+
+The first macOS run of the Settings branch failed one `ferrite-ui` test (`opening_the_audit_panel_loads_the_trace_...`): the marker it recorded was gone when it read the global trace back. A sibling test sends `ClearTrace`, which empties that same log, so the two race. Pre-existing and unrelated to Settings; macOS scheduling exposed it. Reproduced (5/60 runs failed), fixed with a shared lock over the three tests that touch the global trace, 0/150 after. **Not verified:** a macOS run after the change.
+
