@@ -70,7 +70,7 @@ jobs:
           ### Downloads
           | Platform | File | Notes |
           |----------|------|-------|
-          | macOS (Apple silicon) | \`ferrite-$SHORT-macos-arm64.zip\` | Unzip, drag \`Ferrite.app\` to Applications. Unsigned: the first time, right-click → Open. |
+          | macOS (Apple silicon) | \`ferrite-$SHORT-macos-arm64.zip\` | Unzip, drag \`Ferrite.app\` to Applications. Not notarized, so macOS blocks it once: open System Settings → Privacy & Security and click Open Anyway, or run \`xattr -dr com.apple.quarantine /Applications/Ferrite.app\`. |
           | Windows (x64) | \`ferrite-$SHORT-windows-x64.zip\` | Unzip and run \`ferrite.exe\`. SmartScreen may ask once; choose "Run anyway". |
           | Linux (x64) | \`ferrite-$SHORT-linux-x64.tar.gz\` | Extract, then \`./ferrite\` or \`./install.sh\`. Needs a graphical session; see \`README.txt\` inside. |
           EOF
