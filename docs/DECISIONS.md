@@ -615,3 +615,14 @@ absent in this Servo and are listed by the probe as gaps.
 
 **Not claimed.** That GitHub now renders correctly: it is unreachable from the build environment, and the gaps above will keep breaking some of its pages. That the script is free: a page with very many icons is processed in slices of 40, but its cost on a large real page was not measured. That icons recoloured after load (hover, theme switch) are updated.
 
+## ADR-020 — A blocked action in the real run asks the person; it does not just stop
+
+**Date:** 2026-10-01. **Status:** live. **Amends ADR-014:** "everything else is blocked" becomes "everything else waits for a person".
+
+**Context.** The runtime guard held the real run to the predicted fingerprint and refused anything else with a fixed sentence. The prediction comes from the request's words, so a request like "go to the docs page" predicted navigation only, and the agent's first click was refused with no way for the owner to say yes. The owner's report: clicks, navigation and form filling were blocked for nearly everything, so the agent was pointless.
+
+**Decision.** The verdict is unchanged; what happens to a *blocked* verdict changed. The run pauses and shows a card with the action and the site (never text a page wrote): *Allow once*, *Allow for this task* (approves the tool or the site for the task, the same approval the pre-run consent panel produces), *Don't allow* (the old behaviour, including the four-block stop). A person's yes is the only way a deviation runs, and every answer is audited. `js.execute` is still always a deviation and always asked.
+
+**Not changed.** The rules and the model layer that build the prediction, the comparator, and the evaluation: no reported number moves. Whether a navigation task should *predict* clicks and form fills is a separate, open choice (it would reduce prompts and change the claim).
+
+**Limits.** A person who allows everything gets no protection from this card, which is the human limit already published; a click on a link is judged at the page's own origin before the request is made (ADR-014's stated limit).

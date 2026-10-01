@@ -8,7 +8,7 @@
 
 use ferrite_core::Primitive;
 use ferrite_engine::PageDigest;
-use ferrite_ipi::comparator::{GuardVerdict, RuntimeGuard};
+use ferrite_ipi::comparator::{EventVerdict, GuardVerdict, RuntimeGuard};
 
 use super::{action_url, origin_of_url, primitive_of_action, AgentAction};
 
@@ -124,6 +124,77 @@ pub(crate) fn judge(
         _ => guard.check_all(&effects),
     };
     (verdict, effects)
+}
+
+/// What the person has decided about the one action the guard stopped.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub(crate) enum GuardChoice {
+    /// Nothing decided yet: a blocked action is put to the person.
+    #[default]
+    Ask,
+    /// Run this one action although it is outside the prediction.
+    AllowOnce,
+    /// Do not run it; tell the agent it was blocked.
+    Deny,
+}
+
+/// What to do with an action, given the guard's verdict and the person's choice.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum Settled {
+    /// Run it. `approved` is true when it only runs because a person said so.
+    Run { approved: bool },
+    /// Stop the run here and ask the person.
+    Ask,
+    /// Do not run it.
+    Block,
+}
+
+/// The single place that turns a verdict into a decision. A blocked action is
+/// never run on its own: it either waits for a person (`Ask`), is refused, or
+/// runs because that person allowed exactly this action.
+pub(crate) fn settle(verdict: &GuardVerdict, choice: GuardChoice) -> Settled {
+    match (verdict, choice) {
+        (GuardVerdict::Expected(_), _) => Settled::Run { approved: false },
+        (GuardVerdict::Approved(_), _) => Settled::Run { approved: true },
+        (GuardVerdict::Block(_), GuardChoice::Ask) => Settled::Ask,
+        (GuardVerdict::Block(_), GuardChoice::AllowOnce) => Settled::Run { approved: true },
+        (GuardVerdict::Block(_), GuardChoice::Deny) => Settled::Block,
+    }
+}
+
+/// What the person is asked, and what *Allow for this task* would approve.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct RuntimeAsk {
+    /// One plain sentence naming the action and the site, never anything a
+    /// page wrote (the agent's own words and the page's labels stay out: this
+    /// text is a prompt-injection target otherwise).
+    pub summary: String,
+    /// The tool to approve for the rest of the task, when the verdict is about
+    /// a tool no capability names.
+    pub approve_tool: Option<ferrite_ipi::tool_decision::ToolId>,
+    /// The site to approve for the rest of the task, when the verdict is about
+    /// a site no scope admits.
+    pub approve_origin: Option<String>,
+}
+
+/// The question for a blocked verdict; `None` for one that is not blocked.
+pub(crate) fn ask_for(verdict: &GuardVerdict, action_label: &str) -> Option<RuntimeAsk> {
+    let GuardVerdict::Block(event) = verdict else {
+        return None;
+    };
+    let (approve_tool, approve_origin) = match event {
+        EventVerdict::ExtraPrimitive(tool) => (Some(tool.clone()), None),
+        EventVerdict::OutOfScopeOrigin(origin) => (None, Some(origin.clone())),
+        EventVerdict::Justified(_) => return None,
+    };
+    Some(RuntimeAsk {
+        summary: format!(
+            "{action_label}: {}",
+            verdict.describe().replace(", and was not approved", "")
+        ),
+        approve_tool,
+        approve_origin,
+    })
 }
 
 /// A line for the activity trace and the step log: what was blocked and why,
@@ -371,6 +442,43 @@ mod tests {
             );
             assert_eq!(effects.len(), 2, "{n}");
         }
+    }
+
+    #[test]
+    fn a_blocked_action_is_asked_about_never_run_on_its_own() {
+        use ferrite_ipi::tool_decision::ToolId;
+        let block = GuardVerdict::Block(EventVerdict::ExtraPrimitive(ToolId::new("click")));
+        assert_eq!(settle(&block, GuardChoice::Ask), Settled::Ask);
+        assert_eq!(settle(&block, GuardChoice::Deny), Settled::Block);
+        assert_eq!(
+            settle(&block, GuardChoice::AllowOnce),
+            Settled::Run { approved: true }
+        );
+        // An action that was already approved at the start of the task runs
+        // whatever the choice says; one that is merely expected is not "approved".
+        let approved = GuardVerdict::Approved(EventVerdict::ExtraPrimitive(ToolId::new("click")));
+        for choice in [GuardChoice::Ask, GuardChoice::AllowOnce, GuardChoice::Deny] {
+            assert_eq!(settle(&approved, choice), Settled::Run { approved: true });
+        }
+    }
+
+    #[test]
+    fn the_question_names_the_action_and_the_site_and_nothing_from_the_page() {
+        use ferrite_ipi::tool_decision::ToolId;
+        let tool = GuardVerdict::Block(EventVerdict::ExtraPrimitive(ToolId::new("click")));
+        let ask = ask_for(&tool, "Click").expect("asked");
+        assert!(ask.summary.starts_with("Click: "), "{}", ask.summary);
+        assert!(!ask.summary.contains("not approved"), "{}", ask.summary);
+        assert_eq!(ask.approve_tool, Some(ToolId::new("click")));
+        assert_eq!(ask.approve_origin, None);
+
+        let site = GuardVerdict::Block(EventVerdict::OutOfScopeOrigin(
+            "https://other.example".into(),
+        ));
+        let ask = ask_for(&site, "Navigate").expect("asked");
+        assert!(ask.summary.contains("https://other.example"));
+        assert_eq!(ask.approve_origin.as_deref(), Some("https://other.example"));
+        assert_eq!(ask.approve_tool, None);
     }
 
     #[test]

@@ -1188,6 +1188,9 @@ pub struct LiveAgentLoop {
     guard: Option<ferrite_ipi::comparator::RuntimeGuard>,
     /// Actions the guard has blocked so far in this run.
     guard_blocks: u32,
+    /// What the person decided about the action the guard just stopped;
+    /// consumed by that one action, then back to `Ask`.
+    guard_choice: runtime_guard::GuardChoice,
     /// The host the person already pressed *Continue* on at a sign-in
     /// handoff (see `signin`), so the agent is not stopped again at every page
     /// of the same sign-in. Forgotten when the agent reaches a page that needs
@@ -1218,6 +1221,7 @@ impl LiveAgentLoop {
             last_page_sig: None,
             guard: None,
             guard_blocks: 0,
+            guard_choice: runtime_guard::GuardChoice::Ask,
             signin_cleared_host: None,
         }
     }
@@ -1226,6 +1230,23 @@ impl LiveAgentLoop {
     fn with_guard(mut self, guard: Option<ferrite_ipi::comparator::RuntimeGuard>) -> Self {
         self.guard = guard;
         self
+    }
+}
+
+/// The agent tried something outside what the request implied, and the run is
+/// paused on the question. Holds the action so *Allow* can run exactly it.
+pub struct PendingRuntimeConsent {
+    run_id: u64,
+    action: AgentAction,
+    fast: Option<(FastAction, HistoryItem)>,
+    ask: runtime_guard::RuntimeAsk,
+}
+
+impl PendingRuntimeConsent {
+    /// The one sentence the card shows.
+    #[must_use]
+    pub fn summary(&self) -> &str {
+        &self.ask.summary
     }
 }
 
@@ -1593,6 +1614,10 @@ pub struct FerriteBrowser {
     /// sign-in or another secret): the run is stopped before any model call and
     /// the agent panel shows a card with *Continue*. See `signin`.
     pub signin_handoff: Option<signin::SignInWall>,
+    /// An action the guard stopped, put to the person. The run waits here;
+    /// nothing outside the prediction runs until they say so. See
+    /// `PendingRuntimeConsent`.
+    pub pending_runtime: Option<PendingRuntimeConsent>,
     // ── New-tab hero: quick-access tile favicons ────────────────────────────
     /// The decoded favicon for each of `QUICK_ACCESS_TILES`, same indexing
     /// convention as `tab_favicons`/`tab_titles`/... elsewhere in this file
@@ -1720,6 +1745,7 @@ impl Default for FerriteBrowser {
             show_settings_panel: false,
             settings: settings_panel::SettingsState::default(),
             signin_handoff: None,
+            pending_runtime: None,
             tile_favicons: vec![None; QUICK_ACCESS_TILES.len()],
             favicons_cache_dir: None,
         }
@@ -1837,6 +1863,12 @@ pub enum FerriteBrowserMessage {
     /// The person pressed *Continue* on the sign-in handoff card: the agent
     /// picks up from the page as it is now.
     SigninContinue,
+    /// Run the paused action this once.
+    RuntimeAllowOnce,
+    /// Run it, and allow the same kind of action for the rest of this task.
+    RuntimeAllowTask,
+    /// Do not run it; the agent is told it was blocked.
+    RuntimeDeny,
     // ── Chats ─────────────────────────────────────────────────────────────────
     /// Starts a fresh, empty chat (the sidebar's "New chat" button, and
     /// Cmd/Ctrl+Shift+O). Refused, with a notice, while a run is active or a
@@ -2349,6 +2381,45 @@ pub fn update(
             }
             let run_id = state.run_id;
             return spawn_next_step(state, run_id, live);
+        }
+        FerriteBrowserMessage::RuntimeAllowOnce
+        | FerriteBrowserMessage::RuntimeAllowTask
+        | FerriteBrowserMessage::RuntimeDeny => {
+            let (Some(pending), Some(mut live)) =
+                (state.pending_runtime.take(), state.live_loop.take())
+            else {
+                return Task::none();
+            };
+            let decision = match message {
+                FerriteBrowserMessage::RuntimeAllowOnce => "allowed once",
+                FerriteBrowserMessage::RuntimeAllowTask => "allowed for this task",
+                _ => "denied",
+            };
+            activity::record(
+                "runtime consent",
+                pending.ask.summary.as_str(),
+                decision,
+                true,
+                "the person was asked",
+                0,
+            );
+            live.guard_choice = match message {
+                FerriteBrowserMessage::RuntimeDeny => runtime_guard::GuardChoice::Deny,
+                FerriteBrowserMessage::RuntimeAllowOnce => runtime_guard::GuardChoice::AllowOnce,
+                _ => {
+                    // Approve the tool or site for the rest of the task, the
+                    // same approval the consent panel gives before a run.
+                    live.guard = live.guard.take().map(|guard| {
+                        guard.with_approvals(
+                            pending.ask.approve_tool.clone(),
+                            pending.ask.approve_origin.clone(),
+                        )
+                    });
+                    runtime_guard::GuardChoice::Ask
+                }
+            };
+            state.live_loop = Some(live);
+            return handle_agent_step(state, pending.run_id, Ok(pending.action), pending.fast);
         }
         FerriteBrowserMessage::StopAgent => {
             state.run_id += 1;
@@ -2952,6 +3023,7 @@ fn conclude_run(state: &mut FerriteBrowser, outcome: Outcome) -> Task<FerriteBro
     state.agent_is_running = false;
     state.live_loop = None;
     state.signin_handoff = None;
+    state.pending_runtime = None;
     state.pending_task = None;
     state.pending_seed = None;
     // "Stop the current run before switching chats" is stale the moment the
@@ -3355,6 +3427,8 @@ fn handle_agent_step(
     // that is neither expected nor approved is not executed. The guard runs
     // first so a rejected-and-unexpected action is reported as the guard's
     // (the stronger statement) and so every blocked action is audited.
+    let choice = std::mem::take(&mut live.guard_choice);
+    let mut ask: Option<runtime_guard::RuntimeAsk> = None;
     let guard_block = live.guard.as_ref().and_then(|guard| {
         let tab_url = state
             .tab_urls
@@ -3373,17 +3447,43 @@ fn handle_agent_step(
             || (primitive_of_action(&action).as_str(), None),
             |(p, o)| (p.as_str(), o.as_deref()),
         );
-        match &verdict {
-            ferrite_ipi::comparator::GuardVerdict::Block(_) => {
+        match runtime_guard::settle(&verdict, choice) {
+            // Outside the prediction and nobody has said yes: the run waits
+            // for the person (nothing is audited or run until they answer).
+            runtime_guard::Settled::Ask => {
+                ask = runtime_guard::ask_for(&verdict, action_label(&action));
+                Some(verdict)
+            }
+            runtime_guard::Settled::Block => {
                 ferrite_servo::session::audit_guard_decision(audited.0, audited.1, false);
+                Some(verdict)
             }
-            ferrite_ipi::comparator::GuardVerdict::Approved(_) => {
-                ferrite_servo::session::audit_guard_decision(audited.0, audited.1, true);
+            runtime_guard::Settled::Run { approved } => {
+                if approved {
+                    ferrite_servo::session::audit_guard_decision(audited.0, audited.1, true);
+                }
+                None
             }
-            ferrite_ipi::comparator::GuardVerdict::Expected(_) => {}
         }
-        (!verdict.allows()).then_some(verdict)
     });
+    if let Some(ask) = ask {
+        activity::record(
+            "runtime consent",
+            ask.summary.as_str(),
+            "waiting for the person",
+            true,
+            "the agent reached outside what the request implied",
+            0,
+        );
+        state.pending_runtime = Some(PendingRuntimeConsent {
+            run_id,
+            action,
+            fast,
+            ask,
+        });
+        state.live_loop = Some(live);
+        return scroll_to_latest(state);
+    }
     if guard_block.is_some() {
         live.guard_blocks += 1;
     }

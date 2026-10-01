@@ -215,6 +215,12 @@ setup-all *ARGS:
 run-local *ARGS:
     ./scripts/run-local.sh {{ARGS}}
 
+# The same, built with the release profile. The dev profile is for working on
+# Ferrite; this one is what to use to *use* it, or to judge its speed: the
+# engine runs several times faster optimised (T-269).
+run-fast *ARGS:
+    FERRITE_PROFILE=release ./scripts/run-local.sh --servo {{ARGS}}
+
 # Starts the Laya server (if set up), then the real-Servo browser with it.
 # Run everything: real Servo browser + local Laya server.
 run-all *ARGS:
