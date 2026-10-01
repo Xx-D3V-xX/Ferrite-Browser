@@ -4763,3 +4763,13 @@ step; anything in the workflows on a real GitHub runner (Linux and Windows
 package lists, Windows and Linux test runs, the `workflow_run` hand-off, which
 only takes effect once `release.yml` is on `main`).
 
+## 2026-10-01 — coordinator — Windows CI: golden fixtures checked out as CRLF (T-254)
+
+The first Windows run of `cargo test --workspace` failed three `schema_stability`
+tests in `ferrite-core`. Cause: no `.gitattributes`, so the runner's default
+`core.autocrlf=true` turned the LF fixtures into CRLF and the byte-for-byte wire
+format comparison failed on `\r\n`. Fix: a root `.gitattributes` forcing LF
+(binary assets excluded); `git add --renormalize .` is a no-op, so the blobs
+were already LF. The test was not loosened. **Not verified:** a Windows run
+after the change.
+

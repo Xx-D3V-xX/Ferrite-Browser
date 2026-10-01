@@ -1,0 +1,11 @@
+# Check text out with LF on every platform. Golden fixtures are compared
+# byte-for-byte with serializer output, and shell scripts and hooks must not
+# carry CRLF; Windows runners default to core.autocrlf=true and would rewrite
+# both. Binary assets are listed explicitly so they are never normalised.
+* text=auto eol=lf
+
+*.png binary
+*.ico binary
+*.icns binary
+*.zip binary
+*.gz binary
