@@ -55,6 +55,7 @@ summary: Install Ferrite, connect your own model in Settings, run a first task, 
 
 <h2>Troubleshooting</h2>
 <dl class="defs">
+  <dt>macOS: “Ferrite” Not Opened</dt><dd>Builds are not yet notarized by Apple, so Gatekeeper blocks the first launch (it does not mean the file is damaged). Click <em>Done</em>, open <strong>System Settings → Privacy &amp; Security</strong>, scroll to <em>Security</em>, and click <strong>Open Anyway</strong> next to Ferrite, then confirm with your password. You only need to do this once. The older right-click → Open trick no longer works on macOS 15 and later. From a terminal, <code>xattr -dr com.apple.quarantine /Applications/Ferrite.app</code> does the same thing.</dd>
   <dt>No AI model connected</dt><dd>Open Settings and finish steps 2 to 6 above. The agent fails closed without a model: it will not act without one.</dd>
   <dt>“The provider rejected this key”</dt><dd>The key is wrong, revoked, or for another provider. Re-paste it; keys are shown masked.</dd>
   <dt>“Could not reach Ollama at …”</dt><dd>Start Ollama on this computer, then press <em>Load models</em> again. A local server must be <code>localhost</code> or <code>127.0.0.1</code>.</dd>
