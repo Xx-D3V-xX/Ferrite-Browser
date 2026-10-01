@@ -4722,3 +4722,44 @@ the warm-up now also times fp16 on MPS and prints both; the new
 CPU-only `FERRITE_LAYA_THREADS`. **Verified:** the 26 Python server tests (fake
 agent; no torch, no MPS here). **Not verified:** whether fp16 is actually faster
 or changes answers on his machine; no Apple hardware here.
+
+## 2026-10-01 — coordinator — Web Crypto, an app icon, and CI/release on three OSes
+
+**Reported by the owner:** Speedometer 3.1 fails in Ferrite (`crypto.getRandomValues()
+not supported`, `crypto is not defined`, a Next.js client-side exception) and
+passes in Brave; asked for an icon, and for CI and release on macOS, Windows and
+Linux (CI manual; release to follow a successful CI run).
+
+**Cause (T-251):** the `servo` crate was built without its `webcrypto` feature,
+so `window.crypto` is not compiled in (ADR-016). **Done:** the feature is on
+(lockfile moved only `hybrid-array` and `typenum` besides the additions),
+`dom_intersection_observer_enabled` is on, and `web_api_probe`
+(`just probe-web-api`) checks 25 required APIs in the real engine. **Verified
+(Linux, headless, real Servo built with the feature):** all 25 pass, including
+`getRandomValues`, `randomUUID` and `subtle` digest, AES-GCM and HMAC;
+`IntersectionObserver` failed before its preference was set. Absent in this
+Servo and only reported: `requestIdleCallback`, `adoptedStyleSheets`,
+`FontFace`, `scheduler.postTask`, `OffscreenCanvas`, the Navigation API.
+
+**Icon (T-252):** `assets/icon/ferrite.svg`, rendered by `scripts/make_icons.py`
+to PNG, ICO and ICNS; embedded as the window icon, in `ferrite.exe`
+(`build.rs`, Windows only) and in `Ferrite.app` / the Linux `.desktop`
+(`scripts/package.sh`).
+
+**CI/release (T-253):** `ci.yml` is manual-only with a Linux/Windows/macOS
+matrix and packaged Servo builds; `release.yml` publishes after a successful CI
+run (`workflow_run`). T-210's macOS-only decision is superseded by the owner's
+new request.
+
+**Verified:** `cargo fmt`; clippy `--workspace --all-targets -D warnings` and
+`-p ferrite-servo --all-targets --features servo`; `cargo test --workspace` 1,101
+passed, 0 failed, 2 ignored; `cargo deny check`; `cargo machete`; the packaging
+script for all three platforms against a stand-in binary; both workflow files
+parse as YAML; the window icon decodes (unit test).
+
+**Not verified:** Speedometer 3.1 itself (no internet here); the icon in a
+macOS Dock, Windows task bar or Linux launcher; the Windows icon-embedding build
+step; anything in the workflows on a real GitHub runner (Linux and Windows
+package lists, Windows and Linux test runs, the `workflow_run` hand-off, which
+only takes effect once `release.yml` is on `main`).
+

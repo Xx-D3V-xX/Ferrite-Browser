@@ -6961,8 +6961,30 @@ pub fn subscription(state: &FerriteBrowser) -> Subscription<FerriteBrowserMessag
 // Launch
 // ---------------------------------------------------------------------------
 
+/// The app icon (assets/icon/ferrite.svg rendered by scripts/make_icons.py),
+/// embedded so the binary needs no files beside it. Shown in the title bar and
+/// task switcher on Windows and Linux; macOS takes its Dock icon from the
+/// `.app` bundle (scripts/package.sh), not from the window.
+const WINDOW_ICON_PNG: &[u8] = include_bytes!("../../../assets/icon/ferrite-256.png");
+
+fn window_icon() -> Option<window::Icon> {
+    let (width, height, rgba) = decode_favicon_rgba(WINDOW_ICON_PNG)?;
+    window::icon::from_rgba(rgba, width, height).ok()
+}
+
 pub fn launch() -> iced::Result {
     iced::application("Ferrite", update, view)
+        .window(window::Settings {
+            icon: window_icon(),
+            // Lets a Linux desktop match the window to `ferrite.desktop`
+            // (and so to its icon) in the launcher and task bar.
+            #[cfg(target_os = "linux")]
+            platform_specific: window::settings::PlatformSpecific {
+                application_id: "ferrite".to_string(),
+                ..Default::default()
+            },
+            ..window::Settings::default()
+        })
         .window_size(Size::new(1280.0, 800.0))
         .centered()
         // Closing the window is handled (`WindowCloseRequested`) so the engine
@@ -9062,6 +9084,14 @@ mod tests {
     #[test]
     fn decode_favicon_rgba_is_none_for_non_image_bytes() {
         assert_eq!(decode_favicon_rgba(b"not an image at all"), None);
+    }
+
+    #[test]
+    fn window_icon_decodes_to_a_256px_square() {
+        let (w, h, rgba) = decode_favicon_rgba(WINDOW_ICON_PNG).expect("embedded icon decodes");
+        assert_eq!((w, h), (256, 256));
+        assert_eq!(rgba.len(), 256 * 256 * 4);
+        assert!(window_icon().is_some());
     }
 
     #[test]

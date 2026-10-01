@@ -85,7 +85,7 @@ rustls = { version = "0.23", features = ["aws_lc_rs"] }
 # the git tag v0.0.5, whose script engine could free a compiled script that a
 # stylesheet-blocked <script> was still waiting to run (a use-after-free that
 # crashed Google pages); upstream traces that script now.
-servo = { version = "=0.6.0" }
+servo = { version = "=0.6.0", features = ["webcrypto"] }
 
 # ── ferrite-ui ───────────────────────────────────────────────────────────
 # C1 (docs/handoffs/c01.md): "svg" adds the hand-authored icon set
@@ -124,6 +124,12 @@ urlencoding = "2"
 # path — `image::load_from_memory` sniffs the real format from its magic
 # bytes, not the URL's extension, so both cases decode through the same call.
 image = { version = "0.25", default-features = false, features = ["ico"] }
+
+# ── ferrite-shell (Windows only) ─────────────────────────────────────────
+# Embeds assets/icon/ferrite.ico and the version info in ferrite.exe from a
+# build script, so Explorer and the task bar show the app icon. Only built on
+# Windows hosts (a `cfg(windows)` build-dependency of ferrite-shell).
+winresource = "0.1"
 
 # ── path deps (in-workspace crates) ──────────────────────────────────────
 ferrite-agent = { path = "crates/ferrite-agent" }

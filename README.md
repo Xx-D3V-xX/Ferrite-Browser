@@ -198,7 +198,7 @@ requires.
 | `just doctor` | checklist: tools, build, env file, model tags, keys (never printed), Laya venv/checkpoint/server with a latency probe, disk. `--fix-hints` says how to fix each item |
 | `just laya-serve` | only the Laya server, in the foreground |
 | `just laya-verify` | sends one recorded browser step to the running server, prints its decision and latency |
-| `just probe-input` / `just probe-engine` / `just probe-profile` | drive a real headless Servo session against a built-in page and report what works: scrolling, clicks, typing, reload, two tabs; the page digest and `@ref` actions; cookies and storage surviving a restart (real Servo build only; on Linux run under `xvfb-run`) |
+| `just probe-input` / `just probe-engine` / `just probe-profile` / `just probe-web-api` | drive a real headless Servo session against a built-in page and report what works: scrolling, clicks, typing, reload, two tabs; the page digest and `@ref` actions; cookies and storage surviving a restart; the Web APIs benchmarks and frameworks assume, `window.crypto` first among them (real Servo build only; on Linux run under `xvfb-run`) |
 | `just crash-report` | after a crash (exit 139): prints the exception and the crashing thread's stack from the newest macOS crash report, for bug reports |
 | `just test-local` | tests for these scripts (no network; the Python ones skip unless `fastapi`, `uvicorn` and `laya` import) |
 

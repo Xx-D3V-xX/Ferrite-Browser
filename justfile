@@ -111,6 +111,12 @@ build-servo:
 probe-input *ARGS:
     cargo run -p ferrite-servo --features servo --example input_probe -- {{ARGS}}
 
+# Checks that the Web APIs benchmark and framework bundles assume exist in the
+# real engine: window.crypto (getRandomValues, randomUUID, subtle), observers,
+# fetch, custom elements and more, served from loopback. Needs the real Servo build.
+probe-web-api:
+    cargo run -p ferrite-servo --features servo --example web_api_probe
+
 # Runs the real page script in a headless Servo session and drives a form by
 # `@ref`: digest, type, tick, select, click, scroll. Needs the real Servo build.
 probe-engine:
