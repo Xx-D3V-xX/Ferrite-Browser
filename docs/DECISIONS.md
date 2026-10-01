@@ -538,3 +538,32 @@ the cost of the failed and declined calls. The net was a loss of several seconds
 measurement (T-234, T-250); this only guarantees that when it is not, the agent
 stops paying for it.
 
+## ADR-016 — Servo's Web Crypto is a compile-time feature; releases follow a successful manual CI run
+
+**Context.** Speedometer 3.1 failed in Ferrite with `crypto.getRandomValues()
+not supported`, `crypto is not defined` and a Next.js client-side exception.
+Servo's `Crypto` interface is declared `skip-unless CARGO_FEATURE_WEBCRYPTO`:
+without the `webcrypto` Cargo feature of the `servo` crate, `window.crypto` is
+not merely disabled, it does not exist. The `dom_crypto_subtle_enabled`
+preference (already `true`) only gates `crypto.subtle` once the interface is
+there. The `servo` dependency was declared with default features
+(`bundled`, `clipboard`, `js_jit`), which exclude `webcrypto`.
+
+**Decision.** Declare `servo = { version = "=0.6.0", features = ["webcrypto"] }`
+and set `dom_intersection_observer_enabled` in `get_or_init_servo()`. Adding the
+feature pulls the RustCrypto stack (about 800 lockfile lines; `cargo deny`
+licenses, advisories and bans stay clean) and required `cargo update -p
+hybrid-array`. The `web_api_probe` example is the regression check.
+
+CI is still manual-only (T-210). It now runs on macOS, Windows and Linux, builds
+and packages the Servo binary on each, and a separate `release.yml` fires on
+`workflow_run` of CI and publishes the rolling `latest` release only when the CI
+run's conclusion is `success`. It never checks out or runs the CI run's code: it
+downloads the artifacts only, because a `workflow_run` workflow has a write
+token.
+
+**Not claimed.** That Speedometer passes: no network was available to run it.
+That the Windows and Linux jobs pass: they have not run. `requestIdleCallback`,
+`adoptedStyleSheets`, `FontFace`, `OffscreenCanvas` and the Navigation API are
+absent in this Servo and are listed by the probe as gaps.
+
