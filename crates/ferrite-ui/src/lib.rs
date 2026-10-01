@@ -2620,7 +2620,7 @@ pub fn update(
                     for message in session.take_console_errors().into_iter().take(20) {
                         eprintln!(
                             "[page console error] tab {index}: {}",
-                            truncate(&message, 300)
+                            truncate(&shorten_urls(&message), 400)
                         );
                     }
                 }
@@ -4291,6 +4291,54 @@ fn kind_label(kind: &AuditEventKind, palette: &Palette, is_light: bool) -> (&'st
                 Color::from_rgb(0.6, 0.6, 0.6)
             },
         ),
+    }
+}
+
+/// Shortens every long URL in a page's console message to its start and end,
+/// so a message full of script addresses (Google's are hundreds of characters)
+/// still shows the part that matters, the error itself, after `truncate`.
+fn shorten_urls(message: &str) -> String {
+    const KEEP_HEAD: usize = 56;
+    const KEEP_TAIL: usize = 28;
+    message
+        .split(' ')
+        .map(|word| {
+            let is_url = word.starts_with("http://") || word.starts_with("https://");
+            let len = word.chars().count();
+            if is_url && len > KEEP_HEAD + KEEP_TAIL + 3 {
+                let head: String = word.chars().take(KEEP_HEAD).collect();
+                let tail: String = word.chars().skip(len - KEEP_TAIL).collect();
+                format!("{head}…{tail}")
+            } else {
+                word.to_string()
+            }
+        })
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
+#[cfg(test)]
+mod console_message_tests {
+    use super::shorten_urls;
+
+    #[test]
+    fn a_long_script_url_keeps_its_ends_and_the_error_survives() {
+        let url = format!(
+            "https://www.google.com/xjs/_/js/k=xjs.hd.en_GB/am={}/rt=j:83:37",
+            "A".repeat(400)
+        );
+        let message =
+            format!("Error at {url} uncaught exception: SecurityError: The operation is insecure.");
+        let short = shorten_urls(&message);
+        assert!(short.chars().count() < 200, "{short}");
+        assert!(short.starts_with("Error at https://www.google.com/xjs/"));
+        assert!(short.contains("/rt=j:83:37 uncaught exception: SecurityError"));
+    }
+
+    #[test]
+    fn short_urls_and_plain_words_are_left_alone() {
+        let message = "Error at https://example.com/a.js:1:2 TypeError: x is undefined";
+        assert_eq!(shorten_urls(message), message);
     }
 }
 
