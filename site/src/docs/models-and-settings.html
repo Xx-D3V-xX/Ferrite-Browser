@@ -1,0 +1,88 @@
+<!--
+title: Models and settings
+order: 8
+group: Use
+summary: How Ferrite connects to Ollama or Gemini, where your API key and settings are stored, how environment variables interact, and what leaves your machine.
+-->
+<p class="lede">Ferrite does not ship a model. You connect your own, in Settings, and the app keeps the secret part (your key) and the non-secret part (your choices) in different places on purpose.</p>
+
+<h2>Providers</h2>
+<div class="table-wrap"><table>
+<thead><tr><th>Provider</th><th>Needs a key</th><th>Where requests go</th><th>Get a key</th></tr></thead>
+<tbody>
+<tr><td>Ollama Cloud</td><td>Yes</td><td><code>https://ollama.com</code></td><td><code>ollama.com/settings/keys</code></td></tr>
+<tr><td>Ollama (this computer)</td><td>No, and none is sent</td><td>A server on <code>localhost</code> / <code>127.0.0.1</code>, default <code>http://localhost:11434</code></td><td>n/a</td></tr>
+<tr><td>Google Gemini</td><td>Yes</td><td><code>generativelanguage.googleapis.com</code></td><td><code>aistudio.google.com/apikey</code></td></tr>
+</tbody></table></div>
+<p>The “local” choice must be on this computer. This is deliberate: a bearer token must never be sent toward anything that is not the cloud service, and matching is on the <em>whole host</em>, so <code>localhost.evil.example</code> is not local. To use a remote Ollama server anyway, choose Ollama Cloud and set <code>FERRITE_OLLAMA_BASE_URL</code> to it; your key is then sent to that server, so only do this for one you trust.</p>
+
+<h2>The two models</h2>
+<dl class="defs">
+  <dt>Fast model</dt><dd>Runs once per task to predict which capabilities the task might need. It sees only your request. A small, quick model is fine.</dd>
+  <dt>Agent model</dt><dd>Reads pages and picks each step. This is where a stronger model pays off.</dd>
+</dl>
+<p>By default one model serves both roles. Names are not hard-coded anywhere: the list comes from your provider, because providers retire model names, and an unset name is a clear “choose a model”, never a stale default.</p>
+
+<h2>Where things are stored</h2>
+<div class="table-wrap"><table>
+<thead><tr><th>What</th><th>Where</th><th>Notes</th></tr></thead>
+<tbody>
+<tr><td>Provider, model names, local server address</td><td><code>settings.json</code> in the data directory</td><td>Not secret. <code>$FERRITE_HOME</code> if set, else <code>~/.local/share/ferrite</code>. Written atomically.</td></tr>
+<tr><td>API keys</td><td>Your operating system's credential store, service <code>ferrite</code></td><td>Account names <code>OLLAMA_API_KEY</code> and <code>FERRITE_GEMINI_API_KEY</code>. Never in a file or a log.</td></tr>
+<tr><td>Model-activity trace</td><td><code>logs/model-activity.jsonl</code> in the data directory</td><td>Local only. Holds prompts and answers; see below.</td></tr>
+</tbody></table></div>
+
+<h3>The key is held more carefully than the rest</h3>
+<ul>
+  <li>The settings file contains no key, and a test fails if it ever does.</li>
+  <li>The key field is masked, and the field is cleared the moment the key is stored.</li>
+  <li>The message that carries a typed key prints <code>&lt;redacted&gt;</code>, and the key type prints <code>Token(&lt;redacted&gt;)</code>, so a stray debug line cannot leak it.</li>
+  <li>Gemini puts its key in the request URL, so every error message from that backend is redacted before it is shown.</li>
+  <li><strong>Remove key</strong> deletes it from the credential store and disconnects the running app, which would otherwise keep using the copy in memory.</li>
+</ul>
+
+<div class="callout warn">
+  <h4>Linux: keys do not survive a restart</h4>
+  <p>This build stores keys through the Linux <strong>kernel keyring</strong>, which is held in memory and cleared when the computer restarts (macOS Keychain and Windows Credential Manager persist normally). On Linux, save the key in Settings to use it in the current session, and export it as an environment variable for a permanent one:</p>
+<pre><code>export OLLAMA_API_KEY=&lt;your key&gt;
+# or
+export FERRITE_GEMINI_API_KEY=&lt;your key&gt;</code></pre>
+  <p>Using a persistent Secret Service backend instead is tracked as an open item.</p>
+</div>
+
+<h2>How Settings and environment variables combine</h2>
+<p>An exported variable <strong>wins</strong> over what Settings saved. That is what CI runners and one-off shell overrides need, and it is how Ferrite behaved before Settings existed. When it is happening, the Settings status card says so and names the variables.</p>
+<div class="table-wrap"><table>
+<thead><tr><th>Variable</th><th>Meaning</th><th>Default</th></tr></thead>
+<tbody>
+<tr><td><code>FERRITE_MODEL_SMALL</code></td><td>The fast model's name</td><td>none (required)</td></tr>
+<tr><td><code>FERRITE_MODEL_MAIN</code></td><td>The agent model's name</td><td>none (required)</td></tr>
+<tr><td><code>OLLAMA_API_KEY</code></td><td>Ollama Cloud key (overrides the keyring)</td><td>none</td></tr>
+<tr><td><code>FERRITE_GEMINI_API_KEY</code></td><td>Gemini key (overrides the keyring)</td><td>none</td></tr>
+<tr><td><code>FERRITE_OLLAMA_BASE_URL</code></td><td>Ollama endpoint</td><td><code>https://ollama.com</code></td></tr>
+<tr><td><code>FERRITE_GEMINI_BASE_URL</code></td><td>Gemini endpoint</td><td><code>https://generativelanguage.googleapis.com/v1beta/models</code></td></tr>
+<tr><td><code>FERRITE_MODEL_CALL_BUDGET</code></td><td>Most model calls in a run</td><td>500</td></tr>
+<tr><td><code>FERRITE_MODEL_MAX_IN_FLIGHT</code></td><td>Concurrent model requests</td><td>2</td></tr>
+<tr><td><code>FERRITE_MODEL_TIMEOUT_SECS</code></td><td>Per-request timeout</td><td>60</td></tr>
+<tr><td><code>FERRITE_MODEL_MAX_RESPONSE_BYTES</code></td><td>Largest response accepted</td><td>1 MiB</td></tr>
+<tr><td><code>FERRITE_MODEL_CACHE_DIR</code></td><td>On-disk response cache</td><td><code>~/.cache/ferrite-model</code></td></tr>
+<tr><td><code>FERRITE_HOME</code></td><td>The data directory</td><td><code>~/.local/share/ferrite</code></td></tr>
+<tr><td><code>FERRITE_DEFENSE</code></td><td><code>on</code>, <code>off</code>, <code>sanitizer_only</code>, <code>loop_only</code>, for experiments</td><td><code>on</code></td></tr>
+<tr><td><code>FERRITE_LAYA_URL</code></td><td>Optional fast-lane server (see below)</td><td>unset (off)</td></tr>
+</tbody></table></div>
+<p>With <em>no</em> provider chosen in Settings, the environment and keyring alone decide, as before: Ollama if a key (or a local server) is configured, otherwise Gemini.</p>
+
+<h2>What leaves your machine</h2>
+<ul>
+  <li><strong>Page content, to your model provider.</strong> The agent has to read pages to act, so the text it reads is sent to the provider you chose. With local Ollama, nothing leaves your computer.</li>
+  <li><strong>Your request, to the fast model</strong>, to predict the fingerprint. Only text you wrote, never page text.</li>
+  <li><strong>The model list request</strong> when you press <em>Load models</em>: your key (or none, for local) to the provider you chose, nothing else.</li>
+  <li><strong>Nothing to Ferrite.</strong> There is no Ferrite server, and the source contains no analytics or telemetry code. Apart from what you ask it to do, the app makes one kind of request on its own: it fetches each site's <code>favicon.ico</code>, for the six quick-access tiles on the new-tab page and for the tabs you open.</li>
+</ul>
+<p>The model-activity trace stays on disk locally and can contain prompts and page text. Treat the data directory accordingly.</p>
+
+<h2>Failing safely</h2>
+<p>No model, a bad key, a timeout or a malformed answer never relaxes the defense. The fingerprint's prediction layer fails to <em>empty</em>, which sends more actions to consent, and the agent loop fails closed rather than act without a model. Saving a configuration that cannot be built is refused with the reason, and the previous working connection is left untouched.</p>
+
+<h2>Laya: an optional fast lane</h2>
+<p>If <code>FERRITE_LAYA_URL</code> is set, an optional, separate server can pick routine browsing steps with a confidence gate, which saves model calls. It is <strong>never part of the security boundary</strong>: every step it chooses still passes through the same guard and consent as any other. The app logs, once, whether it is on and, if the server is not on this machine, that page text, URLs and element labels leave it. A governor pauses the lane automatically when it stops paying for itself. With the variable unset, none of this exists.</p>

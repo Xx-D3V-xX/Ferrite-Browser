@@ -98,7 +98,7 @@
 //   `load_bookmarks_from`/`save_bookmarks_to`, injected `&Path` for
 //   testability, `default_bookmarks_path()` resolving the real one via
 //   `dirs::home_dir()` — loaded once in `launch()`, never in `Default`, the
-//   same test-safety discipline `try_real_model_provider()` already
+//   same test-safety discipline the model connection already
 //   established for the model provider).
 // - **History** has two independent halves, deliberately not one. Per-tab
 //   `GoBack`/`GoForward`/`can_go_back`/`can_go_forward` now read Servo's own
@@ -219,6 +219,7 @@ mod agent_run;
 mod icons;
 mod page_input;
 mod runtime_guard;
+mod settings_panel;
 use activity_panel::AuditTab;
 use icons::{icon, Icon};
 
@@ -286,7 +287,6 @@ pub enum LibraryTab {
     Bookmarks,
     History,
     Downloads,
-    Settings,
 }
 
 /// One entry in `FerriteBrowser::downloads` — a page fetched by the
@@ -360,59 +360,6 @@ const QUICK_ACCESS_TILES: [QuickAccessTile; 6] = [
         url: "https://en.m.wikipedia.org",
     },
 ];
-
-// ---------------------------------------------------------------------------
-// Real ModelProvider construction (T-229)
-// ---------------------------------------------------------------------------
-
-/// Constructs a real, configured `ferrite_model::ModelProvider` — mirrors
-/// `ferrite-eval::harness::try_real_provider()` exactly (that function is
-/// this project's own tested, live-verified reference implementation, see
-/// `docs/EVALUATION.md` §2.6): `ModelConfig::from_env()`, Ollama first
-/// (keyring-backed, service `"ferrite"`), Gemini as the fallback.
-///
-/// Returns `None` — never an `Err` — for any construction failure (unset
-/// `FERRITE_MODEL_SMALL`/`FERRITE_MODEL_MAIN`, no key anywhere, no keyring
-/// on this machine). `FerriteBrowser::default()` falls back to
-/// `ferrite_model::MockProvider::new()` when this returns `None`, giving
-/// the fingerprint's `may_use` layer the same fail-to-empty behavior
-/// `CLAUDE.md`'s invariant requires (`must_use`, the rule layer, and
-/// therefore containment itself, is unaffected either way). The live agent
-/// loop itself still needs a real, reachable provider to choose actions at
-/// all — with none configured it surfaces as a model error on the first
-/// step, never as a bypass of the fingerprint/dry-run/consent gate in front
-/// of it.
-fn try_real_model_provider() -> Option<(Arc<dyn ModelProvider>, ferrite_model::ModelConfig)> {
-    let config = ferrite_model::ModelConfig::from_env().ok()?;
-
-    if let Ok(ollama) = ferrite_model::backends::shared_ollama(
-        &config,
-        ModelTier::Small,
-        &ferrite_model::SystemEnv,
-        &ferrite_model::OsKeyring,
-    ) {
-        let provider: Arc<dyn ModelProvider> = Arc::new(ferrite_model::Trace::new(
-            ollama,
-            ferrite_model::trace::global(),
-        ));
-        return Some((provider, config));
-    }
-
-    if let Ok(gemini) = ferrite_model::GeminiProvider::from_config(
-        &config,
-        ModelTier::Small,
-        &ferrite_model::SystemEnv,
-        &ferrite_model::OsKeyring,
-    ) {
-        let provider: Arc<dyn ModelProvider> = Arc::new(ferrite_model::Trace::new(
-            gemini,
-            ferrite_model::trace::global(),
-        ));
-        return Some((provider, config));
-    }
-
-    None
-}
 
 // ---------------------------------------------------------------------------
 // Live agent-action vocabulary helpers — map `AgentAction` (the loop's real
@@ -1383,7 +1330,7 @@ pub struct FerriteBrowser {
     pub resize_settle_ticks: u8,
     // ── Agent bridge ──────────────────────────────────────────────────────────
     /// The real `ferrite_model::ModelProvider` constructed at startup
-    /// (`try_real_model_provider`), or `ferrite_model::MockProvider::new()`
+    /// (`settings_panel::connect_saved`), or `ferrite_model::MockProvider::new()`
     /// (fail-to-empty) when none is configured/reachable — T-224/T-229.
     pub model_provider: Arc<dyn ferrite_model::ModelProvider>,
     /// Configured tag for `ModelTier::Small` (the fingerprint's `may_use`
@@ -1576,7 +1523,7 @@ pub struct FerriteBrowser {
     /// zoom (`HeadlessServoSession::set_zoom`).
     pub tab_zoom: Vec<f32>,
     /// The zoom level a freshly-added tab starts at — a genuinely-settable
-    /// preference (Settings tab, `SetDefaultZoom`), distinct from `1.0`
+    /// preference (Settings drawer, `SetDefaultZoom`), distinct from `1.0`
     /// being merely `AddTab`'s old hardcoded default.
     pub default_zoom: f32,
     // ── C3d: find-in-page ────────────────────────────────────────────────
@@ -1623,10 +1570,17 @@ pub struct FerriteBrowser {
     pub library_tab: LibraryTab,
     /// `ferrite_model::ModelConfig::cache_dir`, resolved once by `launch()`
     /// alongside `model_tag_small`/`model_tag_main` — displayed read-only in
-    /// the Settings tab. `None` when no real provider is configured
+    /// the Settings drawer's footer. `None` when no real provider is configured
     /// (`model_tag_small`/`model_tag_main` stay `"unconfigured"` in that
     /// same case).
     pub model_cache_dir: Option<String>,
+    /// Whether the Settings drawer (model provider, API key, appearance) is
+    /// shown. A right-hand drawer like the Library and the agent: one at a
+    /// time.
+    pub show_settings_panel: bool,
+    /// The Settings drawer's state: the saved and in-progress model choices,
+    /// the key being typed, and the keyring/environment/network it talks to.
+    pub settings: settings_panel::SettingsState,
     // ── New-tab hero: quick-access tile favicons ────────────────────────────
     /// The decoded favicon for each of `QUICK_ACCESS_TILES`, same indexing
     /// convention as `tab_favicons`/`tab_titles`/... elsewhere in this file
@@ -1751,6 +1705,8 @@ impl Default for FerriteBrowser {
             show_library_panel: false,
             library_tab: LibraryTab::default(),
             model_cache_dir: None,
+            show_settings_panel: false,
+            settings: settings_panel::SettingsState::default(),
             tile_favicons: vec![None; QUICK_ACCESS_TILES.len()],
             favicons_cache_dir: None,
         }
@@ -1953,7 +1909,7 @@ pub enum FerriteBrowserMessage {
     ZoomOut,
     /// Resets the active tab's zoom to 100%.
     ZoomReset,
-    /// Sets `FerriteBrowser::default_zoom` (Settings tab) — affects tabs
+    /// Sets `FerriteBrowser::default_zoom` (Settings drawer) — affects tabs
     /// created after this point, not the currently active one.
     SetDefaultZoom(f32),
     // ── C3d: find-in-page ────────────────────────────────────────────────
@@ -1994,6 +1950,11 @@ pub enum FerriteBrowserMessage {
     ToggleLibraryPanel,
     /// Switches the Library panel's active sub-view.
     SelectLibraryTab(LibraryTab),
+    // ── Settings drawer ──────────────────────────────────────────────────
+    /// Toggles the Settings drawer (and the toolbar's gear).
+    ToggleSettingsPanel,
+    /// One action inside the Settings drawer (see `settings_panel`).
+    Settings(settings_panel::SettingsMessage),
     // ── New-tab hero: quick-access tile favicons ────────────────────────────
     /// Sent once, at real startup (`launch()`'s startup `Task::batch`,
     /// mirroring `ServoReady`) — spawns one background fetch per
@@ -2127,6 +2088,7 @@ pub fn update(
             if state.show_audit_panel {
                 state.show_js_console = false;
                 state.show_library_panel = false;
+                state.show_settings_panel = false;
                 refresh_audit_views(state);
             }
         }
@@ -2135,6 +2097,7 @@ pub fn update(
             if state.show_js_console {
                 state.show_audit_panel = false;
                 state.show_library_panel = false;
+                state.show_settings_panel = false;
             }
         }
         FerriteBrowserMessage::SetAuditTab(tab) => {
@@ -2311,6 +2274,7 @@ pub fn update(
             state.show_agent_sidebar = !state.show_agent_sidebar;
             if state.show_agent_sidebar {
                 state.show_library_panel = false;
+                state.show_settings_panel = false;
                 // Opening the panel puts the cursor in the composer, ready to
                 // type, with the thread at its newest message.
                 if state.sidebar_view == SidebarView::Thread {
@@ -2801,10 +2765,23 @@ pub fn update(
             if state.show_library_panel {
                 state.show_audit_panel = false;
                 state.show_js_console = false;
-                // Both are right-hand drawers: one at a time.
+                // The right-hand drawers: one at a time.
                 state.show_agent_sidebar = false;
+                state.show_settings_panel = false;
             }
         }
+        // ── Settings drawer ─────────────────────────────────────────────────
+        FerriteBrowserMessage::ToggleSettingsPanel => {
+            state.show_settings_panel = !state.show_settings_panel;
+            if state.show_settings_panel {
+                state.show_audit_panel = false;
+                state.show_js_console = false;
+                state.show_library_panel = false;
+                state.show_agent_sidebar = false;
+                settings_panel::on_open(state);
+            }
+        }
+        FerriteBrowserMessage::Settings(message) => settings_panel::update(state, message),
         FerriteBrowserMessage::SelectLibraryTab(tab) => {
             state.library_tab = tab;
         }
@@ -5620,12 +5597,33 @@ pub fn view(state: &FerriteBrowser) -> Element<'_, FerriteBrowserMessage> {
     })
     .on_press(FerriteBrowserMessage::ToggleLibraryPanel);
 
+    // Settings: the gear. Where a person connects their own model and API key
+    // (see `settings_panel`), so it is a button of its own rather than one more
+    // Library tab — a browser with no model is the one case where the first
+    // thing to find has to be easy to find.
+    let settings_btn = button(icon(
+        Icon::Settings,
+        ICON_SIZE,
+        if state.show_settings_panel {
+            Color::WHITE
+        } else {
+            palette.text_dim
+        },
+    ))
+    .padding([6, 11])
+    .style(if state.show_settings_panel {
+        panel_btn_active
+    } else {
+        nav_btn_style
+    })
+    .on_press(FerriteBrowserMessage::ToggleSettingsPanel);
+
     // C3d: zoom indicator — only present in the toolbar while the active
     // tab's zoom isn't 100% (the brief's own explicitly-named low-clutter
     // pattern: a permanent zoom control for the overwhelmingly common
     // 100%-zoom case would be exactly the "wall of buttons" this charter
     // was warned against). A default-zoom *setting* still lives in the
-    // Settings tab regardless of the current tab's own level.
+    // Settings drawer regardless of the current tab's own level.
     let active_zoom = state.tab_zoom.get(active_tab_idx).copied().unwrap_or(1.0);
     let maybe_zoom_indicator: Option<Element<FerriteBrowserMessage>> =
         if (active_zoom - 1.0).abs() > f32::EPSILON {
@@ -5664,6 +5662,7 @@ pub fn view(state: &FerriteBrowser) -> Element<'_, FerriteBrowserMessage> {
     toolbar_items.push(js_btn.into());
     toolbar_items.push(agent_btn.into());
     toolbar_items.push(theme_btn.into());
+    toolbar_items.push(settings_btn.into());
 
     let toolbar = container(
         row(toolbar_items)
@@ -6048,7 +6047,6 @@ pub fn view(state: &FerriteBrowser) -> Element<'_, FerriteBrowserMessage> {
                     lib_tab_btn("Bookmarks", LibraryTab::Bookmarks),
                     lib_tab_btn("History", LibraryTab::History),
                     lib_tab_btn("Downloads", LibraryTab::Downloads),
-                    lib_tab_btn("Settings", LibraryTab::Settings),
                 ]
                 .spacing(6),
             ]
@@ -6197,100 +6195,6 @@ pub fn view(state: &FerriteBrowser) -> Element<'_, FerriteBrowserMessage> {
                     }));
                 }
                 rows
-            }
-            LibraryTab::Settings => {
-                let cfg_row = |label: &str, value: &str| -> Element<FerriteBrowserMessage> {
-                    container(
-                        row![
-                            text(label.to_string())
-                                .size(12)
-                                .color(palette.text_dim)
-                                .width(Length::Fixed(140.0)),
-                            text(value.to_string()).size(12).color(palette.text),
-                        ]
-                        .spacing(8),
-                    )
-                    .padding([4, PANEL_PADDING])
-                    .into()
-                };
-                let zoom_preset_btn = |pct: u32| {
-                    let level = pct as f32 / 100.0;
-                    let is_active = (state.default_zoom - level).abs() < f32::EPSILON;
-                    button(text(format!("{pct}%")).size(12))
-                        .padding([4, 10])
-                        .style(if is_active {
-                            panel_btn_active
-                        } else {
-                            panel_btn_inactive
-                        })
-                        .on_press(FerriteBrowserMessage::SetDefaultZoom(level))
-                };
-                vec![
-                    container(
-                        text("Model configuration (read-only)")
-                            .size(12)
-                            .color(palette.text),
-                    )
-                    .padding(Padding {
-                        top: 8.0,
-                        right: PANEL_PADDING as f32,
-                        bottom: 2.0,
-                        left: PANEL_PADDING as f32,
-                    })
-                    .into(),
-                    cfg_row("Small-tier tag", &state.model_tag_small),
-                    cfg_row("Main-tier tag", &state.model_tag_main),
-                    cfg_row(
-                        "Response cache dir",
-                        state.model_cache_dir.as_deref().unwrap_or("(unconfigured)"),
-                    ),
-                    container(text(""))
-                        .width(Length::Fill)
-                        .height(Length::Fixed(1.0))
-                        .style(separator_style)
-                        .into(),
-                    container(text("Appearance").size(12).color(palette.text))
-                        .padding(Padding {
-                            top: 6.0,
-                            right: PANEL_PADDING as f32,
-                            bottom: 2.0,
-                            left: PANEL_PADDING as f32,
-                        })
-                        .into(),
-                    container(
-                        row![
-                            text("Theme")
-                                .size(12)
-                                .color(palette.text_dim)
-                                .width(Length::Fixed(140.0)),
-                            button(text(if is_light_theme { "Light" } else { "Dark" }).size(12))
-                                .padding([4, 10])
-                                .style(panel_btn_inactive)
-                                .on_press(FerriteBrowserMessage::ToggleTheme),
-                        ]
-                        .spacing(8)
-                        .align_y(iced::Alignment::Center),
-                    )
-                    .padding([4, PANEL_PADDING])
-                    .into(),
-                    container(
-                        column![
-                            text("Default zoom for new tabs")
-                                .size(12)
-                                .color(palette.text_dim),
-                            row![
-                                zoom_preset_btn(75),
-                                zoom_preset_btn(100),
-                                zoom_preset_btn(125),
-                                zoom_preset_btn(150),
-                            ]
-                            .spacing(6),
-                        ]
-                        .spacing(6),
-                    )
-                    .padding([4, PANEL_PADDING])
-                    .into(),
-                ]
             }
         };
 
@@ -6473,6 +6377,11 @@ pub fn view(state: &FerriteBrowser) -> Element<'_, FerriteBrowserMessage> {
     // Wrap browser viewport + optional agent sidebar in a horizontal row.
     let main_content: Element<FerriteBrowserMessage> = if let Some(library) = library_panel {
         iced::widget::row![content, library]
+            .width(Length::Fill)
+            .height(Length::Fill)
+            .into()
+    } else if state.show_settings_panel {
+        iced::widget::row![content, settings_panel::view(state)]
             .width(Length::Fill)
             .height(Length::Fill)
             .into()
@@ -7022,25 +6931,21 @@ pub fn launch() -> iced::Result {
                 None => Task::none(),
             });
 
-            let mut state = FerriteBrowser::default();
-            // T-224/T-229: construct the real ModelProvider here, at actual
-            // app startup — never inside `FerriteBrowser::default()` itself
-            // (kept test-safe/R7, see that impl's own comment) — and only
-            // once, since `try_real_model_provider()` does a real OS-keyring
-            // lookup that a test must never trigger even indirectly.
-            if let Some((provider, config)) = try_real_model_provider() {
-                state.model_tag_small = config.tag(ModelTier::Small).to_string();
-                state.model_tag_main = config.tag(ModelTier::Main).to_string();
-                state.model_cache_dir = Some(config.cache_dir.display().to_string());
-                state.model_provider = provider;
-            } else {
-                eprintln!(
-                    "[ferrite-ui] no ModelProvider configured/reachable (FERRITE_MODEL_SMALL/\
-                     FERRITE_MODEL_MAIN unset, or no Ollama/Gemini credential found) — the \
-                     fingerprint's may_use layer and the live agent loop will both fail to \
-                     empty/fail closed rather than run against a real model"
-                );
-            }
+            // T-224/T-229: connect the real ModelProvider here, at actual app
+            // startup — never inside `FerriteBrowser::default()` itself (kept
+            // test-safe/R7, see that impl's own comment). The Settings
+            // drawer's saved choice is read from the data directory, the key
+            // from the environment or the OS keyring, and the exported
+            // variables still win over the file, exactly as they always did.
+            // A failure leaves the app on "No model connected"; it never
+            // stops it starting.
+            let mut state = FerriteBrowser {
+                settings: settings_panel::SettingsState::for_launch(
+                    ferrite_agent::chat::default_data_dir(),
+                ),
+                ..FerriteBrowser::default()
+            };
+            settings_panel::connect_saved(&mut state);
             // C3d: bookmarks/downloads real-path resolution and the one-time
             // bookmarks load — both only ever happen here, at real app
             // startup, never inside `FerriteBrowser::default()` (same
@@ -7142,7 +7047,7 @@ pub fn launch() -> iced::Result {
 // `FerriteBrowser::default()` never does either, so `update()` is directly
 // testable with a plain `FerriteBrowser` and no window, matching the
 // directive's "no rendering needed" requirement. `FerriteBrowser::default()`
-// also never calls `try_real_model_provider()` (that only happens in
+// also never reads the real keyring (`SettingsState::for_launch` only runs in
 // `launch()`, the real app entry point — see that impl's own comment), so
 // every test's `model_provider` is `MockProvider`, scripted with nothing —
 // R7 holds even for the tests below that do trigger a `tokio::task::spawn`.
@@ -7216,51 +7121,38 @@ mod tests {
         DryRunRecord::new(task.session_id, task.task_id)
     }
 
-    // ── R7: no automated test call reaches a live ModelProvider ──────────
+    // ── R7: no automated test call reaches the real keyring ──────────────
 
-    /// Mirrors `ferrite-eval::harness::no_automated_test_calls_try_real_provider`
-    /// (same technique, scoped to this crate's one source file): scans this
-    /// module's own source for every non-comment, non-definition call site
-    /// of `try_real_model_provider(` and fails if more than the one real
-    /// caller (`launch()`) exists. `FerriteBrowser::default()` itself never
-    /// names the function at all (it constructs `MockProvider` inline —
-    /// see that impl), so this test's job is only to catch a future edit
-    /// that accidentally adds a second call site somewhere a test could
-    /// reach.
+    /// `SettingsState::for_launch` is the one place the app reads the real OS
+    /// keyring and the process environment (`Default` and `load_from` use an
+    /// in-memory vault and an empty environment). Mirrors
+    /// `ferrite-eval::harness::no_automated_test_calls_try_real_provider`
+    /// (same technique): this crate's non-test source must call it exactly
+    /// once, from `launch()`, and no source file may call it from a test, so
+    /// a keychain prompt or a developer's exported variables can never reach
+    /// `cargo test` (R7).
     #[test]
-    fn no_automated_test_calls_try_real_model_provider_outside_launch() {
-        const NEEDLE: &str = "try_real_model_provider(";
-        let src = include_str!("lib.rs");
-        let mut real_call_sites = 0;
-        for (i, line) in src.lines().enumerate() {
-            let trimmed = line.trim_start();
-            if trimmed.starts_with("//") || trimmed.starts_with("///") {
-                continue;
-            }
-            let mut search_from = 0;
-            while let Some(rel) = line[search_from..].find(NEEDLE) {
-                let idx = search_from + rel;
-                let preceded_by_ident_char = line[..idx]
-                    .chars()
-                    .next_back()
-                    .is_some_and(|c| c.is_alphanumeric() || c == '_');
-                let is_definition = line[..idx].trim_end().ends_with("fn");
-                let in_string_literal = line[..idx].matches('"').count() % 2 == 1;
-                if !preceded_by_ident_char && !is_definition && !in_string_literal {
-                    real_call_sites += 1;
-                    assert!(
-                        line.contains("try_real_model_provider()"),
-                        "line {}: unexpected call shape: {line}",
-                        i + 1
-                    );
-                }
-                search_from = idx + NEEDLE.len();
-            }
-        }
+    fn only_launch_builds_the_settings_state_that_reads_the_real_keyring() {
+        const NEEDLE: &str = "SettingsState::for_launch(";
+        let calls = |src: &str| {
+            src.lines()
+                .filter(|l| {
+                    let t = l.trim_start();
+                    !t.starts_with("//") && l.contains(NEEDLE)
+                })
+                .count()
+        };
+        let lib = include_str!("lib.rs");
+        let lib_non_test = &lib[..lib.find("#[cfg(test)]\nmod tests").unwrap_or(lib.len())];
+        assert_eq!(calls(lib_non_test), 1, "exactly one call site (launch)");
+        // The panel module defines it and documents it; none of its own
+        // tests (everything from `mod tests` down) may call it.
+        let panel = include_str!("settings_panel.rs");
+        let panel_tests = &panel[panel.find("#[cfg(test)]\nmod tests").expect("tests")..];
         assert_eq!(
-            real_call_sites, 1,
-            "expected exactly one real call site (launch()) — found {real_call_sites}; a new \
-             one would risk a live OS-keyring lookup reaching cargo test (R7)"
+            calls(panel_tests),
+            0,
+            "no settings test may read the real keyring"
         );
     }
 

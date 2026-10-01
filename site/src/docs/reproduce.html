@@ -1,0 +1,62 @@
+<!--
+title: Reproduce it
+order: 7
+group: Evaluation
+summary: Re-run Ferrite's whole evaluation offline with two commands, regenerate the corpus, and run the optional live-provider experiment.
+-->
+<p class="lede">The evaluation is meant to be re-run, not taken on trust. The default path needs no network, no API key and no GPU, and it is deterministic: the same corpus in produces the same numbers out, apart from wall-clock timing fields.</p>
+
+<h2>What you need</h2>
+<ul>
+  <li>A recent Rust toolchain. Optionally <a href="https://github.com/casey/just" rel="noopener"><code>just</code></a>; every recipe below is a one-line <code>cargo</code> command you can run directly.</li>
+  <li>The repository: <code>git clone https://github.com/rayanjainn/Ferrite-Browser</code>.</li>
+  <li>Nothing else. The evaluation crate is Servo-free, so none of this builds the browser engine.</li>
+</ul>
+
+<h2>Run the evaluation</h2>
+<pre><code>$ just eval
+# or:
+$ cargo run -p ferrite-eval --example eval</code></pre>
+<p>This runs every case under all four modes (the 938-case corpus, 3,488 executions), appends one entry per execution to a hash-chained audit log, verifies the chain, and writes the report to <code>target/eval-report/</code>:</p>
+<dl class="defs">
+  <dt>EVAL_REPORT.md</dt><dd>The metrics tables: per-mode, per-tier, mode-pair tests with Holm correction and effect sizes, the consent-policy sweep.</dd>
+  <dt>eval_report.csv</dt><dd>One row per execution, for your own analysis.</dd>
+  <dt>audit.db</dt><dd>The audit log the run produced; its chain is verified as part of the run.</dd>
+</dl>
+
+<h2>Run the runtime-guard experiment</h2>
+<pre><code>$ just guard-eval
+# or:
+$ cargo run -p ferrite-eval --example guard_eval</code></pre>
+<p>Runs the compromised real run against a dry run that cannot see the attack, with each action checked by the guard. It writes <code>target/eval-report/GUARD_REPORT.md</code>: attacks that succeed without and with the guard, per stratum, and the benign tasks it blocked.</p>
+
+<h2>Run the test suite</h2>
+<pre><code>$ just test
+# or:
+$ cargo test --workspace</code></pre>
+<p>This includes the component red-team suites (sanitizer, scopes, rule layer, guard, dry run, audit-log tamper matrix) and the corpus validation. It needs no network and no key; a test that would touch a live provider is marked <code>#[ignore]</code> and runs only on request (<code>just test-live</code>).</p>
+
+<h2>Inspect a single case</h2>
+<pre><code>$ cargo run -p ferrite-eval --example inspect_case -- \
+    crates/ferrite-eval/tests/corpus/c11_offscreen_scope_escalation.json</code></pre>
+<p>Runs one case file under every mode it defines and prints each layer's caught or missed verdict, the final outcome, and whether that matches what the case's authored ground truth implies. It is the quickest way to see <em>why</em> a particular attack was or was not contained.</p>
+
+<h2>Regenerate the corpus</h2>
+<pre><code>$ python3 scripts/gen_redteam_corpus.py</code></pre>
+<p>Writes the 909 generated cases to <code>crates/ferrite-eval/tests/corpus_redteam/</code> from the matrix described in <a href="{{ROOT}}docs/evaluation.html#the-corpus">Evaluation</a>. Labels come from the capability lowering table, not from running the defense. <code>corpus_redteam_validate</code> checks the table and every task's capability set against the real code.</p>
+
+<h2>Try a defense mode in the app</h2>
+<p>The defense mode is read once at startup from <code>FERRITE_DEFENSE</code>: <code>on</code> (the default), <code>off</code>, <code>sanitizer_only</code> or <code>loop_only</code>. These are the same four conditions the evaluation compares, so you can reproduce the contrast on a page you control.</p>
+
+<h2>The optional live-provider run</h2>
+<p>With a model configured, the fingerprint's prediction layer makes real network calls instead of running rules-only:</p>
+<pre><code>$ FERRITE_MODEL_SMALL=&lt;a tag your account serves&gt; \
+  FERRITE_MODEL_MAIN=&lt;a tag your account serves&gt; \
+  OLLAMA_API_KEY=&lt;your key&gt; \
+  cargo run -p ferrite-eval --example eval</code></pre>
+<p>This run is <strong>not</strong> reproducible byte for byte: a live model's answer is not pinned the way a scripted corpus is. It is reported separately and is never blended into the headline numbers. <code>just models</code> lists the tags your key can reach.</p>
+
+<div class="callout note">
+  <h4>What “reproduced” should mean</h4>
+  <p>Reproducing the default run confirms the <em>computation</em>: that the stated corpus, run through the stated code, yields the stated numbers. It does not confirm that the corpus is representative of real attacks. For that, the right next step is a held-out corpus written by someone who has not read the defense.</p>
+</div>

@@ -449,6 +449,12 @@ pub(crate) fn view_agent_sidebar(state: &FerriteBrowser) -> Element<'_, FerriteB
     let reviewing = state.pending_diff.is_some();
 
     let mut items: Vec<Element<FerriteBrowserMessage>> = vec![view_header(state), sep()];
+    // With no model connected the agent cannot act; say so, with the button
+    // that fixes it, before anything else in the panel.
+    if let Some(banner) = super::settings_panel::connect_banner(state) {
+        items.push(container(banner).padding(PANEL_PADDING).into());
+        items.push(sep());
+    }
     if let Some(notice) = &state.panel_notice {
         items.push(view_notice(notice, palette));
         items.push(sep());

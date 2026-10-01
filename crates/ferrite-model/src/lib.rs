@@ -66,6 +66,7 @@ pub mod provider;
 pub mod request;
 pub mod response;
 pub mod secret;
+pub mod settings;
 pub mod testing;
 pub mod trace;
 
@@ -78,4 +79,5 @@ pub use laya_governor::{Gate, LaneGovernor, Paused};
 pub use provider::{ModelProvider, ModelTier, ProviderCapabilities, ProviderId};
 pub use request::{CompletionRequest, Message, Role, SamplingOptions};
 pub use response::{CompletionResponse, Provenance, TokenUsage};
-pub use secret::{OsKeyring, SecretStore, Token};
+pub use secret::{MemoryVault, OsKeyring, SecretStore, SecretVault, Token};
+pub use settings::{Connection, KeySource, LayeredEnv, ModelPair, ModelSettings, ProviderChoice};

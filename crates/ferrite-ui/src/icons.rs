@@ -104,6 +104,8 @@ pub enum Icon {
     Copy,
     /// Agent panel: delete a chat from the history list.
     Trash,
+    /// The toolbar's Settings toggle: model provider, API key, appearance.
+    Settings,
 }
 
 // C3c left a note here that a bookmark/star icon was drawn but deliberately
@@ -113,9 +115,8 @@ pub enum Icon {
 // invariant rules out `#[allow(dead_code)]` as the way around that. C3d is
 // that real call site (`lib.rs`'s bookmark-star toggle in the address bar):
 // `BookmarkOutline`/`BookmarkFilled` are added above, used, and tested. A
-// dedicated settings/gear glyph is still withheld for the same reason —
-// C3d's settings surface (the Library panel's Settings tab) uses a plain
-// text tab label instead, so a gear icon would have no real call site yet.
+// dedicated settings/gear glyph was withheld for the same reason, and has
+// the same kind of call site now: the toolbar's Settings button.
 
 /// The embedded SVG bytes for `kind` — a pure mapping, kept separate from
 /// [`icon`] so it's testable without spinning up Iced at all (mirrors this
@@ -156,6 +157,7 @@ pub fn icon_bytes(kind: Icon) -> &'static [u8] {
         Icon::ChevronDown => include_bytes!("../assets/icons/chevron-down.svg"),
         Icon::Copy => include_bytes!("../assets/icons/copy.svg"),
         Icon::Trash => include_bytes!("../assets/icons/trash.svg"),
+        Icon::Settings => include_bytes!("../assets/icons/settings.svg"),
     }
 }
 
@@ -180,7 +182,7 @@ pub fn icon<'a, Message: 'a>(kind: Icon, size: f32, color: Color) -> Element<'a,
 mod tests {
     use super::*;
 
-    const ALL: [Icon; 33] = [
+    const ALL: [Icon; 34] = [
         Icon::Back,
         Icon::Forward,
         Icon::Reload,
@@ -214,6 +216,7 @@ mod tests {
         Icon::ChevronDown,
         Icon::Copy,
         Icon::Trash,
+        Icon::Settings,
     ];
 
     /// Every icon variant embeds real, well-formed SVG data — catches a

@@ -115,6 +115,116 @@ impl SecretStore for MapSecretStore {
     }
 }
 
+/// A store a person can put keys into and take them out of — what the
+/// Settings screen needs, which [`SecretStore`] (read-only, so a test or a
+/// CLI path can never write by omission) deliberately does not offer.
+pub trait SecretVault: SecretStore {
+    /// Stores `secret` under `service`/`account`, replacing any earlier one.
+    ///
+    /// # Errors
+    ///
+    /// [`ModelError::Config`] when the secret is blank or the backing store
+    /// refuses it (no keyring service on this machine, a locked keychain).
+    /// The message never contains the secret.
+    fn set(&self, service: &str, account: &str, secret: &str) -> Result<(), ModelError>;
+
+    /// Removes the secret under `service`/`account`. Removing one that is not
+    /// there is not an error: the caller wanted it gone and it is.
+    ///
+    /// # Errors
+    ///
+    /// [`ModelError::Config`] when the backing store refuses.
+    fn delete(&self, service: &str, account: &str) -> Result<(), ModelError>;
+}
+
+impl SecretVault for OsKeyring {
+    fn set(&self, service: &str, account: &str, secret: &str) -> Result<(), ModelError> {
+        if secret.trim().is_empty() {
+            return Err(ModelError::Config("an empty API key was not saved".into()));
+        }
+        let entry = keyring::Entry::new(service, account)
+            .map_err(|e| keyring_refused("open the system keyring", &e))?;
+        entry
+            .set_password(secret.trim())
+            .map_err(|e| keyring_refused("save the key to the system keyring", &e))
+    }
+
+    fn delete(&self, service: &str, account: &str) -> Result<(), ModelError> {
+        let entry = keyring::Entry::new(service, account)
+            .map_err(|e| keyring_refused("open the system keyring", &e))?;
+        match entry.delete_credential() {
+            Ok(()) | Err(keyring::Error::NoEntry) => Ok(()),
+            Err(e) => Err(keyring_refused(
+                "remove the key from the system keyring",
+                &e,
+            )),
+        }
+    }
+}
+
+fn keyring_refused(doing: &str, e: &keyring::Error) -> ModelError {
+    ModelError::Config(format!(
+        "could not {doing}: {e}. Set the key as an environment variable instead \
+         (see the Settings screen's note)."
+    ))
+}
+
+/// A writable in-memory store, for tests and for the browser's default (a
+/// test must never touch a developer's login keychain, and a freshly
+/// constructed browser must not either until `launch()` says so).
+#[derive(Default)]
+pub struct MemoryVault(std::sync::Mutex<BTreeMap<(String, String), String>>);
+
+impl MemoryVault {
+    /// An empty vault.
+    #[must_use]
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    fn lock(&self) -> std::sync::MutexGuard<'_, BTreeMap<(String, String), String>> {
+        // A poisoned lock only means a test thread panicked while holding it;
+        // the map itself is still a valid map.
+        self.0
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+    }
+}
+
+impl std::fmt::Debug for MemoryVault {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        // The count, never a value — and not the account names either.
+        write!(f, "MemoryVault(<{} secret(s)>)", self.lock().len())
+    }
+}
+
+impl SecretStore for MemoryVault {
+    fn get(&self, service: &str, account: &str) -> Option<String> {
+        self.lock()
+            .get(&(service.to_string(), account.to_string()))
+            .cloned()
+    }
+}
+
+impl SecretVault for MemoryVault {
+    fn set(&self, service: &str, account: &str, secret: &str) -> Result<(), ModelError> {
+        if secret.trim().is_empty() {
+            return Err(ModelError::Config("an empty API key was not saved".into()));
+        }
+        self.lock().insert(
+            (service.to_string(), account.to_string()),
+            secret.trim().to_string(),
+        );
+        Ok(())
+    }
+
+    fn delete(&self, service: &str, account: &str) -> Result<(), ModelError> {
+        self.lock()
+            .remove(&(service.to_string(), account.to_string()));
+        Ok(())
+    }
+}
+
 /// A store that never has anything — the explicit way to say "environment
 /// only", used by the CLI's offline paths so no code path can reach a real
 /// keyring by omission.
@@ -234,5 +344,54 @@ mod tests {
     #[test]
     fn the_null_store_never_returns_anything() {
         assert_eq!(NoSecretStore.get(KEYRING_SERVICE, VAR), None);
+    }
+
+    #[test]
+    fn a_memory_vault_stores_replaces_and_removes() {
+        let vault = MemoryVault::new();
+        assert_eq!(vault.get("svc", "acct"), None);
+        vault.set("svc", "acct", "  first  ").expect("stores");
+        assert_eq!(
+            vault.get("svc", "acct").as_deref(),
+            Some("first"),
+            "trimmed"
+        );
+        vault.set("svc", "acct", "second").expect("replaces");
+        assert_eq!(vault.get("svc", "acct").as_deref(), Some("second"));
+        vault.delete("svc", "acct").expect("removes");
+        assert_eq!(vault.get("svc", "acct"), None);
+        vault
+            .delete("svc", "acct")
+            .expect("removing nothing is fine");
+    }
+
+    #[test]
+    fn a_blank_key_is_refused_and_not_stored() {
+        let vault = MemoryVault::new();
+        assert!(vault.set("svc", "acct", "   ").is_err());
+        assert_eq!(vault.get("svc", "acct"), None);
+    }
+
+    #[test]
+    fn a_memory_vault_prints_neither_secrets_nor_names() {
+        let vault = MemoryVault::new();
+        vault
+            .set("svc", "OLLAMA_API_KEY", "sk-very-secret")
+            .unwrap();
+        let shown = format!("{vault:?}");
+        assert!(!shown.contains("sk-very-secret"), "{shown}");
+        assert!(!shown.contains("OLLAMA_API_KEY"), "{shown}");
+    }
+
+    #[test]
+    fn a_vault_key_is_found_by_the_same_resolution_the_providers_use() {
+        let vault = MemoryVault::new();
+        vault.set(KEYRING_SERVICE, VAR, "from-the-vault").unwrap();
+        assert_eq!(
+            resolve(&MapEnv::new(), &vault, VAR)
+                .expect("found")
+                .expose(),
+            "from-the-vault"
+        );
     }
 }
