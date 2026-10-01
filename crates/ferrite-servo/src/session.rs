@@ -278,6 +278,11 @@ pub fn audit_guard_decision(primitive: &str, origin: Option<&str>, allowed: bool
 #[cfg(feature = "servo")]
 const SVG_COMPAT_JS: &str = include_str!("svg_compat.js");
 
+/// Defines web interfaces Servo lacks that real sites test for; see the
+/// script's own header.
+#[cfg(feature = "servo")]
+const WEB_COMPAT_JS: &str = include_str!("web_compat.js");
+
 #[cfg(feature = "servo")]
 mod inner {
     use std::cell::RefCell;
@@ -473,6 +478,7 @@ mod inner {
                 .get_or_insert_with(|| {
                     let manager = servo::UserContentManager::new(servo);
                     manager.add_script(Rc::new(servo::UserScript::from(super::SVG_COMPAT_JS)));
+                    manager.add_script(Rc::new(servo::UserScript::from(super::WEB_COMPAT_JS)));
                     Rc::new(manager)
                 })
                 .clone()
@@ -1718,23 +1724,32 @@ mod user_agent_tests {
 
 #[cfg(all(test, feature = "servo"))]
 mod svg_compat_tests {
-    use super::SVG_COMPAT_JS;
+    use super::{SVG_COMPAT_JS, WEB_COMPAT_JS};
 
     #[test]
-    fn the_svg_compat_script_parses_under_node() {
+    fn the_compat_scripts_parse_under_node() {
+        for (name, source) in [
+            ("svg_compat.js", SVG_COMPAT_JS),
+            ("web_compat.js", WEB_COMPAT_JS),
+        ] {
+            parses_under_node(name, source);
+        }
+    }
+
+    fn parses_under_node(name: &str, source: &str) {
         let node_ok = std::process::Command::new("node")
             .arg("--version")
             .output()
             .map(|o| o.status.success())
             .unwrap_or(false);
         if !node_ok {
-            eprintln!("SKIPPED: `node` is not installed; svg_compat.js not machine-checked");
+            eprintln!("SKIPPED: `node` is not installed; {name} not machine-checked");
             return;
         }
         let dir = std::env::temp_dir().join(format!("ferrite-svg-compat-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
-        let path = dir.join("svg_compat.js");
-        std::fs::write(&path, SVG_COMPAT_JS).unwrap();
+        let path = dir.join(name);
+        std::fs::write(&path, source).unwrap();
         let out = std::process::Command::new("node")
             .arg("--check")
             .arg(&path)
