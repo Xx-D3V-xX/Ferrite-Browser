@@ -37,6 +37,9 @@ use super::record::DryRunRecord;
 /// with `ferrite_agent::engine_bridge::EngineToolExecutor` (added alongside
 /// this trait — see `docs/handoffs/b01.md`), rather than this crate
 /// depending on `ferrite-agent` to provide the bridge itself.
+// async_trait's expansion trips `double_must_use` on newer clippy (1.99); the
+// lint is about generated code, not anything written here.
+#[allow(clippy::double_must_use)]
 #[async_trait::async_trait]
 pub trait DryRunDriver: Send + Sync {
     /// Drives one turn to completion (or as far as it gets before the
