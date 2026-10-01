@@ -274,6 +274,10 @@ pub fn audit_guard_decision(primitive: &str, origin: Option<&str>, allowed: bool
     let _ = (primitive, origin, allowed);
 }
 
+/// Makes inline SVG icons keep their colours; see the script's own header.
+#[cfg(feature = "servo")]
+const SVG_COMPAT_JS: &str = include_str!("svg_compat.js");
+
 #[cfg(feature = "servo")]
 mod inner {
     use std::cell::RefCell;
@@ -385,6 +389,10 @@ mod inner {
     // and share it (via `Clone`, which is a cheap `Rc` bump) across all tabs.
     thread_local! {
         static SERVO_ENGINE: RefCell<Option<Servo>> = const { RefCell::new(None) };
+        /// The one set of injected page content (see `svg_compat.js`), shared
+        /// by every tab.
+        static USER_CONTENT: RefCell<Option<Rc<servo::UserContentManager>>> =
+            const { RefCell::new(None) };
     }
 
     thread_local! {
@@ -452,7 +460,23 @@ mod inner {
     /// [`HeadlessServoSession`] must have been dropped first: each holds a
     /// handle to the engine, and shutdown happens when the last one goes.
     pub fn shutdown_engine() {
+        // The content manager talks to the engine when it is dropped, so it
+        // goes first.
+        USER_CONTENT.with(|cell| drop(cell.borrow_mut().take()));
         SERVO_ENGINE.with(|cell| drop(cell.borrow_mut().take()));
+    }
+
+    /// The page content every tab is given: the SVG compatibility script.
+    fn user_content_manager(servo: &Servo) -> Rc<servo::UserContentManager> {
+        USER_CONTENT.with(|cell| {
+            cell.borrow_mut()
+                .get_or_insert_with(|| {
+                    let manager = servo::UserContentManager::new(servo);
+                    manager.add_script(Rc::new(servo::UserScript::from(super::SVG_COMPAT_JS)));
+                    Rc::new(manager)
+                })
+                .clone()
+        })
     }
 
     /// Return (or lazily create) the process-wide `Servo` engine.
@@ -492,6 +516,19 @@ mod inner {
                     dom_notification_enabled: true,
                     dom_async_clipboard_enabled: true,
                     dom_webgl2_enabled: true,
+                    // Seen failing on GitHub (`e.adoptedStyleSheets is undefined`,
+                    // dozens of times while its components start) and Google
+                    // (`document.fonts.load is not a function`): both ship off.
+                    // Each was checked to *work* before being kept: a half-built
+                    // feature is worse than a missing one, because pages detect
+                    // it and skip their fallback. Tried and left off: container
+                    // queries (the property parses but `@container` rules are
+                    // dropped), writing modes (the layout engine panics on a page
+                    // mixing horizontal and vertical text) and multi-column
+                    // layout (no effect). See `docs/TO-DO.md` T-264.
+                    dom_adoptedstylesheet_enabled: true,
+                    dom_fontface_enabled: true,
+                    layout_css_attr_enabled: true,
                     ..servo::Preferences::default()
                 };
                 // Some sites (Google's sign-in among them) decide whether a
@@ -685,16 +722,13 @@ mod inner {
             _parent: servo::WebView,
             request: servo::CreateNewWebViewRequest,
         ) {
-            match HeadlessServoSession::assemble(
-                1280,
-                700,
-                |_servo, rendering_context, delegate| {
-                    request
-                        .builder(rendering_context)
-                        .delegate(delegate)
-                        .build()
-                },
-            ) {
+            match HeadlessServoSession::assemble(1280, 700, |servo, rendering_context, delegate| {
+                request
+                    .builder(rendering_context)
+                    .delegate(delegate)
+                    .user_content_manager(user_content_manager(servo))
+                    .build()
+            }) {
                 Ok(session) => POPUP_SESSIONS.with(|q| q.borrow_mut().push(session)),
                 Err(e) => eprintln!("[ferrite-session] cannot open a page-requested tab: {e}"),
             }
@@ -794,6 +828,7 @@ mod inner {
             let session = Self::assemble(width, height, |servo, rendering_context, delegate| {
                 WebViewBuilder::new(servo, rendering_context)
                     .delegate(delegate)
+                    .user_content_manager(user_content_manager(servo))
                     .url(url::Url::parse("about:blank").unwrap())
                     .build()
             })?;
@@ -1648,5 +1683,49 @@ mod user_agent_tests {
     fn a_blank_override_is_no_override() {
         set_user_agent(Some("   ".to_string()));
         assert_eq!(USER_AGENT_OVERRIDE.lock().unwrap().clone(), None);
+    }
+}
+
+#[cfg(all(test, feature = "servo"))]
+mod svg_compat_tests {
+    use super::SVG_COMPAT_JS;
+
+    #[test]
+    fn the_svg_compat_script_parses_under_node() {
+        let node_ok = std::process::Command::new("node")
+            .arg("--version")
+            .output()
+            .map(|o| o.status.success())
+            .unwrap_or(false);
+        if !node_ok {
+            eprintln!("SKIPPED: `node` is not installed; svg_compat.js not machine-checked");
+            return;
+        }
+        let dir = std::env::temp_dir().join(format!("ferrite-svg-compat-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("svg_compat.js");
+        std::fs::write(&path, SVG_COMPAT_JS).unwrap();
+        let out = std::process::Command::new("node")
+            .arg("--check")
+            .arg(&path)
+            .output()
+            .expect("node runs");
+        let _ = std::fs::remove_dir_all(&dir);
+        assert!(
+            out.status.success(),
+            "{}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+    }
+
+    #[test]
+    fn the_script_only_writes_inline_style_on_svg_content() {
+        // The contract in the script's header, pinned: it must not touch the
+        // page outside <svg> subtrees, and must not run twice on one element.
+        assert!(SVG_COMPAT_JS.contains("__ferriteSvgFixed"));
+        assert!(SVG_COMPAT_JS.contains("querySelectorAll(SHAPES)"));
+        assert!(!SVG_COMPAT_JS.contains("document.body.appendChild"));
+        assert!(!SVG_COMPAT_JS.contains("fetch("));
+        assert!(!SVG_COMPAT_JS.contains("XMLHttpRequest"));
     }
 }

@@ -599,3 +599,18 @@ absent in this Servo and are listed by the probe as gaps.
 
 **Not claimed.** That Google or GitHub will accept the sign-in: neither is reachable from the build environment, and what each keys on is unknown. That the compatible identity is a guarantee of anything. The next step is for someone to try it and report what the page says (T-262).
 
+## ADR-019 — Fix engine rendering gaps with verified switches and one narrow, visible script
+
+**Date:** 2026-10-01. **Status:** live; the effect on GitHub's own pages is unverified (T-264). **Amends ADR-018:** its sentence that a page "sees nothing Ferrite-specific" with the agent idle is no longer true, because one compatibility script is now injected.
+
+**Context.** After ADR-018 the owner could sign in to GitHub but its layout and icons were broken, and other sites looked wrong. Reproduced in the real engine: Servo paints an inline `<svg>` from the serialized element alone, so any colour that comes from a stylesheet or is inherited (the normal way sites colour icons) paints black, invisible on a dark theme; and two JavaScript APIs that sites call during start-up (`adoptedStyleSheets`, `document.fonts.load`) did not exist, which the owner's console log showed throwing repeatedly.
+
+**Decision.**
+
+1. **Enable a Servo switch only after measuring that the feature works.** `adoptedStyleSheets`, FontFace and `attr()` were enabled. Container queries (rules dropped), writing modes (the layout engine panics on mixed text) and multi-column layout (no effect) were tried and left off: a half-built feature is worse than a missing one, because pages detect it and skip their fallback.
+2. **One script, one job, visible.** `svg_compat.js` copies the colour styles an SVG's elements already resolve onto those same elements as inline `style`. It touches only `<svg>` subtrees and only inline style, makes no network request, adds no behaviour of its own, is injected through Servo's supported `UserContentManager` (not by patching the engine), and is documented in its own header. Its footprint on a page is a `data-svg-compat` attribute on each SVG, inline styles on SVG shapes and a `window.__ferriteSvgCompat` flag; it does not change what the agent's page script reads.
+3. **Regression-test the painted result.** The bug is only visible in pixels, so `probe-web-api` samples a painted pixel, and the check was confirmed to fail with the script disabled.
+4. **No site-specific hacks.** The script knows nothing about GitHub. Gaps that have no switch (`aspect-ratio` on block boxes, `:has()`, `@container`, `mask-image`, `backdrop-filter`, subgrid, ...) are listed in T-264 and left for the engine, or for a polyfill proven on its own, rather than papered over blind.
+
+**Not claimed.** That GitHub now renders correctly: it is unreachable from the build environment, and the gaps above will keep breaking some of its pages. That the script is free: a page with very many icons is processed in slices of 40, but its cost on a large real page was not measured. That icons recoloured after load (hover, theme switch) are updated.
+

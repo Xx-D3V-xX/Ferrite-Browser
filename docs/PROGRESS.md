@@ -4817,3 +4817,9 @@ The first macOS run of the Settings branch failed one `ferrite-ui` test (`openin
 
 **Deliberately not done, and why:** forging hardware, canvas, renderer, plugin or client-hint values, pretending to be Chrome, hiding automation, mimicking another browser's TLS. These are evasion rather than compatibility (ADR-018). **Not verified:** whether Google or GitHub now accept a sign-in; this environment cannot reach either.
 
+## 2026-10-01 — coordinator — Broken layout and icons on GitHub: reproduced and partly fixed (T-264)
+
+**Reported by the owner (with a screenshot and a console log):** Google still blocks sign-in; GitHub signs in but its CSS and layout are broken, and many sites look wrong.
+
+**Found, by reproducing in the real engine:** inline SVG icons coloured by CSS paint black (Servo paints from the element's own markup only), which is the empty icon boxes on a dark theme; and `adoptedStyleSheets` and `document.fonts.load` were missing (both in the owner's console). **Done:** an SVG compatibility script injected through `UserContentManager` (read-all-then-write, 40 per slice), `adoptedStyleSheets`, FontFace and `attr()` enabled. **Tried and rejected after measuring:** container queries, writing modes (panics), multi-column. **Verified:** a pixel check in `probe-web-api` that fails with the script off and passes with it, 12 colouring cases, 602 script-inserted icons on a dark page, the input, profile (set then get) and digest probes, 1,191 workspace tests, clippy for the workspace and with the `servo` feature, fmt, `cargo deny`, `cargo machete`. **Not fixed, no switch exists:** `aspect-ratio` on block boxes (computes to 0 height), `:has()`, `@container`, `mask-image`, `backdrop-filter`, subgrid and more (T-264 has the list). **Not verified:** GitHub itself. Google sign-in is unchanged and unverified (T-262).
+

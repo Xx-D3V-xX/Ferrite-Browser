@@ -160,7 +160,9 @@ fn page() -> String {
         ));
     }
     format!(
-        "<!doctype html><html><head><meta charset=utf-8><title>web api probe</title></head><body>\
+        "<!doctype html><html><head><meta charset=utf-8><title>web api probe</title>\
+         <style>html,body{{margin:0}}.svgprobe{{position:absolute;left:0;top:0;width:40px;height:40px;fill:rgb(0,200,0)}}</style></head><body>\
+         <svg class=svgprobe viewBox=\"0 0 10 10\"><rect width=10 height=10 /></svg>\
          <script>{sync}{asyncs}window.__sync=R;window.__optional=O;Promise.all(ps).then(function(){{window.__async=A}});</script>\
          </body></html>"
     )
@@ -271,6 +273,37 @@ fn main() {
     }
 
     let mut failed = 0;
+
+    // Painted output, not a JavaScript value: Servo draws an inline SVG from
+    // the markup alone, so a colour that comes from a stylesheet (here
+    // `fill` on the `svgprobe` class) paints black unless the compatibility
+    // script (`svg_compat.js`) has copied it onto the element. Sample the
+    // middle of the square the page drew.
+    spin_for(&mut session, 500);
+    session.sync_and_read();
+    match session.get_frame() {
+        Some((w, _h, px)) => {
+            let at = ((20 * w + 20) * 4) as usize;
+            let (r, g, b) = (px[at], px[at + 1], px[at + 2]);
+            let ok = g > 150 && r < 80 && b < 80;
+            if !ok {
+                failed += 1;
+            }
+            println!(
+                "{} SVG painted with a stylesheet fill{}",
+                if ok { "PASS" } else { "FAIL" },
+                if ok {
+                    String::new()
+                } else {
+                    format!(": pixel is rgb({r}, {g}, {b}), not green")
+                }
+            );
+        }
+        None => {
+            failed += 1;
+            println!("FAIL SVG painted with a stylesheet fill: no frame to read");
+        }
+    }
     for (name, verdict) in results(&mut session, "__sync")
         .into_iter()
         .chain(results(&mut session, "__async"))
