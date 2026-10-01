@@ -1,0 +1,32 @@
+{
+  "ClipboardRead": [
+    "clipboard.read"
+  ],
+  "ClipboardWrite": [
+    "clipboard.write"
+  ],
+  "ScopedRead": [
+    "cookie.read",
+    "storage.read"
+  ],
+  "WebDownload": [
+    "download"
+  ],
+  "WebInteract": [
+    "click",
+    "dom.write",
+    "form.fill",
+    "scroll",
+    "wait"
+  ],
+  "WebNavigate": [
+    "navigate",
+    "tab.close",
+    "tab.open"
+  ],
+  "WebRead": [
+    "dom.query",
+    "dom.read",
+    "screenshot"
+  ]
+}

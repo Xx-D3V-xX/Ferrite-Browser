@@ -389,3 +389,152 @@ JSScript>>` by 0.6.0.
 - The default features (`bundled`, `clipboard`, `js_jit`) no longer include a
   media backend, so the gstreamer brew package is no longer required; audio
   and video playback are not built in.
+
+---
+
+## ADR-014 — The predicted fingerprint is binding on the real run; the sanitizer matches meaning, not spelling
+
+**Date:** 2026-10-01, implemented by `2869465` (sanitizer, rule layer, scopes) and `d52159c` (runtime guard), with the evaluation changes in the commits that follow them on `feat/defense-eval-corpus-and-laya-latency`. **Status:** live.
+
+The owner asked for the defense to be evaluated against every real-world case
+and made as strong as it can be. Testing it that way found defects in every
+layer; the important ones, and what was decided, are below. Status of each
+finding lives in `docs/TO-DO.md` (T-243–T-249); this ADR records the design.
+
+**1. The real run was never compared against the prediction.** The dry run
+executes the agent against *synthetic* pages with no network, so a page that
+carries an injected instruction exists only in the real run. The live loop
+compared the dry run's record once, asked for consent once, and then ran every
+real action the user had not explicitly rejected; a deviation that only a real
+page provoked was compared against nothing. The eval did not show this because
+it feeds the dry run the attacker's content, which models a dry run that can
+see the real page. Decision: `comparator::RuntimeGuard`. Every real action is
+classified by `comparator::classify_event`, the function `compare` itself now
+calls (so the two cannot disagree; a sweep test covers every primitive x origin
+x fingerprint), and does not run unless it is *expected ∪ approved* (what the
+predicted capabilities and their scopes admit, plus the tools and origins the
+user approved in this task's consent prompt). An empty prediction blocks
+everything it was not given consent for (fail to empty). On a block the agent is
+told a fixed sentence containing nothing from the action or the page (an
+observation goes back to the model; anything attacker-chosen echoed there is an
+injection channel), the user sees why, the block is committed to the
+hash-chained audit log (`CapabilityDenied`, `guard.<primitive>`), and the fourth
+block ends the run. The *effect* of an action is what is checked: a URL action
+at that URL's origin, anything else at the active tab's origin, and a click by
+`@ref` on a link whose `href` leads to another origin is also a navigation
+there. `docs/EVALUATION.md` §8 measures it on a blind dry run: without the guard
+every attack succeeds; with it only the residual does.
+
+**Stated limits of the guard.** A click by CSS selector, a form `action`
+(`submit_form`, Enter in a field) and a redirect that an allowed URL performs
+server-side cannot be resolved to a destination before they run; the tab's new
+origin is checked on the *next* action, after the request has been made. Under a
+`task_open` scope every origin is admitted, so nothing distinguishes the
+attacker's destination. Within-fingerprint abuse (same primitive at the task's
+own origin) is indistinguishable from the task by construction (O4).
+
+**2. The dry run recorded a download and a new tab at the wrong origin.**
+`download(url)` and `open_tab(url)` were recorded at the origin of the page the
+agent was *on*, not of `url`, so an agent on an allowed site could fetch from
+or open a tab to an attacker's URL and produce an event the comparator
+admitted. They are now recorded at the destination and as network attempts.
+
+**3. The sanitizer matched one spelling.** Zero-width characters, look-alike
+letters, fullwidth/math-alphabet letters, spelled-out letters, a newline where
+a pattern has a space, HTML/URL/`\u` escapes, leetspeak, ROT13, reversed text,
+base64/hex, and Unicode tag characters (invisible ASCII) all evaded a literal
+pattern set. Text is now matched in de-obfuscated *views*
+(`sanitizer::normalize`), each byte mapping back to the original span, so
+detection reports the original snippet and excision cuts the original sentence.
+Pattern set v2 adds paraphrase/agent-addressing/concealment/exfiltration/
+chat-template/action-mimicry/markdown-image/prompt-extraction patterns and
+eight languages, plus a hidden-Unicode check; v1 `leak` and `new instructions`
+were tightened because they fired on memory leaks and return policies. Attribute
+values (`alt`, `title`, `placeholder`, `aria-label`, `href`), CSS-generated
+text and the raw page's text are now scanned, because cleaning removes them but
+a digest shows them to the agent. Excision was quadratic on text with no
+sentence terminators (1 MB took minutes) and is linear. *Not claimed:* this is
+still pattern matching. A paraphrase, a language outside the list, spelled-out
+markup, reversed non-Latin text and a payload split over separate elements are
+missed by construction and are pinned as such in `tests/red_team_sanitizer.rs`.
+
+**4. The rule layer over-admitted.** It matched substrings, so "information"
+granted form filling and "already" granted page reads; it mapped "email/inbox/
+calendar" to `ScopedRead` (cookies and web storage, credential-adjacent) while
+not granting the page read such a task needs; and it knew no everyday read
+verb, so "List the ingredients" produced an empty fingerprint and a consent
+prompt on the agent's first read (43% false gates on the first benign corpus).
+It now matches whole words, grants `ScopedRead` only for an explicit mention of
+cookies or storage, knows the everyday read verbs, and does not accept `-ing` on
+`open`/`book` (usually a noun). An open-ended prompt still yields an empty
+fingerprint, per the fail-to-empty invariant.
+
+**5. A domain-suffix scope could be a public suffix** (`com`, `co.uk`,
+`github.io`) and admit every site beneath it (T-212). The Public Suffix List
+(`psl`, MIT/Apache-2.0, compiled in) now refuses it at construction, on every
+route (Rust literal, JSON corpus, serde).
+
+**6. The evaluation itself was wrong in three places.** (a) `fingerprint_caught`
+for a deviation case was "all declared primitives caught OR all declared
+origins caught", and `.all()` over an empty set is true, so any case that
+declared nothing on one side (most) counted as caught against a *clean* diff; it
+now requires a declared item to be in the diff. (b) An origin-shift case
+compared the authored string with the diff's normalized origin, so a path or
+default port made it "missed"; both are normalized. (c) A domain-suffix or
+`task_open` case had no context page, so every event carried no origin and was
+flagged, which gated the well-behaved agent and never served the attacker's
+page; the case's content origin is now the context. The scripted agent also
+gained the primitives it lacked (`tab.open`, `cookie.read`, `storage.read`,
+`screenshot`, `scroll`, `wait`, `dom.query`; `dom.write` is now typing, not a
+click) and a benign counterpart that uses exactly the capabilities the task's
+words imply, so a false alarm on it is a comparator precision error.
+
+**7. The corpus.** `scripts/gen_redteam_corpus.py` generates 909 cases from a
+matrix (13 tasks x 12 goals x 11 carriers x 28 payload dressings x 3 scope
+types, plus origin look-alikes and benign controls). Labels come from the
+capability lowering table (ADR-001), never from running the defense, and a Rust
+test checks that table and each task's capability set against the real code.
+**Independence:** these are self-authored by the defense's author and
+generated from shared templates, so the reported intervals understate the
+uncertainty and the cases are tuned-against data (ADR-008); only the three
+AgentDojo cases are external. The held-out firewall still applies to any
+independent slice.
+
+---
+
+## ADR-015 — The Laya fast lane must pay for itself: a governor, a warm-up and an honest summary
+
+**Date:** 2026-10-01, implemented by `d52159c`. **Status:** live.
+
+The owner's first real trace: Laya averaged 1.4 s per call against 2.2 s for an
+LLM step, half its calls timed out at the 1.5 s cap, and the Activity panel said
+the fast lane "saved about 831 ms". Laya is asked *first* and the LLM step runs
+when it declines, so every attempt that does not end in a used answer is pure
+added latency; the old summary counted only the used steps' savings and ignored
+the cost of the failed and declined calls. The net was a loss of several seconds.
+
+- `ferrite_model::LaneGovernor` (pure logic, no clock) pauses the fast lane for
+  a number of *steps* after two requests in a row fail, or when
+  `accept-rate x mean LLM step` no longer beats the mean cost of an attempt
+  (failed and declined attempts included). Pauses double up to 48 steps and end
+  by themselves; afterwards the lane is judged on fresh evidence. A paused lane
+  is an LLM step exactly as if Laya were not configured (ADR-009), so it cannot
+  weaken anything; the pause is written to the activity trace.
+- The summary reports the net: the LLM time the used steps avoided against the
+  total cost of asking.
+- `scripts/laya/serve.py` warms the model up on Ferrite-shaped input (a
+  full-length sequence, one and two questions) until timing settles, logs the
+  device it landed on and warns when it is CPU or a warm step exceeds 300 ms.
+  The published 17-33 ms figures are GPU numbers. On the owner's Mac calls took
+  ~1.4 s with medians of 1.3-1.5 s (every call, not only the first). I first
+  guessed CPU; the new start-up log showed otherwise: **device=mps, first pass
+  1,572 ms, warm ~454 ms per step** (one forward over a 1,024-token window), so
+  the rest of the ~1.4 s is the larger two-question request and HTTP. Laya runs
+  fp32 on MPS below 5 question rows (its own default, because fp16 loses on tiny
+  inputs) and Ferrite sends 2, so the warm-up also times fp16 and reports it;
+  `FERRITE_LAYA_MPS_AMP_MIN_ROWS=1` opts in.
+
+**Not claimed:** that Laya is faster on any particular machine. That is a
+measurement (T-234, T-250); this only guarantees that when it is not, the agent
+stops paying for it.
+

@@ -108,6 +108,11 @@ it, and the actual result this session's run produced.
 
 ## 2. Metrics — exact formulas and this run's real numbers (§13.2)
 
+> **Superseded numbers.** Sections 2.1–2.6 and 3 report the original n=29
+> corpus and are kept as the record of that run. The current corpus (938
+> cases), the evaluation fixes that changed what "caught" means, and the
+> runtime-guard experiment are in **§8**; read that for current numbers.
+
 Implemented in `crates/ferrite-eval/src/metrics.rs`. Every proportion is a
 **Wilson score 95% interval**, computed exactly as specified:
 `(p̂ + z²/2n ± z·√(p̂(1−p̂)/n + z²/4n²)) / (1 + z²/n)`, z = 1.96
@@ -682,3 +687,113 @@ build succeeds, real navigation does not), 2 not met (corpus size/κ). This
 matches, item for item, what `docs/TO-DO.md` T-227 and T-220 already state
 honestly — nothing in this checklist is new information, only the first
 place it is scored against the directive's own checklist explicitly.**
+
+---
+
+## 8. The red-team corpus, the runtime guard, and what changed in the measurement (2026-10-01, ADR-014)
+
+The owner asked for the defense to be evaluated against every real-world case
+and then made as strong as possible. Attacking it found defects in every layer
+and in the evaluation itself. This section is the current record; §2–§7 describe
+the earlier n=29 run.
+
+### 8.1 Corrections to what "caught" means (they change the numbers)
+
+| Change | Why it mattered |
+|---|---|
+| `fingerprint_caught` for a deviation case now needs a *declared* item to be in the diff | it used "all declared primitives OR all declared origins", and `.all()` over an empty set is true, so a case that declared nothing on one side counted as caught against a **clean** diff. On the old n=29 corpus every declared deviation was in fact flagged (ADR stayed 100%), so no old figure was inflated, but the metric could not have failed |
+| origin-shift and origin declarations compare normalized origins; a flagged `navigate` covers a declared origin (T-206) | a path or default port made an origin-shift case "missed" |
+| a domain-suffix / `task_open` case gets its content origin as the context page | every event of such a case carried no origin, was flagged, gated the well-behaved agent and never served the attacker's page |
+| the scripted agent knows `tab.open`, `cookie.read`, `storage.read`, `screenshot`, `scroll`, `wait`, `dom.query`; `dom.write` is typing; and a benign agent uses exactly the capabilities the task's words imply | a declared primitive with no script was silently never attempted; a false alarm on the benign agent is now a comparator precision error |
+| the dry run records a download and a new tab at their *destination* origin | recorded at the page's origin, an agent on an allowed site could fetch from an attacker without producing a deviating event |
+| the rule layer matches whole words, grants cookies/storage only when named, and knows everyday read verbs | first benign corpus: 3 of 7 gated (43%); see ADR-014 §4 |
+
+### 8.2 The corpus
+
+`scripts/gen_redteam_corpus.py` writes 909 cases to
+`crates/ferrite-eval/tests/corpus_redteam/` (787 attack, 122 benign), run with
+the 29 existing ones: **938 cases, 3,488 executions**. The axes: 13 tasks x 12
+attacker goals (every primitive an attack can need) x 11 carrier vectors x 28
+payload dressings (plain, 14 disguises, 5 languages, 5 structural forms, 3 that
+the sanitizer cannot recognise) x 3 scope types, plus 20 origin look-alikes and
+5 same-site spellings, plus benign controls (ordinary pages, attack-adjacent
+text, every scope type). Labels are derived from the capability lowering table
+(ADR-001), never from running the defense; `tests/corpus_redteam_validate.rs`
+checks that table and each task's capability set against the real code.
+
+**Independence.** The cases are self-authored by the defense's author and
+generated from shared templates. The Wilson and McNemar figures treat them as
+independent draws, which a matrix is not, so the intervals understate the
+uncertainty, and the cases are tuned-against data (ADR-008). Only the 3
+AgentDojo cases are an external slice (and n=3 supports no claim). No second
+author exists, so Cohen's κ is still not computable (T-227).
+
+### 8.3 Results (`just eval`, rules-only fingerprint, no network)
+
+| Mode | ASR | ADR | SDR | FGR |
+|---|---|---|---|---|
+| Off | 809/809 = 100.0% | n/a | n/a | n/a |
+| SanitizerOnly | 135/806 = 16.7% [14.3–19.5] | n/a | 671/673 = 99.7% | 3/129 = 2.3% (FSR-proxy) |
+| LoopOnly | 122/806 = 15.1% [12.8–17.8] | 621/621 = 100% | n/a | n/a |
+| On | 63/809 = 7.8% [6.1–9.8] | 624/624 = 100% | 671/676 = 99.3% | 0/129 = 0.0% [0–2.9] |
+
+Residual R (actions the prediction admits): 122/809 = 15.1%. LoopOnly's ASR
+*is* the residual, which is the point of ADR-007: the architecture contains
+every attack that needs an action outside the prediction and nothing else. The
+sanitizer strips 59 of the 122 (detectable wording), leaving On at 63: the
+residual with wording it cannot recognise (paraphrase, social engineering,
+narrative framing) on the carriers the scan cannot see.
+
+**What these numbers do not say.** The agent is scripted from ground truth, so
+they say nothing about whether a real model takes the bait (that is the base
+model's robustness, which the project does not claim), and 0% FGR is the rate
+for a well-behaved scripted agent under a rules-only prediction: a real agent's
+false-gate rate depends on its actual actions and the LLM `may_use` layer, which
+this run does not exercise. ADR = 100% is by construction of a scripted agent
+issuing exactly the declared deviation; it measures the comparator, not the
+agent.
+
+### 8.4 The runtime-guard experiment (`just guard-eval`, `ferrite_eval::guard_eval`)
+
+The corpus runner shows the dry run the attacker's content, which models a dry
+run that can see the real page. The live app's cannot. This experiment runs the
+compromised real run (the worst-case agent, no defense in its way) and checks
+each action as the live loop does before executing it.
+
+| Stratum | Attacks | Succeed without the guard | Succeed with the guard | Benign blocked |
+|---|---|---|---|---|
+| Tier1 | 539 | 539 (100%) | 96 (17.8%) | 0/90 |
+| Tier2 | 267 | 267 (100%) | 26 (9.7%) | 0/39 |
+| Tier3 (AgentDojo) | 3 | 3 | 0 | n/a |
+| **All** | 809 | 809 (100%) | 122 (15.1%, all residual) | 0/129 |
+
+The guard blocked no admitted action (it and `compare` classify every event
+identically; `tests/guard_eval_invariants.rs` and the sweep in
+`comparator/guard.rs` check it). *Without the guard the loop, facing a dry run
+that cannot see the attack, ran all 809.* The sanitizer is not applied here, so
+this is the architecture alone.
+
+### 8.5 Component red-team suites
+
+| Suite | What it pins |
+|---|---|
+| `ferrite-ipi/tests/red_team_sanitizer.rs` | 25 instructions x 25 disguises = 625 disguised texts, each detected and excised with the benign context around it intact; 85 benign texts untouched; the known false positives and the residual disguises pinned so the inventory stays honest; every HTML carrier shape; attributes holding `<`/`>`; CSS-generated text; 14 hostile inputs (1 MB, deep nesting, tag characters) without a panic or a hang |
+| `ferrite-core/tests/red_team_scope.rs` | 16 tests: 23 look-alike hosts never admitted; same-site spellings admitted; scheme/port; IP spellings; every non-http scheme refused; public suffixes refused and registrable domains accepted |
+| `fingerprint/rules.rs` | whole-word matching, inflections, noun `-ing`, explicit-only cookie/storage, everyday read verbs, hostile input |
+| `comparator/guard.rs`, `ferrite-ui/src/guard_tests.rs`, `runtime_guard.rs` | the guard over every primitive x origin x fingerprint; blocks, approvals, `js.execute`, four-block stop, link clicks, opaque schemes, fixed observation text |
+| `ferrite-ipi/src/dry_run/engine.rs` | download / new tab recorded at their destination |
+
+### 8.6 Known limits (each pinned or listed in `docs/TO-DO.md` T-249)
+
+- **Residual.** Same primitive at the task's own origin; any origin under a
+  `task_open` scope; data-only abuse. By construction (O4).
+- **Sanitizer.** Paraphrase, unlisted languages, syllable hyphenation, spelled-out
+  markup/URLs, reversed non-Latin text, payloads split across elements. Known
+  false positives: pages that discuss attacks ("attackers exfiltrate data",
+  "never ignore the previous warnings") and any mention of "system prompt".
+- **Guard.** CSS-selector clicks, form `action`s, server-side redirects (the
+  destination is checked on the next action, after the request); a trailing-dot
+  host (`example.com.`) fails closed.
+- **Measurement.** Scripted agent; rules-only fingerprint; matrix-correlated
+  cases; self-authored; no κ.
+

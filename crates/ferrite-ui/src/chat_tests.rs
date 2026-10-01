@@ -1065,6 +1065,7 @@ async fn live_run_ready_starts_the_loop_from_the_seed_not_the_bare_prompt() {
         FerriteBrowserMessage::LiveRunReady {
             run_id: 1,
             prompt: "go".into(),
+            guard: None,
         },
     );
     let live = state.live_loop.as_ref().expect("started");

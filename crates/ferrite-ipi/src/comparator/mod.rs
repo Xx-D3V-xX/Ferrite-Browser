@@ -214,10 +214,12 @@
 mod consent;
 mod diff;
 mod expected;
+mod guard;
 
 pub use consent::ConsentDecision;
 pub use diff::{Attribution, FingerprintDiff};
 pub use expected::ExpectedFingerprint;
+pub use guard::{GuardVerdict, RuntimeGuard};
 
 use ferrite_core::scope::Specificity;
 use ferrite_core::{Capability, Origin};
@@ -225,93 +227,115 @@ use ferrite_core::{Capability, Origin};
 use crate::dry_run::DryRunRecord;
 use crate::tool_decision::ToolId;
 
-/// Compares `expected` against what the agent actually did, per the new
-/// contract: per-capability origin scoping, admission-rank attribution, and
-/// a T-206-safe classification into exactly one bucket per event. See the
-/// [module docs](self) for the full reasoning behind every branch below.
+/// How one observed event relates to an expected fingerprint: the single
+/// classification both the post-hoc [`compare`] (over a dry-run record) and the
+/// live [`RuntimeGuard`] (one action at a time, before it runs) are built on,
+/// so the two can never disagree about the same event.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum EventVerdict {
+    /// An expected capability's scope admitted the event.
+    Justified(Attribution),
+    /// Some expected capability names the primitive, but none admits this
+    /// origin (including an opaque origin such as `about:blank`, `data:`).
+    OutOfScopeOrigin(String),
+    /// No expected capability names the primitive at all, or it is
+    /// unconditionally unscopable (`js.execute`), or no origin was recorded.
+    ExtraPrimitive(ToolId),
+}
+
+/// Classifies one event. See the [module docs](self) for the reasoning behind
+/// every branch; `compare` and `RuntimeGuard::check` both call only this.
 #[must_use]
-pub fn compare(expected: &ExpectedFingerprint, actual: &DryRunRecord) -> FingerprintDiff {
-    let lowered = expected.lowered();
-    let mut diff = FingerprintDiff::default();
+pub fn classify_event(
+    expected: &ExpectedFingerprint,
+    primitive: ferrite_core::Primitive,
+    origin: Option<&str>,
+) -> EventVerdict {
+    let tool_id = ToolId::new(primitive.as_str());
 
-    for event in &actual.tool_events {
-        let primitive = event.primitive;
-        let tool_id = ToolId::new(primitive.as_str());
+    // ADR-003, first branch, no exceptions: any Execute-class primitive
+    // is unconditionally a deviation, before any origin is even parsed.
+    if !primitive.action_class().is_scopable() {
+        return EventVerdict::ExtraPrimitive(tool_id);
+    }
 
-        // ADR-003, first branch, no exceptions: any Execute-class primitive
-        // is unconditionally a deviation, before any origin is even parsed.
-        if !primitive.action_class().is_scopable() {
-            diff.extra_primitives.insert(tool_id);
+    // T-211: no recorded origin at all — nothing to check any scope
+    // against, and nothing reportable as an offending origin either.
+    let Some(origin_str) = origin else {
+        return EventVerdict::ExtraPrimitive(tool_id);
+    };
+
+    // T-211: an origin that does not parse as `http`/`https` is opaque —
+    // unadmittable by any scope by definition — but it IS a reportable
+    // string, so it is an out-of-scope origin under its literal form.
+    let Ok(parsed) = Origin::parse(origin_str) else {
+        return EventVerdict::OutOfScopeOrigin(origin_str.to_string());
+    };
+
+    // A primitive with no expected-side (`ScopablePrimitive`) counterpart at
+    // all — js.execute is already handled above, so in practice every
+    // primitive reaching this line has one, but the fallible bridge stays
+    // explicit rather than assumed.
+    let Some(scopable) = primitive.as_scopable() else {
+        return EventVerdict::ExtraPrimitive(tool_id);
+    };
+
+    // The admission-rank scan: every lowered triple whose primitive matches
+    // is a candidate; among candidates that admit `origin`, keep the one with
+    // the greatest Specificity (T-002 — this `Ord` comparison is the actual
+    // consumption `admission_rank_is_actually_consumed_not_just_computed`
+    // checks for).
+    let mut best: Option<(Specificity, Capability)> = None;
+    let mut primitive_expected_anywhere = false;
+    for (lowered_primitive, scope, capability) in expected.lowered() {
+        if lowered_primitive != scopable {
             continue;
         }
-
-        // T-211: no recorded origin at all — nothing to check any scope
-        // against, and nothing reportable as an offending origin either.
-        let Some(origin_str) = event.origin.as_deref() else {
-            diff.extra_primitives.insert(tool_id);
-            continue;
-        };
-
-        // T-211: an origin that does not parse as `http`/`https` is opaque —
-        // unadmittable by any scope by definition — but it IS a reportable
-        // string, so it goes into out_of_scope_origins under its literal
-        // form rather than extra_primitives.
-        let Ok(origin) = Origin::parse(origin_str) else {
-            diff.out_of_scope_origins.insert(origin_str.to_string());
-            continue;
-        };
-
-        // A primitive with no expected-side (`ScopablePrimitive`) counterpart
-        // at all — js.execute is already handled above (its action class
-        // isn't scopable), so in practice every primitive reaching this line
-        // has one, but the fallible bridge stays explicit rather than
-        // assumed.
-        let Some(scopable) = primitive.as_scopable() else {
-            diff.extra_primitives.insert(tool_id);
-            continue;
-        };
-
-        // The admission-rank scan: every lowered triple whose primitive
-        // matches is a candidate; among candidates that admit `origin`,
-        // keep the one with the greatest Specificity (T-002 — this `Ord`
-        // comparison is the actual consumption `admission_rank_is_actually_consumed_not_just_computed`
-        // checks for).
-        let mut best: Option<(Specificity, Capability)> = None;
-        let mut primitive_expected_anywhere = false;
-        for (primitive, scope, capability) in &lowered {
-            if *primitive != scopable {
-                continue;
-            }
-            primitive_expected_anywhere = true;
-            if let Some(rank) = scope.admits(&origin) {
-                if best.is_none_or(|(best_rank, _)| rank > best_rank) {
-                    best = Some((rank, *capability));
-                }
-            }
-        }
-
-        match best {
-            Some((specificity, capability)) => {
-                diff.attributions.push(Attribution {
-                    tool: tool_id,
-                    origin: origin_str.to_string(),
-                    capability,
-                    specificity,
-                });
-            }
-            // T-206: these two outcomes are mutually exclusive by
-            // construction — `primitive_expected_anywhere` partitions the
-            // primitive space independently of `origin`, so exactly one
-            // branch below ever runs for a given event.
-            None if primitive_expected_anywhere => {
-                diff.out_of_scope_origins.insert(origin_str.to_string());
-            }
-            None => {
-                diff.extra_primitives.insert(tool_id);
+        primitive_expected_anywhere = true;
+        if let Some(rank) = scope.admits(&parsed) {
+            if best.is_none_or(|(best_rank, _)| rank > best_rank) {
+                best = Some((rank, capability));
             }
         }
     }
 
+    match best {
+        Some((specificity, capability)) => EventVerdict::Justified(Attribution {
+            tool: tool_id,
+            origin: origin_str.to_string(),
+            capability,
+            specificity,
+        }),
+        // T-206: these two outcomes are mutually exclusive by construction —
+        // `primitive_expected_anywhere` partitions the primitive space
+        // independently of `origin`, so exactly one branch below ever runs
+        // for a given event.
+        None if primitive_expected_anywhere => {
+            EventVerdict::OutOfScopeOrigin(origin_str.to_string())
+        }
+        None => EventVerdict::ExtraPrimitive(tool_id),
+    }
+}
+
+/// Compares `expected` against what the agent actually did, per the new
+/// contract: per-capability origin scoping, admission-rank attribution, and
+/// a T-206-safe classification into exactly one bucket per event. See the
+/// [module docs](self) for the full reasoning behind every branch
+/// ([`classify_event`]).
+#[must_use]
+pub fn compare(expected: &ExpectedFingerprint, actual: &DryRunRecord) -> FingerprintDiff {
+    let mut diff = FingerprintDiff::default();
+    for event in &actual.tool_events {
+        match classify_event(expected, event.primitive, event.origin.as_deref()) {
+            EventVerdict::Justified(attribution) => diff.attributions.push(attribution),
+            EventVerdict::OutOfScopeOrigin(origin) => {
+                diff.out_of_scope_origins.insert(origin);
+            }
+            EventVerdict::ExtraPrimitive(tool) => {
+                diff.extra_primitives.insert(tool);
+            }
+        }
+    }
     diff
 }
 

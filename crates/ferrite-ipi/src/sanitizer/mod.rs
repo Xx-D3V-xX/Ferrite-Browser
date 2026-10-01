@@ -110,6 +110,7 @@ pub mod config;
 pub mod detect;
 pub mod excise;
 pub mod html;
+mod normalize;
 mod patterns;
 
 pub use config::{SanitizerConfig, PROVISIONAL_FALSE_STRIP_RATE_CEILING};
@@ -120,7 +121,8 @@ pub use detect::{
 pub use excise::{excise_injections_html, excise_injections_text, excise_value};
 pub use html::{sanitize_html, sha256_hex, SanitizedPage};
 pub use patterns::{
-    PatternDef, PatternSet, GENERAL_PATTERNS, PATTERN_SET_VERSION, SCRIPT_PATTERNS,
+    PatternDef, PatternSet, GENERAL_PATTERNS, HIDDEN_UNICODE_PATTERN_ID, PATTERN_SET_VERSION,
+    SCRIPT_PATTERNS,
 };
 
 pub use config::run;

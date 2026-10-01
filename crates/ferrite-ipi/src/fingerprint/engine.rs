@@ -244,7 +244,7 @@ mod tests {
             Case {
                 prompt: "Check my inbox and summarise new emails",
                 model_labels: &[],
-                expect_must_use: &[Capability::ScopedRead, Capability::WebRead],
+                expect_must_use: &[Capability::WebRead],
                 expect_may_use: &[],
             },
             Case {
@@ -438,7 +438,7 @@ mod tests {
             after: std::time::Duration::from_secs(1),
         });
         let fp = generate_fingerprint(&mock, "test-tag", "check my inbox").await;
-        assert_eq!(fp.must_use(), &BTreeSet::from([Capability::ScopedRead]));
+        assert_eq!(fp.must_use(), &BTreeSet::from([Capability::WebRead]));
         assert!(fp.may_use().is_empty());
     }
 

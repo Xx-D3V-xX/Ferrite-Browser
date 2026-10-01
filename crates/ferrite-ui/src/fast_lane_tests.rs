@@ -222,6 +222,37 @@ async fn low_confidence_or_done_falls_back_to_the_llm() {
 }
 
 #[tokio::test]
+async fn a_slow_laya_pauses_itself_and_later_steps_send_no_request() {
+    // Every request outlasts the timeout, as on the owner's machine.
+    let slow = serve(200, "{}".into(), Duration::from_millis(400)).await;
+    let mut config = LayaConfig::new(&slow.base_url);
+    config.timeout = Duration::from_millis(100);
+    let shared = inputs_with(config, MockProvider::new());
+
+    // Two timeouts in a row open the breaker ...
+    for _ in 0..2 {
+        assert!(agent_run::try_fast_lane(&shared).await.is_none());
+    }
+    let sent = slow.requests.lock().unwrap().len();
+    assert_eq!(sent, 2);
+
+    // ... and the next steps skip Laya entirely: no request, straight to the LLM.
+    for _ in 0..3 {
+        assert!(agent_run::try_fast_lane(&shared).await.is_none());
+    }
+    assert_eq!(
+        slow.requests.lock().unwrap().len(),
+        sent,
+        "a paused fast lane must not send requests"
+    );
+    // The pause is explained in the activity trace, not silent.
+    assert!(ferrite_model::trace::global()
+        .snapshot()
+        .iter()
+        .any(|e| e.stage == "fast lane paused" && e.note.contains("timed out")));
+}
+
+#[tokio::test]
 async fn every_laya_failure_is_none_never_an_error_or_a_panic() {
     // HTTP failure.
     let down = serve(503, "{}".into(), Duration::ZERO).await;

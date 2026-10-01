@@ -705,6 +705,9 @@ pub fn build_step_request(
 #[derive(Debug, Clone)]
 pub struct LayaStepDecider {
     client: LayaClient,
+    /// Stops asking when asking costs more than it saves (ADR-015). Shared by
+    /// every clone of the decider.
+    governor: std::sync::Arc<ferrite_model::LaneGovernor>,
 }
 
 impl LayaStepDecider {
@@ -713,7 +716,16 @@ impl LayaStepDecider {
     pub fn new(config: LayaConfig) -> Self {
         Self {
             client: LayaClient::new(config),
+            governor: std::sync::Arc::default(),
         }
+    }
+
+    /// The governor that decides whether the fast lane is worth asking (see
+    /// [`ferrite_model::LaneGovernor`]). The loop reports LLM step timings and
+    /// gate verdicts to it.
+    #[must_use]
+    pub fn governor(&self) -> &ferrite_model::LaneGovernor {
+        &self.governor
     }
 
     /// `Ok(None)` when `FERRITE_LAYA_URL` is unset: Laya is disabled and the
@@ -731,6 +743,36 @@ impl LayaStepDecider {
     #[must_use]
     pub fn config(&self) -> &LayaConfig {
         self.client.config()
+    }
+
+    /// Reports the gate verdict for the answer just received: `used` means it
+    /// was executed instead of an LLM step. May pause the lane.
+    pub fn note_verdict(&self, used: bool) {
+        self.trace_pause(self.governor.note_verdict(used));
+    }
+
+    /// Reports how long an LLM step took, the thing the fast lane competes with.
+    pub fn note_llm_step(&self, ms: u64) {
+        self.governor.note_llm_step(ms);
+    }
+
+    /// Puts a pause in the activity trace, so the Activity panel says why
+    /// Laya went quiet instead of it looking like a failure.
+    fn trace_pause(&self, paused: Option<ferrite_model::Paused>) {
+        let Some(paused) = paused else { return };
+        let mut event = ferrite_model::trace::TraceEvent::new(
+            ferrite_model::trace::TraceBackend::Laya,
+            "fast lane paused",
+            "",
+        );
+        event.note = format!(
+            "paused for the next {} step(s): {}",
+            paused.steps, paused.reason
+        );
+        event.response = "Those steps run on the LLM exactly as if Laya were off; Laya is tried \
+                          again afterwards and judged on fresh evidence."
+            .to_string();
+        ferrite_model::trace::global().record(event);
     }
 
     /// Whether the server answers its health probe (500 ms cap).
@@ -766,13 +808,17 @@ impl LayaStepDecider {
         if step.nothing_to_decide() {
             return Ok(None);
         }
+        // A paused lane sends nothing: the step is an LLM step, exactly as if
+        // Laya were not configured.
+        if self.governor.permit() == ferrite_model::Gate::Skip {
+            return Ok(None);
+        }
         let started = Instant::now();
-        let response = self
-            .client
-            .systemone("browser step", step.request())
-            .await?;
+        let result = self.client.systemone("browser step", step.request()).await;
         let latency_ms = u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX);
-        step.interpret(&response, latency_ms).map(Some)
+        let paused = self.governor.note_call(latency_ms, result.is_ok());
+        self.trace_pause(paused);
+        step.interpret(&result?, latency_ms).map(Some)
     }
 
     /// Cheap second opinion on "does this request depend on the currently

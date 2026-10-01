@@ -415,6 +415,7 @@ pub(crate) async fn try_fast_lane(inputs: &FastLaneInputs) -> Option<(FastAction
     let fast = match lane {
         FastLane::Act(action) => {
             record_verdict(inputs, &decision, &format!("accepted: {action:?}"));
+            inputs.decider.note_verdict(true);
             action
         }
         FastLane::Fallback(reason) => {
@@ -423,10 +424,14 @@ pub(crate) async fn try_fast_lane(inputs: &FastLaneInputs) -> Option<(FastAction
                 &decision,
                 &format!("fell back to the LLM: {reason}"),
             );
+            inputs.decider.note_verdict(false);
             return None;
         }
         FastLane::NeedsText { target_ref } => {
-            let field = inputs.digest.element(target_ref)?;
+            let Some(field) = inputs.digest.element(target_ref) else {
+                inputs.decider.note_verdict(false);
+                return None;
+            };
             let started = std::time::Instant::now();
             let text = tokio::time::timeout(
                 FIELD_TEXT_TIMEOUT,
@@ -454,6 +459,7 @@ pub(crate) async fn try_fast_lane(inputs: &FastLaneInputs) -> Option<(FastAction
                             "accepted: type into @{target_ref} (text from the small model, {waited} ms)"
                         ),
                     );
+                    inputs.decider.note_verdict(true);
                     FastAction::TypeText { target_ref, text }
                 }
                 None => {
@@ -462,6 +468,7 @@ pub(crate) async fn try_fast_lane(inputs: &FastLaneInputs) -> Option<(FastAction
                         &decision,
                         &format!("fell back to the LLM: no text for @{target_ref} ({waited} ms)"),
                     );
+                    inputs.decider.note_verdict(false);
                     return None;
                 }
             }

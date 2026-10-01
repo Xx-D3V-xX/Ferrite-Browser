@@ -218,6 +218,7 @@ mod agent_panel;
 mod agent_run;
 mod icons;
 mod page_input;
+mod runtime_guard;
 use activity_panel::AuditTab;
 use icons::{icon, Icon};
 
@@ -1233,6 +1234,11 @@ pub struct LiveAgentLoop {
     /// Signature of the page as of the last fast-lane digest, to tell Laya
     /// whether the previous action changed the page.
     last_page_sig: Option<u64>,
+    /// The predicted fingerprint plus the user's approvals, enforced on every
+    /// real action (ADR-014). `None` only when the defense is off for this run.
+    guard: Option<ferrite_ipi::comparator::RuntimeGuard>,
+    /// Actions the guard has blocked so far in this run.
+    guard_blocks: u32,
 }
 
 impl LiveAgentLoop {
@@ -1256,7 +1262,15 @@ impl LiveAgentLoop {
             history: Vec::new(),
             previous_fast: None,
             last_page_sig: None,
+            guard: None,
+            guard_blocks: 0,
         }
+    }
+
+    /// Enforces `guard` on every action of this run.
+    fn with_guard(mut self, guard: Option<ferrite_ipi::comparator::RuntimeGuard>) -> Self {
+        self.guard = guard;
+        self
     }
 }
 
@@ -1822,6 +1836,9 @@ pub enum FerriteBrowserMessage {
     LiveRunReady {
         run_id: u64,
         prompt: String,
+        /// The prediction to enforce on the real run; `None` when the defense
+        /// is off for this run.
+        guard: Option<Box<ferrite_ipi::comparator::RuntimeGuard>>,
     },
     /// One step's background model call returned the next `AgentAction` to
     /// take (or `Err` if the model call itself failed or was unparseable
@@ -2431,6 +2448,22 @@ pub fn update(
                 0,
             );
             let all_rejected = state.pending_decision.rejected.clone();
+            // What the user approved is allowed through the guard; everything
+            // else outside the prediction stays blocked.
+            let (approved_origin_items, approved_tools): (Vec<ToolId>, Vec<ToolId>) = state
+                .pending_decision
+                .approved
+                .iter()
+                .cloned()
+                .partition(|t| origin_item_origin(t).is_some());
+            let approved_origins: Vec<String> = approved_origin_items
+                .iter()
+                .filter_map(|t| origin_item_origin(t).map(str::to_string))
+                .collect();
+            let guard = state.pending_expected.clone().map(|expected| {
+                ferrite_ipi::comparator::RuntimeGuard::new(expected)
+                    .with_approvals(approved_tools, approved_origins)
+            });
             let rejected_origins: std::collections::HashSet<String> = all_rejected
                 .iter()
                 .filter_map(|t| origin_item_origin(t).map(str::to_string))
@@ -2456,7 +2489,7 @@ pub fn update(
             };
             state.run_id += 1;
             let run_id = state.run_id;
-            return start_live_loop(state, run_id, prompt, rejected, rejected_origins);
+            return start_live_loop(state, run_id, prompt, rejected, rejected_origins, guard);
         }
         FerriteBrowserMessage::ConsentCancelled => {
             activity::record(
@@ -2480,7 +2513,11 @@ pub fn update(
             return conclude_run(state, Outcome::Cancelled);
         }
         // ── Live agent loop (T-224) ──────────────────────────────────────────
-        FerriteBrowserMessage::LiveRunReady { run_id, prompt } => {
+        FerriteBrowserMessage::LiveRunReady {
+            run_id,
+            prompt,
+            guard,
+        } => {
             if run_id != state.run_id {
                 return Task::none();
             }
@@ -2490,6 +2527,7 @@ pub fn update(
                 prompt,
                 std::collections::HashSet::new(),
                 std::collections::HashSet::new(),
+                guard.map(|g| *g),
             );
         }
         FerriteBrowserMessage::AgentStepReady { run_id, action } => {
@@ -3111,9 +3149,11 @@ fn submit_task(state: &mut FerriteBrowser) -> Task<FerriteBrowserMessage> {
         let loop_outcome = engine.prepare_task(&ipi_task);
         let defense_mode = match &loop_outcome {
             LoopOutcome::Bypassed | LoopOutcome::RanSanitizerOnly { .. } => {
+                // Defense off / sanitizer-only: no prediction, so no guard.
                 let _ = event_tx.send(FerriteBrowserMessage::LiveRunReady {
                     run_id,
                     prompt: prompt.clone(),
+                    guard: None,
                 });
                 return;
             }
@@ -3179,6 +3219,10 @@ fn submit_task(state: &mut FerriteBrowser) -> Task<FerriteBrowserMessage> {
             .and_then(|url| ferrite_core::Origin::parse(url).ok());
         let expected = ExpectedFingerprint::from_fingerprint(&fingerprint, context_origin.as_ref());
         let diff = compare(&expected, &dry_record);
+        // The real run is held to the same prediction (ADR-014): the dry run
+        // saw only synthetic pages, so whatever an actual page provokes is
+        // checked here, action by action.
+        let guard = ferrite_ipi::comparator::RuntimeGuard::new(expected.clone());
         if !diff.is_clean() {
             let _ = event_tx.send(FerriteBrowserMessage::ConsentRequired {
                 diff,
@@ -3189,7 +3233,11 @@ fn submit_task(state: &mut FerriteBrowser) -> Task<FerriteBrowserMessage> {
         }
 
         // ── Real run ─────────────────────────────────────────────────
-        let _ = event_tx.send(FerriteBrowserMessage::LiveRunReady { run_id, prompt });
+        let _ = event_tx.send(FerriteBrowserMessage::LiveRunReady {
+            run_id,
+            prompt,
+            guard: Some(Box::new(guard)),
+        });
     });
     state.agent_handle = Some(handle);
     scroll_to_latest(state)
@@ -3276,9 +3324,49 @@ fn handle_agent_step(
         }
     }
 
-    let blocked = is_action_rejected(&action, &live.rejected, &live.rejected_origins);
+    // The predicted fingerprint is binding on the real run (ADR-014): an action
+    // that is neither expected nor approved is not executed. The guard runs
+    // first so a rejected-and-unexpected action is reported as the guard's
+    // (the stronger statement) and so every blocked action is audited.
+    let guard_block = live.guard.as_ref().and_then(|guard| {
+        let tab_url = state
+            .tab_urls
+            .get(state.active_tab)
+            .cloned()
+            .unwrap_or_default();
+        // Only a click by @ref needs the page: to see where a link leads.
+        let digest = match &action {
+            AgentAction::Click { selector } if selector.starts_with('@') => {
+                observe_active_page(state)
+            }
+            _ => None,
+        };
+        let effects = runtime_guard::action_effects(&action, &tab_url, digest.as_ref());
+        let verdict = guard.check_all(&effects);
+        let audited = effects.first().map_or_else(
+            || (primitive_of_action(&action).as_str(), None),
+            |(p, o)| (p.as_str(), o.as_deref()),
+        );
+        match &verdict {
+            ferrite_ipi::comparator::GuardVerdict::Block(_) => {
+                ferrite_servo::session::audit_guard_decision(audited.0, audited.1, false);
+            }
+            ferrite_ipi::comparator::GuardVerdict::Approved(_) => {
+                ferrite_servo::session::audit_guard_decision(audited.0, audited.1, true);
+            }
+            ferrite_ipi::comparator::GuardVerdict::Expected(_) => {}
+        }
+        (!verdict.allows()).then_some(verdict)
+    });
+    if guard_block.is_some() {
+        live.guard_blocks += 1;
+    }
+    let blocked_by_consent = is_action_rejected(&action, &live.rejected, &live.rejected_origins);
+    let blocked = blocked_by_consent || guard_block.is_some();
     let exec_started = std::time::Instant::now();
-    let observation = if blocked {
+    let observation = if guard_block.is_some() {
+        runtime_guard::BLOCKED_OBSERVATION.to_string()
+    } else if blocked_by_consent {
         "blocked by user consent".to_string()
     } else if agent_run::is_tab_action(&action) {
         // The borrowed engine wraps one externally-owned tab and cannot do tab
@@ -3298,7 +3386,9 @@ fn handle_agent_step(
         &serde_json::to_string(&action).unwrap_or_default(),
         &observation,
         !blocked && !observation.starts_with("error"),
-        if blocked {
+        if guard_block.is_some() {
+            "blocked by Ferrite's fingerprint guard"
+        } else if blocked {
             "blocked by user consent"
         } else if is_fast {
             "chosen by Laya"
@@ -3311,7 +3401,11 @@ fn handle_agent_step(
         icon: icon_for_action(&action),
         label: action_label(&action),
         detail: action_detail(&action),
-        result: observation.clone(),
+        // The user sees why, in the guard's words; the agent sees only the
+        // fixed `BLOCKED_OBSERVATION` (below, in `live.messages`).
+        result: guard_block
+            .as_ref()
+            .map_or_else(|| observation.clone(), runtime_guard::block_detail),
         blocked,
         fast: is_fast,
     });
@@ -3352,6 +3446,15 @@ fn handle_agent_step(
     )));
     trim_message_history(&mut live.messages);
     live.actions_taken.push(action);
+    if live.guard_blocks >= runtime_guard::MAX_GUARD_BLOCKS {
+        return conclude_run(
+            state,
+            Outcome::Stopped(
+                "the agent kept trying actions this task was not expected to need, so the run was stopped"
+                    .to_string(),
+            ),
+        );
+    }
     // The new step card slides in; keep the thread on the newest item.
     animate_item(
         state,
@@ -4923,6 +5026,7 @@ fn start_live_loop(
     prompt: String,
     rejected: std::collections::HashSet<ToolId>,
     rejected_origins: std::collections::HashSet<String>,
+    guard: Option<ferrite_ipi::comparator::RuntimeGuard>,
 ) -> Task<FerriteBrowserMessage> {
     state.agent_is_running = true;
     // The run's first message is the seed built at submit time (chat history,
@@ -4931,7 +5035,8 @@ fn start_live_loop(
     // both use the same seed.
     let goal = trusted_task_text(Some(&state.chat), &prompt);
     let first_message = state.pending_seed.take().unwrap_or(prompt);
-    let live = LiveAgentLoop::new(first_message, goal, rejected, rejected_origins);
+    let live =
+        LiveAgentLoop::new(first_message, goal, rejected, rejected_origins).with_guard(guard);
     spawn_next_step(state, run_id, live)
 }
 
@@ -4974,6 +5079,7 @@ fn spawn_next_step(
     // page can be read right now (the digest is taken on this thread, after
     // the previous action ran). Anything less and this step is exactly the
     // normal LLM step.
+    let laya_timing = state.laya.clone();
     let fast_inputs = state.laya.clone().and_then(|decider| {
         let digest = observe_active_page(state)?;
         let signature = agent_run::page_signature(&digest);
@@ -5011,8 +5117,17 @@ fn spawn_next_step(
             .with_label("agent step")
             .with_system_prompt(SYSTEM_PROMPT, SYSTEM_PROMPT_VERSION)
             .with_options(SamplingOptions::default().with_num_predict(AGENT_LOOP_NUM_PREDICT));
+        let llm_started = std::time::Instant::now();
+        let completion = provider.complete(request).await;
+        if let Some(decider) = &laya_timing {
+            // What the fast lane competes with; it decides whether asking
+            // Laya first is worth it (`LaneGovernor`).
+            decider.note_llm_step(
+                u64::try_from(llm_started.elapsed().as_millis()).unwrap_or(u64::MAX),
+            );
+        }
         let action =
-            match provider.complete(request).await {
+            match completion {
                 Ok(response) => serde_json::from_str::<AgentAction>(response.content.trim())
                     .map_err(|e| StepFailure::Malformed {
                         raw: response.content,
@@ -7028,6 +7143,8 @@ mod chat_tests;
 #[cfg(test)]
 mod fast_lane_tests;
 #[cfg(test)]
+mod guard_tests;
+#[cfg(test)]
 mod page_key_tests;
 
 #[cfg(test)]
@@ -7779,6 +7896,7 @@ mod tests {
             FerriteBrowserMessage::LiveRunReady {
                 run_id: 1,
                 prompt: "go".to_string(),
+                guard: None,
             },
         );
         assert!(
@@ -7822,6 +7940,7 @@ mod tests {
             FerriteBrowserMessage::LiveRunReady {
                 run_id: 1,
                 prompt: "go".to_string(),
+                guard: None,
             },
         );
         assert!(state.live_loop.is_some());

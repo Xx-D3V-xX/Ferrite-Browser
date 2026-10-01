@@ -4644,3 +4644,81 @@ and servo feature); 1000 tests, 0 failures; machete; deny; purge scripts.
 **Not verified:** that the Google Form no longer crashes, and what "File
 unavailable" is — no internet here; macOS; Servo 0.6.0 on his machine (first
 build will recompile SpiderMonkey, ~20-60 min).
+
+## 2026-10-01 — coordinator — evaluate the defense against every real-world case, then harden it; Laya that cost more than it saved
+
+**Asked by the owner:** the browser now works and is merged; the defense is
+the research, so write every attack and edge case that can happen, find what
+breaks, make the defense as strong as it can be, and look at why Laya (1.4 s per
+call, half of them timing out at 1.5 s) is slower than the LLM it should beat.
+Branch `feat/defense-eval-corpus-and-laya-latency`, three commits
+(`2869465`, `d52159c`, `aa30775`) plus this one.
+
+**What attacking it found (ADR-014, ADR-015; `docs/TO-DO.md` T-243–T-250):**
+
+1. **The predicted fingerprint was never enforced on the real run.** The dry
+   run executes on synthetic pages, so a page that carries an injection exists
+   only in the real run; the live loop compared the dry run once and then ran
+   everything the user had not rejected. The eval hid this because it feeds the
+   dry run the attacker's content. Fix: `RuntimeGuard` over the same
+   `classify_event` that `compare` uses. On a blind dry run: 809/809 attacks
+   succeed without it, 122/809 (all residual) with it, 0 of 129 benign runs
+   blocked, 0 admitted actions blocked.
+2. The dry run recorded a download and a new tab at the page's origin, not the
+   destination.
+3. The sanitizer matched one spelling (625 disguised instructions now detected
+   and excised, 85 benign texts untouched), missed attribute, CSS-generated and
+   raw-page text, was quadratic on text with no sentence terminators, and could
+   cut half a tag when an attribute held `>`.
+4. The rule layer over-admitted (substrings; "inbox" granted cookie access and
+   not the page read) and under-recognised (no everyday read verb: 43% of the
+   first benign corpus was gated).
+5. A domain-suffix scope could be `com` or `github.io` (T-212): refused by the
+   Public Suffix List.
+6. **The evaluation mis-measured:** a deviation case declaring nothing on one
+   side was "caught" against a clean diff (`.all()` over an empty set), origin
+   strings were compared un-normalized, and domain-suffix/`task_open` cases had
+   no context page. Numbers on the old n=29 corpus did not move (every declared
+   deviation really was flagged), but the metric could not have failed.
+7. Laya: the governor, the warm-up and the honest summary (ADR-015). The old
+   summary said "saved about 831 ms" for a run that lost about 6.5 s.
+
+**Corpus:** 909 generated cases (`scripts/gen_redteam_corpus.py`; 13 tasks x 12
+goals x 11 carriers x 28 dressings x 3 scopes, look-alike origins, benign
+controls) plus the 29 existing: 938 cases, 3,488 executions. Current numbers
+(`docs/EVALUATION.md` §8.3): On ASR 63/809 = 7.8%, LoopOnly 122/806 = 15.1%
+(the residual), ADR 100%, SDR 99.3%, FGR 0/129. **They are self-authored and
+matrix-generated, so the intervals understate the uncertainty and they are
+tuned-against data; the eval agent is scripted and the fingerprint rules-only,
+so none of it says whether a real model takes the bait or what a real agent's
+false-gate rate is.** The report now says so.
+
+**Verified (Linux, headless, no network):** `cargo fmt --check`; `cargo clippy
+--workspace --all-targets -D warnings` and `-p ferrite-servo --features servo`;
+`cargo test --workspace` 1,100 passed, 0 failed, 2 ignored; `just eval` (938
+cases, audit chain verifies); `just guard-eval`;
+`scripts/gen_redteam_corpus.py --check`; the Python server tests (25, against
+the real `laya` package, no torch); `cargo machete`; `cargo deny check` (`psl`
+is MIT/Apache-2.0). `cargo check -p ferrite-servo --features servo` (the
+audit-log hook is inside that feature).
+
+**Not verified:** the runtime guard on a real page or in the GUI (no internet,
+no display of a live injection; it is covered by unit tests over the real
+`update()` function and the eval); Laya on the owner's Mac (the device and warm
+step time will show in the new start-up log; T-250); that the Servo-feature
+build still links end to end (type-checked and linted, not built); the ~20-60
+min first build of Servo 0.6.0 and the Google Form crash (T-239) remain
+unconfirmed from the previous round.
+
+## 2026-10-01 — coordinator — Laya on the owner's Mac is MPS, not CPU
+
+**Reported by the owner (start-up log):** `device=mps, first pass 1572 ms, warm
+454 ms per step`, with the new "slower than a fast lane should be" warning.
+**Correction:** the previous entry and ADR-015 guessed CPU from the trace; the
+log disproves it. The slowness is a ~450 ms forward over a 1,024-token window on
+MPS in fp32 (Laya's default below 5 question rows; Ferrite sends 2). **Done:**
+the warm-up now also times fp16 on MPS and prints both; the new
+`FERRITE_LAYA_MPS_AMP_MIN_ROWS=1` opts in; the warning no longer suggests the
+CPU-only `FERRITE_LAYA_THREADS`. **Verified:** the 26 Python server tests (fake
+agent; no torch, no MPS here). **Not verified:** whether fp16 is actually faster
+or changes answers on his machine; no Apple hardware here.

