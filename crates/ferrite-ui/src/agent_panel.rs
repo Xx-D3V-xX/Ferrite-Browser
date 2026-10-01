@@ -29,19 +29,23 @@
 use chrono::{DateTime, TimeZone};
 use ferrite_agent::chat::{PageContextNote, StepRecord, Turn};
 use ferrite_agent::context::{decide_page_use, describe_context};
-use iced::widget::{column, horizontal_space, row, tooltip};
+use iced::widget::{column, horizontal_space, row};
 
 use super::*;
+use crate::tokens::{
+    alert_card_style, danger_btn_style, field_style, outline_btn_style, raised_bar_style,
+    safe_btn_style, tint, tip, toolbar_btn_style, RADIUS_MD, RADIUS_SM, SP_LG, SP_MD, SP_SM, SP_XS,
+    TEXT_BODY, TEXT_CAPTION, TEXT_SMALL, TEXT_TITLE,
+};
 
 // ---------------------------------------------------------------------------
 // Layout constants
 // ---------------------------------------------------------------------------
 
-/// Width of the sidebar. A chat wants a little more room than the old
-/// 320px activity feed: bubbles and answers wrap instead of clipping.
-pub(crate) const SIDEBAR_WIDTH: f32 = 360.0;
-/// Widest a user bubble grows.
-const BUBBLE_MAX_WIDTH: f32 = 290.0;
+/// Widest a user bubble grows (the sidebar is `SIDE_PANEL_WIDTH`, the same
+/// width as every other right-hand drawer, so switching drawers never moves
+/// the page edge).
+const BUBBLE_MAX_WIDTH: f32 = 310.0;
 /// Fixed side of the square icon buttons in the header and rows.
 const ICON_BTN: f32 = 28.0;
 /// Fixed side of the composer's send/stop button.
@@ -331,7 +335,7 @@ fn entrance<'a>(
 fn icon_button<'a>(
     kind: Icon,
     color: Color,
-    tip: &'a str,
+    label: &'a str,
     on_press: Option<FerriteBrowserMessage>,
     active: bool,
     palette: &'static Palette,
@@ -343,35 +347,10 @@ fn icon_button<'a>(
         .style(if active {
             panel_btn_active
         } else {
-            nav_btn_style
+            toolbar_btn_style
         })
         .on_press_maybe(on_press);
-    with_tip(btn, tip, palette)
-}
-
-/// A tooltip in the panel's own raised-surface style.
-fn with_tip<'a>(
-    content: impl Into<Element<'a, FerriteBrowserMessage>>,
-    tip: &'a str,
-    palette: &'static Palette,
-) -> Element<'a, FerriteBrowserMessage> {
-    tooltip(
-        content,
-        container(text(tip).size(11).color(palette.text))
-            .padding([4, 8])
-            .style(move |_: &Theme| container::Style {
-                background: Some(Background::Color(palette.raised)),
-                border: Border {
-                    radius: iced::border::Radius::new(6.0),
-                    width: 1.0,
-                    color: palette.divider,
-                },
-                ..container::Style::default()
-            }),
-        tooltip::Position::Bottom,
-    )
-    .gap(4)
-    .into()
+    tip(btn, label, palette)
 }
 
 /// A quiet text-style button ("Show more", "Copy"): transparent until hovered.
@@ -484,7 +463,7 @@ pub(crate) fn view_agent_sidebar(state: &FerriteBrowser) -> Element<'_, FerriteB
     }
 
     container(column(items).width(Length::Fill).height(Length::Fill))
-        .width(Length::Fixed(SIDEBAR_WIDTH))
+        .width(Length::Fixed(SIDE_PANEL_WIDTH))
         .height(Length::Fill)
         .style(move |_: &Theme| container::Style {
             background: Some(Background::Color(palette.surface)),
@@ -594,108 +573,171 @@ fn new_chat_tip() -> &'static str {
     }
 }
 
+/// A button in a decision card's action row: label, optional key hint.
+fn card_action<'a>(
+    label: &'a str,
+    hint: Option<&'a str>,
+    style: fn(&Theme, button::Status) -> button::Style,
+    portion: u16,
+    on_press: FerriteBrowserMessage,
+) -> Element<'a, FerriteBrowserMessage> {
+    let mut cells: Vec<Element<FerriteBrowserMessage>> = vec![text(label).size(TEXT_SMALL).into()];
+    if let Some(hint) = hint {
+        cells.push(
+            text(hint)
+                .size(10)
+                .style(|_: &Theme| text::Style {
+                    color: Some(Color {
+                        a: 0.7,
+                        ..Color::WHITE
+                    }),
+                })
+                .into(),
+        );
+    }
+    button(
+        container(
+            row(cells)
+                .spacing(SP_XS + 2.0)
+                .align_y(iced::Alignment::Center),
+        )
+        .width(Length::Fill)
+        .center_x(Length::Fill),
+    )
+    .width(Length::FillPortion(portion))
+    .padding([SP_SM - 1.0, SP_SM])
+    .style(style)
+    .on_press(on_press)
+    .into()
+}
+
+/// The frame every decision the person has to make shares: a tinted, raised
+/// card inset from the panel's edges with an icon and a title, the question,
+/// and a row of actions. `tone` is warn for "the agent needs you" and danger
+/// for "something looks wrong".
+fn decision_card<'a>(
+    palette: &'static Palette,
+    tone: Color,
+    title: impl Into<String>,
+    body: Element<'a, FerriteBrowserMessage>,
+    actions: Element<'a, FerriteBrowserMessage>,
+) -> Element<'a, FerriteBrowserMessage> {
+    container(
+        container(
+            column![
+                row![
+                    icon(Icon::Warning, ICON_SIZE, tone),
+                    text(title.into())
+                        .size(TEXT_BODY)
+                        .font(font_weight(iced::font::Weight::Semibold))
+                        .color(palette.text)
+                        .width(Length::Fill)
+                        .wrapping(text::Wrapping::WordOrGlyph),
+                ]
+                .spacing(SP_SM)
+                .align_y(iced::Alignment::Center),
+                body,
+                actions,
+            ]
+            .spacing(SP_SM + 2.0),
+        )
+        .padding(SP_MD)
+        .width(Length::Fill)
+        .style(alert_card_style(tone)),
+    )
+    .padding([SP_SM, SP_MD])
+    .width(Length::Fill)
+    .into()
+}
+
 /// The sign-in handoff card: what the page wants, why Ferrite is not doing it,
 /// and *Continue* / *Stop task*.
 fn view_signin_card<'a>(
     wall: &'a super::signin::SignInWall,
     palette: &'static Palette,
 ) -> Element<'a, FerriteBrowserMessage> {
-    container(
-        column![
-            row![
-                icon(Icon::Warning, ICON_SIZE, palette.warn),
-                text(wall.title())
-                    .size(13)
-                    .font(font_weight(iced::font::Weight::Semibold))
-                    .color(palette.text)
-                    .width(Length::Fill)
-                    .wrapping(text::Wrapping::WordOrGlyph),
-            ]
-            .spacing(8)
-            .align_y(iced::Alignment::Center),
-            text(wall.body())
-                .size(11)
-                .color(palette.text_dim)
-                .wrapping(text::Wrapping::Word),
-            row![
-                button(text("I’ve done it — continue").size(12))
-                    .padding([7, 12])
-                    .style(accent_btn_style)
-                    .on_press(FerriteBrowserMessage::SigninContinue),
-                button(text("Stop task").size(12))
-                    .padding([7, 12])
-                    .style(panel_btn_inactive)
-                    .on_press(FerriteBrowserMessage::StopAgent),
-            ]
-            .spacing(8),
+    decision_card(
+        palette,
+        palette.warn,
+        wall.title(),
+        text(wall.body())
+            .size(TEXT_SMALL)
+            .color(palette.text_dim)
+            .wrapping(text::Wrapping::Word)
+            .into(),
+        row![
+            card_action(
+                "I\u{2019}ve done it \u{2014} continue",
+                None,
+                accent_btn_style,
+                3,
+                FerriteBrowserMessage::SigninContinue,
+            ),
+            card_action(
+                "Stop task",
+                None,
+                outline_btn_style,
+                2,
+                FerriteBrowserMessage::StopAgent,
+            ),
         ]
-        .spacing(10),
+        .spacing(SP_SM)
+        .into(),
     )
-    .padding(12)
-    .width(Length::Fill)
-    .style(move |_: &Theme| container::Style {
-        background: Some(Background::Color(Color {
-            a: 0.10,
-            ..palette.warn
-        })),
-        ..container::Style::default()
-    })
-    .into()
 }
 
 /// The runtime-consent card: what the agent wants to do that the request did
-/// not imply, and *Allow once* / *Allow for this task* / *Don't allow*. Says
-/// only the action and the site, never text a page wrote.
+/// not imply, and *Don't allow* / *Allow once* / *Allow for this task*. Says
+/// only the action and the site, never text a page wrote. The safe answer is
+/// the prominent one and has the Esc key.
 fn view_runtime_card<'a>(
     pending: &'a super::PendingRuntimeConsent,
     palette: &'static Palette,
 ) -> Element<'a, FerriteBrowserMessage> {
-    container(
+    decision_card(
+        palette,
+        palette.warn,
+        "The agent needs your approval",
         column![
-            row![
-                icon(Icon::Warning, ICON_SIZE, palette.warn),
-                text("The agent wants to do something your request did not ask for")
-                    .size(13)
-                    .font(font_weight(iced::font::Weight::Semibold))
-                    .color(palette.text)
-                    .width(Length::Fill)
-                    .wrapping(text::Wrapping::WordOrGlyph),
-            ]
-            .spacing(8)
-            .align_y(iced::Alignment::Center),
             text(pending.summary())
-                .size(11)
-                .color(palette.text_dim)
+                .size(TEXT_SMALL)
+                .color(palette.text)
                 .wrapping(text::Wrapping::WordOrGlyph),
-            row![
-                button(text("Allow once").size(12))
-                    .padding([7, 12])
-                    .style(accent_btn_style)
-                    .on_press(FerriteBrowserMessage::RuntimeAllowOnce),
-                button(text("Allow for this task").size(12))
-                    .padding([7, 12])
-                    .style(panel_btn_inactive)
-                    .on_press(FerriteBrowserMessage::RuntimeAllowTask),
-                button(text("Don’t allow").size(12))
-                    .padding([7, 12])
-                    .style(panel_btn_inactive)
-                    .on_press(FerriteBrowserMessage::RuntimeDeny),
-            ]
-            .spacing(8)
-            .wrap(),
+            text(
+                "This is outside what your request implied. The agent is paused until you decide."
+            )
+            .size(TEXT_CAPTION)
+            .color(palette.text_dim)
+            .wrapping(text::Wrapping::Word),
         ]
-        .spacing(10),
+        .spacing(SP_XS)
+        .into(),
+        row![
+            card_action(
+                "Don\u{2019}t allow",
+                Some("Esc"),
+                danger_btn_style,
+                3,
+                FerriteBrowserMessage::RuntimeDeny,
+            ),
+            card_action(
+                "Allow once",
+                None,
+                outline_btn_style,
+                2,
+                FerriteBrowserMessage::RuntimeAllowOnce,
+            ),
+            card_action(
+                "Allow for task",
+                None,
+                outline_btn_style,
+                3,
+                FerriteBrowserMessage::RuntimeAllowTask,
+            ),
+        ]
+        .spacing(SP_SM)
+        .into(),
     )
-    .padding(12)
-    .width(Length::Fill)
-    .style(move |_: &Theme| container::Style {
-        background: Some(Background::Color(Color {
-            a: 0.10,
-            ..palette.warn
-        })),
-        ..container::Style::default()
-    })
-    .into()
 }
 
 fn view_notice<'a>(
@@ -706,7 +748,7 @@ fn view_notice<'a>(
         row![
             icon(Icon::Warning, ICON_SIZE_SM, palette.warn),
             text(notice)
-                .size(11)
+                .size(TEXT_CAPTION)
                 .color(palette.text)
                 .width(Length::Fill)
                 .wrapping(text::Wrapping::WordOrGlyph),
@@ -715,16 +757,13 @@ fn view_notice<'a>(
                 .style(close_btn_style)
                 .on_press(FerriteBrowserMessage::DismissNotice),
         ]
-        .spacing(8)
+        .spacing(SP_SM)
         .align_y(iced::Alignment::Center),
     )
-    .padding([6, 12])
+    .padding([SP_XS + 2.0, SP_MD])
     .width(Length::Fill)
     .style(move |_: &Theme| container::Style {
-        background: Some(Background::Color(Color {
-            a: 0.10,
-            ..palette.warn
-        })),
+        background: Some(Background::Color(tint(palette.warn, 0.10))),
         ..container::Style::default()
     })
     .into()
@@ -1671,7 +1710,7 @@ fn view_composer(state: &FerriteBrowser) -> Element<'_, FerriteBrowserMessage> {
     })
     .on_press(FerriteBrowserMessage::CycleContextMode);
 
-    let mut chip_row: Vec<Element<FerriteBrowserMessage>> = vec![with_tip(
+    let mut chip_row: Vec<Element<FerriteBrowserMessage>> = vec![tip(
         chip,
         "Whether the agent gets the current page. Click: Auto, On, Off.",
         palette,
@@ -1707,40 +1746,7 @@ fn view_composer(state: &FerriteBrowser) -> Element<'_, FerriteBrowserMessage> {
         .width(Length::Fill)
         .padding([8, 10])
         .size(13)
-        .style(move |_: &Theme, status| {
-            let focused = matches!(status, text_input::Status::Focused);
-            let disabled = matches!(status, text_input::Status::Disabled);
-            text_input::Style {
-                background: Background::Color(if disabled {
-                    Color {
-                        a: 0.6,
-                        ..palette.input
-                    }
-                } else {
-                    palette.input
-                }),
-                border: Border {
-                    radius: iced::border::Radius::new(10.0),
-                    width: if focused { 1.5 } else { 1.0 },
-                    color: if focused {
-                        palette.accent
-                    } else {
-                        palette.divider
-                    },
-                },
-                icon: palette.text_dim,
-                placeholder: palette.text_dim,
-                value: if disabled {
-                    palette.text_dim
-                } else {
-                    palette.text
-                },
-                selection: Color {
-                    a: 0.30,
-                    ..palette.accent
-                },
-            }
-        })
+        .style(|theme: &Theme, status| field_style(theme, status, 10.0))
         .on_input_maybe(can_type.then_some(
             FerriteBrowserMessage::AgentTaskInputChanged as fn(String) -> FerriteBrowserMessage,
         ))
@@ -1752,24 +1758,7 @@ fn view_composer(state: &FerriteBrowser) -> Element<'_, FerriteBrowserMessage> {
             .width(Length::Fixed(SEND_BTN))
             .height(Length::Fixed(SEND_BTN))
             .padding(0)
-            .style(|theme: &Theme, status| {
-                let palette = palette_for_theme(theme);
-                button::Style {
-                    background: Some(Background::Color(match status {
-                        button::Status::Hovered | button::Status::Pressed => Color {
-                            a: 0.85,
-                            ..palette.danger
-                        },
-                        _ => palette.danger,
-                    })),
-                    text_color: Color::WHITE,
-                    border: Border {
-                        radius: iced::border::Radius::new(10.0),
-                        ..Border::default()
-                    },
-                    ..button::Style::default()
-                }
-            })
+            .style(danger_btn_style)
             .on_press(FerriteBrowserMessage::StopAgent)
             .into()
     } else {
@@ -1796,7 +1785,7 @@ fn view_composer(state: &FerriteBrowser) -> Element<'_, FerriteBrowserMessage> {
         .on_press_maybe(can_send.then_some(FerriteBrowserMessage::AgentTaskSubmitted))
         .into()
     };
-    let send = with_tip(
+    let send = tip(
         send,
         if running {
             "Stop the agent"
@@ -1825,214 +1814,219 @@ fn view_composer(state: &FerriteBrowser) -> Element<'_, FerriteBrowserMessage> {
 // Consent panel — the security surface (moved here unchanged in content)
 // ---------------------------------------------------------------------------
 
+/// One reviewable item: what the dry run did, and a Reject / Approve pair. The
+/// decided side is filled (danger / safe); the undecided side is an outline, so
+/// "nothing chosen yet" never looks like "approved".
+fn consent_item_card<'a>(
+    state: &FerriteBrowser,
+    item: &ConsentItem,
+    palette: &'static Palette,
+) -> Element<'a, FerriteBrowserMessage> {
+    let approved = state.pending_decision.approved.contains(&item.id);
+    let rejected = state.pending_decision.rejected.contains(&item.id);
+
+    // An out-of-scope-origin item gets a small external-link glyph ahead of
+    // its summary — the one place this crate renders `Icon::Origin`,
+    // distinguishing "contacted an unauthorized origin" rows from "used an
+    // unexpected tool" rows at a glance, on top of the text difference already
+    // in `item.summary` itself.
+    let lead = if origin_item_origin(&item.id).is_some() {
+        Icon::Origin
+    } else {
+        Icon::Warning
+    };
+    let summary = row![
+        icon(lead, ICON_SIZE_SM, palette.text_dim),
+        text(item.summary.clone())
+            .size(TEXT_SMALL)
+            .color(palette.text)
+            .width(Length::Fill)
+            .wrapping(text::Wrapping::WordOrGlyph),
+    ]
+    .spacing(SP_SM)
+    .align_y(iced::Alignment::Start);
+
+    // Reject is listed first and styled as the safe default: `consent_is_complete`
+    // never lets Proceed fire while any item, including this one, is undecided,
+    // so there is no path to a silent approve-by-default. (iced 0.13 buttons
+    // are not keyboard-focusable, so the reading order is the available
+    // equivalent of a focus default.)
+    let choice = |label: &'static str,
+                  glyph: Icon,
+                  chosen: bool,
+                  chosen_style: fn(&Theme, button::Status) -> button::Style,
+                  msg: FerriteBrowserMessage| {
+        button(
+            container(
+                row![
+                    icon(
+                        glyph,
+                        11.0,
+                        if chosen { Color::WHITE } else { palette.text }
+                    ),
+                    text(label).size(TEXT_SMALL)
+                ]
+                .spacing(SP_XS + 2.0)
+                .align_y(iced::Alignment::Center),
+            )
+            .width(Length::Fill)
+            .center_x(Length::Fill),
+        )
+        .width(Length::FillPortion(1))
+        .padding([SP_XS + 1.0, SP_SM])
+        .style(if chosen {
+            chosen_style
+        } else {
+            outline_btn_style
+        })
+        .on_press(msg)
+    };
+
+    container(
+        column![
+            summary,
+            row![
+                choice(
+                    "Reject",
+                    Icon::Reject,
+                    rejected,
+                    danger_btn_style,
+                    FerriteBrowserMessage::RejectTool(item.id.to_string()),
+                ),
+                choice(
+                    "Approve",
+                    Icon::Approve,
+                    approved,
+                    safe_btn_style,
+                    FerriteBrowserMessage::ApproveTool(item.id.to_string()),
+                ),
+            ]
+            .spacing(SP_SM),
+        ]
+        .spacing(SP_SM),
+    )
+    .padding(SP_MD - 2.0)
+    .width(Length::Fill)
+    .style(move |_: &Theme| container::Style {
+        background: Some(Background::Color(palette.input)),
+        border: Border {
+            radius: RADIUS_MD.into(),
+            width: 1.0,
+            color: if approved {
+                tint(palette.safe, 0.6)
+            } else if rejected {
+                tint(palette.danger, 0.6)
+            } else {
+                palette.divider
+            },
+        },
+        ..container::Style::default()
+    })
+    .into()
+}
+
 /// The consent panel: shown instead of the thread while a dry run's deviation
-/// awaits the user's decision. Its content and behaviour are exactly what the
-/// pre-chat sidebar had; only its frame (the panel around it) changed.
+/// awaits the user's decision. The items scroll; the decision (Proceed /
+/// Cancel) is pinned underneath so it is always on screen, with a plain line
+/// saying what is still undecided.
+///
+/// This is the security surface (`docs/REBUILD_DIRECTIVE.md` §6/A10): it is
+/// built entirely from `iced_widget` native widgets, laid out here from Rust
+/// values (`diff`/`expected`/`evidence` — plain Rust structs, never
+/// page-supplied markup). Servo's page content only ever reaches this process
+/// as a decoded pixel buffer, rendered elsewhere as an `iced_widget::image`,
+/// so there is no code path by which a page's HTML/CSS/text is parsed into a
+/// style, position, or z-order for *this* panel. See
+/// `page_content_cannot_reach_the_consent_panels_inputs` for the structural
+/// argument.
 fn consent_body(state: &FerriteBrowser) -> Element<'_, FerriteBrowserMessage> {
     let palette = state.palette();
     let Some(diff) = &state.pending_diff else {
         return column![].into();
     };
-    // ── Consent panel (shown instead of log+response when diff is pending) ──
-    //
-    // This is the security surface (`docs/REBUILD_DIRECTIVE.md` §6/A10): it
-    // is built entirely from `iced_widget` native widgets, laid out by this
-    // function from Rust values (`diff`/`expected`/`evidence` — plain Rust
-    // structs, never page-supplied markup). Servo's page content only ever
-    // reaches this process as a decoded pixel buffer (`session.get_frame()`,
-    // rendered elsewhere as an `iced_widget::image`) — there is no code path
-    // by which a page's HTML/CSS/text is parsed into a style, position, or
-    // z-order for *this* panel. See `page_content_cannot_reach_the_consent_panels_inputs`
-    // for the structural argument this session verified, not merely assumed.
     let items = consent_items(diff, state.pending_expected.as_ref());
-
-    let mut item_rows: Vec<Element<FerriteBrowserMessage>> = items
+    let decided = items
         .iter()
-        .map(|item| {
-            let approved = state.pending_decision.approved.contains(&item.id);
-            let rejected = state.pending_decision.rejected.contains(&item.id);
-
-            let approve_style = move |_: &Theme, _| button::Style {
-                background: Some(Background::Color(if approved {
-                    palette.safe
-                } else {
-                    Color {
-                        a: 0.25,
-                        ..palette.safe
-                    }
-                })),
-                text_color: Color::WHITE,
-                border: Border {
-                    radius: iced::border::Radius::new(4.0),
-                    ..Border::default()
-                },
-                ..button::Style::default()
-            };
-            let reject_style = move |_: &Theme, _| button::Style {
-                background: Some(Background::Color(if rejected {
-                    palette.danger
-                } else {
-                    Color {
-                        a: 0.25,
-                        ..palette.danger
-                    }
-                })),
-                text_color: Color::WHITE,
-                border: Border {
-                    radius: iced::border::Radius::new(4.0),
-                    ..Border::default()
-                },
-                ..button::Style::default()
-            };
-
-            let approve_id = item.id.to_string();
-            let reject_id = item.id.to_string();
-            // Reject is listed and styled first: iced 0.13's `button`
-            // widget does not implement the `Focusable` operation (only
-            // `text_input`/`text_editor` do — verified against
-            // `iced_core::widget::operation::focusable`), so a literal
-            // keyboard-focus-ring default onto Reject is not achievable
-            // against this pinned version's public API. This is the
-            // available equivalent: reject reads first, and — the
-            // property that actually matters — `consent_is_complete`
-            // never lets Proceed fire while any item, including this
-            // one, is undecided, so there is no path to a silent
-            // approve-by-default.
-            // An out-of-scope-origin item gets a small external-link
-            // glyph ahead of its summary — the one place this crate
-            // renders `Icon::Origin`, distinguishing "contacted an
-            // unauthorized origin" rows from "used an unexpected tool"
-            // rows at a glance, on top of the text difference already
-            // in `item.summary` itself.
-            let summary_row: Element<FerriteBrowserMessage> =
-                if origin_item_origin(&item.id).is_some() {
-                    row![
-                        icon(Icon::Origin, ICON_SIZE_SM, palette.text_dim),
-                        text(item.summary.clone())
-                            .size(12)
-                            .color(palette.text)
-                            .width(Length::Fill),
-                    ]
-                    .spacing(6)
-                    .align_y(iced::Alignment::Start)
-                    .into()
-                } else {
-                    text(item.summary.clone())
-                        .size(12)
-                        .color(palette.text)
-                        .width(Length::Fill)
-                        .into()
-                };
-
-            column![
-                summary_row,
-                row![
-                    button(
-                        row![
-                            icon(Icon::Reject, 11.0, Color::WHITE),
-                            text("Reject").size(11)
-                        ]
-                        .spacing(4)
-                        .align_y(iced::Alignment::Center)
-                    )
-                    .padding([3, 7])
-                    .style(reject_style)
-                    .on_press(FerriteBrowserMessage::RejectTool(reject_id)),
-                    button(
-                        row![
-                            icon(Icon::Approve, 11.0, Color::WHITE),
-                            text("Approve").size(11)
-                        ]
-                        .spacing(4)
-                        .align_y(iced::Alignment::Center)
-                    )
-                    .padding([3, 7])
-                    .style(approve_style)
-                    .on_press(FerriteBrowserMessage::ApproveTool(approve_id)),
-                ]
-                .spacing(6)
-                .align_y(iced::Alignment::Center),
-            ]
-            .spacing(4)
-            .width(Length::Fill)
-            .into()
+        .filter(|i| {
+            state.pending_decision.approved.contains(&i.id)
+                || state.pending_decision.rejected.contains(&i.id)
         })
-        .collect();
-
+        .count();
     let complete = consent_is_complete(diff, &state.pending_decision);
-    let proceed_btn = button(text("Proceed with approved").size(12))
-        .padding([7, 10])
-        .width(Length::Fill)
-        .style(if complete {
-            accent_btn_style
-        } else {
-            panel_btn_inactive
-        })
-        .on_press_maybe(complete.then_some(FerriteBrowserMessage::ConsentSubmitted));
 
-    let cancel_btn = button(text("Cancel").size(12))
-        .padding([7, 10])
-        .width(Length::Fill)
-        .style(|_: &Theme, _| button::Style {
-            background: Some(Background::Color(palette.raised)),
-            text_color: palette.text_dim,
-            border: Border {
-                radius: iced::border::Radius::new(BORDER_RADIUS),
-                width: 1.0,
-                color: palette.divider,
-            },
-            ..button::Style::default()
-        })
-        .on_press(FerriteBrowserMessage::ConsentCancelled);
-
-    let mut panel_items: Vec<Element<FerriteBrowserMessage>> = vec![
+    let mut body: Vec<Element<FerriteBrowserMessage>> = vec![
         row![
             icon(Icon::Warning, ICON_SIZE, palette.danger),
-            text("Unexpected Activity Detected")
-                .size(14)
-                .color(palette.danger)
+            text("Review before running")
+                .size(TEXT_TITLE)
+                .font(font_weight(iced::font::Weight::Semibold))
+                .color(palette.text)
                 .width(Length::Fill),
+            text(format!("{decided} of {} decided", items.len()))
+                .size(TEXT_CAPTION)
+                .color(palette.text_dim),
         ]
-        .spacing(8)
+        .spacing(SP_SM)
         .align_y(iced::Alignment::Center)
         .into(),
-        text(diff.summary()).size(12).color(palette.text_dim).into(),
-        sep(),
-        text("Review each item:")
-            .size(12)
-            .color(palette.text)
+        text(diff.summary())
+            .size(TEXT_SMALL)
+            .color(palette.text_dim)
+            .wrapping(text::Wrapping::Word)
             .into(),
     ];
-    panel_items.append(&mut item_rows);
-    panel_items.push(sep());
+    for item in &items {
+        body.push(consent_item_card(state, item, palette));
+    }
 
-    // ── Dry-run evidence, collapsed by default ──────────────────────
-    let evidence_toggle = button(
-        text(if state.show_evidence {
-            "v Hide dry-run evidence"
-        } else {
-            "> Show dry-run evidence"
-        })
-        .size(11),
-    )
-    .padding([3, 7])
-    .style(panel_btn_inactive)
-    .on_press(FerriteBrowserMessage::ToggleEvidence);
-    panel_items.push(evidence_toggle.into());
+    // ── Dry-run evidence, collapsed by default ──
+    body.push(
+        button(
+            row![
+                icon(
+                    if state.show_evidence {
+                        Icon::ChevronDown
+                    } else {
+                        Icon::ChevronRight
+                    },
+                    ICON_SIZE_SM,
+                    palette.text_dim
+                ),
+                text(if state.show_evidence {
+                    "Hide dry-run evidence"
+                } else {
+                    "Show dry-run evidence"
+                })
+                .size(TEXT_SMALL),
+            ]
+            .spacing(SP_XS + 2.0)
+            .align_y(iced::Alignment::Center),
+        )
+        .padding([SP_XS, SP_SM])
+        .style(link_button_style)
+        .on_press(FerriteBrowserMessage::ToggleEvidence)
+        .into(),
+    );
     if state.show_evidence {
         if let Some(evidence) = &state.pending_evidence {
             let lines: Vec<Element<FerriteBrowserMessage>> = dry_run_evidence_lines(evidence)
                 .into_iter()
-                .map(|line| text(line).size(11).color(palette.text_dim).into())
+                .map(|line| {
+                    text(line)
+                        .size(TEXT_CAPTION)
+                        .color(palette.text_dim)
+                        .wrapping(text::Wrapping::WordOrGlyph)
+                        .into()
+                })
                 .collect();
-            panel_items.push(
+            body.push(
                 container(column(lines).spacing(2))
-                    .padding([6, 8])
+                    .padding([SP_SM - 2.0, SP_SM])
                     .width(Length::Fill)
-                    .style(|_: &Theme| container::Style {
+                    .style(move |_: &Theme| container::Style {
                         background: Some(Background::Color(palette.input)),
                         border: Border {
-                            radius: iced::border::Radius::new(6.0),
+                            radius: RADIUS_SM.into(),
                             width: 1.0,
                             color: palette.divider,
                         },
@@ -2043,42 +2037,74 @@ fn consent_body(state: &FerriteBrowser) -> Element<'_, FerriteBrowserMessage> {
         }
     }
 
-    panel_items.push(sep());
-    panel_items.push(proceed_btn.into());
-    panel_items.push(cancel_btn.into());
-
-    // ── Entrance transition (C1) ─────────────────────────────────────
-    // A brief slide-in-and-settle plus a background-tint fade, driven
-    // by `consent_panel_anim` (advanced 16ms at a time by
-    // `ConsentPanelTick`, see `subscription()`) through `ease_out_cubic`.
-    // Purely decorative: every item's own text above is already at full
-    // opacity/its final position from the very first frame — only this
-    // outer wrapper's background tint and top inset animate, so nothing
-    // about what the user is being asked to approve is ever delayed,
-    // dimmed, or obscured while this plays out (~200ms total).
+    // ── Entrance transition (C1) ──
+    // A brief slide-in-and-settle plus a background-tint fade, driven by
+    // `consent_panel_anim` (advanced 16ms at a time by `ConsentPanelTick`, see
+    // `subscription()`) through `ease_out_cubic`. Purely decorative: every
+    // item's own text above is already at full opacity/its final position from
+    // the very first frame — only this wrapper's background tint and top inset
+    // animate, so nothing about what the user is being asked to approve is
+    // ever delayed, dimmed, or obscured while this plays out (~200ms total).
     let anim_t = ease_out_cubic(state.consent_panel_anim);
     let slide_offset = (1.0 - anim_t) * 16.0;
-
-    scrollable(
-        container(column(panel_items).spacing(8).padding(Padding {
-            top: 8.0 + slide_offset,
-            right: 12.0,
-            bottom: 8.0,
-            left: 12.0,
+    let items_view = scrollable(
+        container(column(body).spacing(SP_SM + 2.0).padding(Padding {
+            top: SP_MD + slide_offset,
+            right: SP_MD,
+            bottom: SP_MD,
+            left: SP_MD,
         }))
         .width(Length::Fill)
         .style(move |_: &Theme| container::Style {
-            background: Some(Background::Color(Color {
-                r: palette.warn.r,
-                g: palette.warn.g,
-                b: palette.warn.b,
-                a: 0.08 * anim_t,
-            })),
+            background: Some(Background::Color(tint(palette.warn, 0.08 * anim_t))),
             ..container::Style::default()
         }),
     )
-    .height(Length::Fill)
-    .into()
+    .height(Length::Fill);
+
+    // ── The decision, pinned ──
+    let proceed = button(
+        container(text("Proceed with approved").size(TEXT_BODY))
+            .width(Length::Fill)
+            .center_x(Length::Fill),
+    )
+    .width(Length::Fill)
+    .padding([SP_SM + 1.0, SP_MD])
+    .style(accent_btn_style)
+    .on_press_maybe(complete.then_some(FerriteBrowserMessage::ConsentSubmitted));
+    let cancel = button(
+        row![
+            text("Cancel").size(TEXT_BODY),
+            text("Esc").size(TEXT_CAPTION).color(palette.text_dim)
+        ]
+        .spacing(SP_SM)
+        .align_y(iced::Alignment::Center),
+    )
+    .padding([SP_SM + 1.0, SP_LG])
+    .style(outline_btn_style)
+    .on_press(FerriteBrowserMessage::ConsentCancelled);
+    let footer = container(
+        column![
+            if complete {
+                text("Only what you approved will run.")
+            } else {
+                text("Approve or reject every item to continue.")
+            }
+            .size(TEXT_CAPTION)
+            .color(palette.text_dim),
+            row![proceed, cancel]
+                .spacing(SP_SM)
+                .align_y(iced::Alignment::Center),
+        ]
+        .spacing(SP_SM),
+    )
+    .padding(SP_MD)
+    .width(Length::Fill)
+    .style(raised_bar_style);
+
+    column![items_view, sep(), footer]
+        .height(Length::Fill)
+        .into()
 }
 
 #[cfg(test)]

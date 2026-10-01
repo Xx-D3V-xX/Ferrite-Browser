@@ -106,6 +106,18 @@ pub enum Icon {
     Trash,
     /// The toolbar's Settings toggle: model provider, API key, appearance.
     Settings,
+    /// The address bar's "connection is encrypted" indicator.
+    Lock,
+    /// A tab or address-bar page with no icon of its own.
+    Globe,
+    /// The toolbar's overflow menu (three vertical dots).
+    Dots,
+    /// Zoom out in the overflow menu.
+    Minus,
+    /// The toolbar's audit-log toggle.
+    Shield,
+    /// The find bar's "previous match".
+    ChevronUp,
 }
 
 // C3c left a note here that a bookmark/star icon was drawn but deliberately
@@ -158,6 +170,12 @@ pub fn icon_bytes(kind: Icon) -> &'static [u8] {
         Icon::Copy => include_bytes!("../assets/icons/copy.svg"),
         Icon::Trash => include_bytes!("../assets/icons/trash.svg"),
         Icon::Settings => include_bytes!("../assets/icons/settings.svg"),
+        Icon::Lock => include_bytes!("../assets/icons/lock.svg"),
+        Icon::Globe => include_bytes!("../assets/icons/globe.svg"),
+        Icon::Dots => include_bytes!("../assets/icons/dots.svg"),
+        Icon::Minus => include_bytes!("../assets/icons/minus.svg"),
+        Icon::Shield => include_bytes!("../assets/icons/shield.svg"),
+        Icon::ChevronUp => include_bytes!("../assets/icons/chevron-up.svg"),
     }
 }
 
@@ -182,7 +200,7 @@ pub fn icon<'a, Message: 'a>(kind: Icon, size: f32, color: Color) -> Element<'a,
 mod tests {
     use super::*;
 
-    const ALL: [Icon; 34] = [
+    const ALL: [Icon; 40] = [
         Icon::Back,
         Icon::Forward,
         Icon::Reload,
@@ -217,6 +235,12 @@ mod tests {
         Icon::Copy,
         Icon::Trash,
         Icon::Settings,
+        Icon::Lock,
+        Icon::Globe,
+        Icon::Dots,
+        Icon::Minus,
+        Icon::Shield,
+        Icon::ChevronUp,
     ];
 
     /// Every icon variant embeds real, well-formed SVG data — catches a
