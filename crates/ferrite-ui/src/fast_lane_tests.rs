@@ -223,6 +223,8 @@ async fn low_confidence_or_done_falls_back_to_the_llm() {
 
 #[tokio::test]
 async fn a_slow_laya_pauses_itself_and_later_steps_send_no_request() {
+    // Reads the shared trace back at the end; see `TRACE_LOCK`.
+    let _trace = crate::activity_tests::TRACE_LOCK.lock().await;
     // Every request outlasts the timeout, as on the owner's machine.
     let slow = serve(200, "{}".into(), Duration::from_millis(400)).await;
     let mut config = LayaConfig::new(&slow.base_url);
