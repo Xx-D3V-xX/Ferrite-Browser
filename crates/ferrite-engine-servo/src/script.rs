@@ -82,6 +82,7 @@ pub(crate) fn check(op: &str, selector: &str, v: &Value) -> Result<(), EngineErr
 mod tests {
     use super::*;
     use serde_json::json;
+    use std::io::Write as _;
 
     /// Every operation the Rust side can ask for must exist in the script.
     const OPS: &[&str] = &[
@@ -312,7 +313,7 @@ mod tests {
     fn run_select_in_node(options: &Value, wanted: &str) -> Option<Value> {
         const DRIVER: &str = r#"
 const vm = require('vm');
-const input = JSON.parse(process.argv[1]);
+const input = JSON.parse(require('fs').readFileSync(0, 'utf8'));
 const events = [];
 class Ev { constructor(type, init) { this.type = type; } }
 const select = {
@@ -350,12 +351,23 @@ process.stdout.write(JSON.stringify({
             "options": options,
             "script": build_script("select_option", &json!({"sel": "select", "value": wanted})),
         });
-        let out = std::process::Command::new("node")
+        // The payload carries the whole page script (~40 KB), past the ~32 KB
+        // Windows command-line limit, so it goes in on stdin, not as an argument.
+        let mut child = std::process::Command::new("node")
             .arg("-e")
             .arg(DRIVER)
-            .arg(payload.to_string())
-            .output()
+            .stdin(std::process::Stdio::piped())
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped())
+            .spawn()
             .expect("node runs");
+        child
+            .stdin
+            .take()
+            .expect("stdin is piped")
+            .write_all(payload.to_string().as_bytes())
+            .expect("payload reaches node");
+        let out = child.wait_with_output().expect("node finishes");
         assert!(
             out.status.success(),
             "node driver failed: {}",

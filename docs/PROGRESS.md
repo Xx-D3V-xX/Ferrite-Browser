@@ -4773,3 +4773,12 @@ format comparison failed on `\r\n`. Fix: a root `.gitattributes` forcing LF
 were already LF. The test was not loosened. **Not verified:** a Windows run
 after the change.
 
+## 2026-10-01 — coordinator — Windows CI: node payload past the command-line limit (T-255)
+
+With the fixtures fixed, the next Windows run failed two `ferrite-engine-servo`
+tests (`select_option_*`): `run_select_in_node` handed node a ~42 KB payload as
+an argument, over Windows' ~32 KB limit (os error 206). The payload is now
+piped on stdin. All 15 tests in the crate pass here with node installed.
+**Not verified:** a Windows run. Each Windows run so far has surfaced a new
+class of failure, so expect more until one is green.
+
