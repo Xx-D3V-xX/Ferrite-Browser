@@ -408,10 +408,16 @@ mod inner {
                     }
                 }
                 // Sites that keep a login in IndexedDB or the async cookie API
-                // (Google's sign-in among them) need both.
+                // (Google's sign-in among them) need both. IntersectionObserver
+                // is what lazy-loading and framework routers (Next.js among
+                // them) reach for; Servo ships it off by default. (Web Crypto
+                // is a compile-time feature of the `servo` crate — see the
+                // workspace Cargo.toml — its `dom_crypto_subtle_enabled`
+                // preference is already on.)
                 let mut prefs = servo::Preferences {
                     dom_indexeddb_enabled: true,
                     dom_cookiestore_enabled: true,
+                    dom_intersection_observer_enabled: true,
                     ..servo::Preferences::default()
                 };
                 // Some sites (Google's sign-in among them) decide whether a
