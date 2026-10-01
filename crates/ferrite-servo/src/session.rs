@@ -192,6 +192,72 @@ pub fn audit_db_path() -> std::path::PathBuf {
 #[cfg(feature = "servo")]
 pub use inner::{shutdown_engine, take_popup_sessions, HeadlessServoSession};
 
+// ── Browser identity (the User-Agent sites see) ─────────────────────────────
+
+/// The User-Agent the app asked for, read once when the engine is built. The
+/// `FERRITE_USER_AGENT` environment variable still wins over it.
+static USER_AGENT_OVERRIDE: std::sync::Mutex<Option<String>> = std::sync::Mutex::new(None);
+
+/// Sets the User-Agent the engine will present, or `None` for Servo's own.
+/// Only has an effect before the first page is opened: the engine is built
+/// once per process, so a change takes effect on the next launch.
+pub fn set_user_agent(user_agent: Option<String>) {
+    let mut slot = USER_AGENT_OVERRIDE
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    *slot = user_agent.filter(|ua| !ua.trim().is_empty());
+}
+
+#[cfg(feature = "servo")]
+fn user_agent_override() -> Option<String> {
+    USER_AGENT_OVERRIDE
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .clone()
+}
+
+/// Servo's own User-Agent for this platform (names `Servo/<version>`), or
+/// `None` in a build without the engine.
+#[must_use]
+pub fn platform_default_user_agent() -> Option<String> {
+    #[cfg(feature = "servo")]
+    {
+        Some(servo::Preferences::default().user_agent)
+    }
+    #[cfg(not(feature = "servo"))]
+    {
+        None
+    }
+}
+
+/// A Firefox-compatible form of `servo_default`: the same platform and version,
+/// with Servo's own `Servo/<version>` product token replaced by the `Gecko`
+/// token every Firefox sends.
+///
+/// This is the long-standing compatibility convention (every mainstream browser
+/// names an older engine in its User-Agent), and it is deliberately the *least*
+/// change: nothing is made up. Servo already claims `Firefox/<n>`; many sites
+/// and sign-in pages treat an unrecognized engine token as an unsupported
+/// browser, and this removes that one signal. It does not make Ferrite Firefox,
+/// and it does not change what the engine can do.
+///
+/// `None` when `servo_default` does not have the expected shape, so a changed
+/// Servo default is never silently mangled.
+#[must_use]
+pub fn compatible_user_agent(servo_default: &str) -> Option<String> {
+    let start = servo_default.find(" Servo/")?;
+    let rest = &servo_default[start + 1..];
+    let end = rest
+        .find(' ')
+        .map_or(servo_default.len(), |i| start + 1 + i);
+    let compatible = format!(
+        "{} Gecko/20100101{}",
+        &servo_default[..start],
+        &servo_default[end..]
+    );
+    compatible.contains(" Firefox/").then_some(compatible)
+}
+
 /// Commits a runtime-guard decision to the hash-chained audit log, so the
 /// containment decision is verifiable after the fact: a `CapabilityDenied`
 /// entry (`capability` = `guard.<primitive>`, `url` = the origin) for an action
@@ -418,6 +484,14 @@ mod inner {
                     dom_indexeddb_enabled: true,
                     dom_cookiestore_enabled: true,
                     dom_intersection_observer_enabled: true,
+                    // Web APIs that sign-in and anti-abuse scripts probe for
+                    // (and that ordinary sites use) and that Servo ships off
+                    // by default. Each is a real implementation being turned
+                    // on, not a stub: see `examples/web_api_probe.rs`.
+                    dom_permissions_enabled: true,
+                    dom_notification_enabled: true,
+                    dom_async_clipboard_enabled: true,
+                    dom_webgl2_enabled: true,
                     ..servo::Preferences::default()
                 };
                 // Some sites (Google's sign-in among them) decide whether a
@@ -426,6 +500,7 @@ mod inner {
                 if let Some(ua) = std::env::var("FERRITE_USER_AGENT")
                     .ok()
                     .filter(|ua| !ua.trim().is_empty())
+                    .or_else(super::user_agent_override)
                 {
                     prefs.user_agent = ua;
                 }
@@ -1534,5 +1609,44 @@ mod page_key_tests {
             .edit_combo(),
             None
         );
+    }
+}
+
+#[cfg(test)]
+mod user_agent_tests {
+    use super::*;
+
+    #[test]
+    fn the_compatible_form_swaps_only_the_engine_token() {
+        assert_eq!(
+            compatible_user_agent("Mozilla/5.0 (Macintosh; Intel Mac OS X 10.15; rv:153.0) Servo/0.6.0 Firefox/153.0").as_deref(),
+            Some("Mozilla/5.0 (Macintosh; Intel Mac OS X 10.15; rv:153.0) Gecko/20100101 Firefox/153.0")
+        );
+        assert_eq!(
+            compatible_user_agent(
+                "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:153.0) Servo/0.6.0 Firefox/153.0"
+            )
+            .as_deref(),
+            Some(
+                "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:153.0) Gecko/20100101 Firefox/153.0"
+            )
+        );
+    }
+
+    #[test]
+    fn an_unexpected_shape_is_left_alone_not_mangled() {
+        assert_eq!(compatible_user_agent("Mozilla/5.0 Something/1.0"), None);
+        assert_eq!(
+            compatible_user_agent("Mozilla/5.0 (X11) Servo/0.6.0"),
+            None,
+            "no Firefox token"
+        );
+        assert_eq!(compatible_user_agent(""), None);
+    }
+
+    #[test]
+    fn a_blank_override_is_no_override() {
+        set_user_agent(Some("   ".to_string()));
+        assert_eq!(USER_AGENT_OVERRIDE.lock().unwrap().clone(), None);
     }
 }

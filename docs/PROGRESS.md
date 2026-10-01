@@ -4807,3 +4807,13 @@ were already green. **Not verified:** a Windows run after this change.
 
 The first macOS run of the Settings branch failed one `ferrite-ui` test (`opening_the_audit_panel_loads_the_trace_...`): the marker it recorded was gone when it read the global trace back. A sibling test sends `ClearTrace`, which empties that same log, so the two race. Pre-existing and unrelated to Settings; macOS scheduling exposed it. Reproduced (5/60 runs failed), fixed with a shared lock over the three tests that touch the global trace, 0/150 after. **Not verified:** a macOS run after the change.
 
+## 2026-10-01 — coordinator — Bot detection: what was fixable, what was not, and the sign-in handoff (T-262, T-263)
+
+**Asked by the owner:** make the agent hand sign-in to the person, and fix Google and GitHub flagging Ferrite "for everything, anyhow".
+
+**Found:** with the agent idle, a page sees nothing Ferrite-specific (probed in the real engine); gating the agent's tools on the panel would change nothing. The signals were the engine's: a `Servo/<version>` User-Agent and missing Web APIs.
+
+**Done:** WebGL and WebGL2 (the `servo` crate's `webgl` feature plus `dom_webgl2_enabled`), `navigator.permissions`, `Notification`, `navigator.clipboard` (preferences), all required checks in `probe-web-api` (passes; input probe also passes); a Browser identity setting, default Firefox-compatible; the page script refuses to type into sensitive fields; the sign-in handoff (card rendered and inspected). **Verified:** 1,191 workspace tests, clippy for the workspace and with the `servo` feature, fmt, `cargo deny`, `cargo machete`.
+
+**Deliberately not done, and why:** forging hardware, canvas, renderer, plugin or client-hint values, pretending to be Chrome, hiding automation, mimicking another browser's TLS. These are evasion rather than compatibility (ADR-018). **Not verified:** whether Google or GitHub now accept a sign-in; this environment cannot reach either.
+

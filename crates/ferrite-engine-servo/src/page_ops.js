@@ -827,9 +827,15 @@ function setValue(el, value) {
   return { ok: false, error: 'not_editable' };
 }
 
+// Typing into a password, one-time-code or card field is the person's job, not
+// the agent's: whatever the agent would type came from a model, and a page that
+// wants it typed is exactly what an injected instruction asks for.
+var SENSITIVE_REFUSAL = { ok: false, error: 'sensitive_field', detail: 'a password or other secret field: Ferrite does not fill these. Ask the user to enter it themselves.' };
+
 OPS.type_text = function (a) {
   var l = lookup(a.sel);
   if (l.fail) return l.fail;
+  if (isSensitive(l.el)) return SENSITIVE_REFUSAL;
   var t = tagOf(l.el);
   var type = typeOf(l.el);
   if (t === 'select' || (t === 'input' && (type === 'checkbox' || type === 'radio'))) {
@@ -844,6 +850,7 @@ OPS.fill_form = function (a) {
   for (var i = 0; i < a.fields.length; i++) {
     var l = lookup(a.fields[i][0]);
     if (l.fail) { l.fail.index = i; return l.fail; }
+    if (isSensitive(l.el)) return { ok: false, error: SENSITIVE_REFUSAL.error, detail: SENSITIVE_REFUSAL.detail, index: i };
     var r = setValue(l.el, a.fields[i][1]);
     if (!r.ok) { r.index = i; return r; }
   }

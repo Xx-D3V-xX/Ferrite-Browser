@@ -137,5 +137,6 @@ summary: The capability model and each stage of Ferrite's defense: prediction, s
   <li>Any provider failure empties the prediction. It never bypasses it.</li>
   <li><code>js.execute</code> can never be expected, at any scope.</li>
   <li>The comparator and the guard classify identically, by sharing one function.</li>
+  <li>The agent never types into a password, one-time-code or card field: the page script refuses, and a page that needs one pauses the run for you (the sign-in handoff).</li>
   <li>No test needs the network or an API key; live-provider tests are opt-in.</li>
 </ul>

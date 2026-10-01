@@ -36,6 +36,18 @@ const REQUIRED: &[(&str, &str)] = &[
     ),
     ("crypto.subtle present", "typeof crypto.subtle === 'object' && crypto.subtle !== null"),
     ("self.isSecureContext", "self.isSecureContext === true"),
+    // Probed by sign-in and anti-abuse scripts, and used by ordinary sites.
+    // Each is off by default in Servo (or, for WebGL, compiled out) and is
+    // turned on in `ferrite-servo`'s engine setup and the workspace `servo`
+    // features; this keeps them from silently going missing again.
+    (
+        "WebGL context",
+        "(function(){var c=document.createElement('canvas');return !!(c.getContext('webgl')||c.getContext('experimental-webgl'))})()",
+    ),
+    ("WebGL2 context", "!!document.createElement('canvas').getContext('webgl2')"),
+    ("Notification", "typeof Notification === 'function'"),
+    ("navigator.permissions", "typeof navigator.permissions === 'object' && typeof navigator.permissions.query === 'function'"),
+    ("navigator.clipboard", "typeof navigator.clipboard === 'object' && typeof navigator.clipboard.writeText === 'function'"),
     ("TextEncoder / TextDecoder", "new TextDecoder().decode(new TextEncoder().encode('é')) === 'é'"),
     ("structuredClone", "structuredClone({a:[1,{b:2}]}).a[1].b === 2"),
     ("queueMicrotask", "typeof queueMicrotask === 'function'"),

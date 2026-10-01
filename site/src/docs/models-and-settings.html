@@ -72,6 +72,18 @@ export FERRITE_GEMINI_API_KEY=&lt;your key&gt;</code></pre>
 </tbody></table></div>
 <p>With <em>no</em> provider chosen in Settings, the environment and keyring alone decide, as before: Ollama if a key (or a local server) is configured, otherwise Gemini.</p>
 
+<h2>Browser identity</h2>
+<p>Websites decide what to serve, and whether to let you sign in, partly from the <code>User-Agent</code> a browser sends. Servo's own names its engine (<code>Servo/&lt;version&gt;</code>), and sign-in pages commonly treat an unfamiliar engine as an unsupported browser. <strong>Settings → Compatibility</strong> chooses what Ferrite says:</p>
+<dl class="defs">
+  <dt>Firefox-compatible</dt><dd>The default. Servo's own string with only the <code>Servo/&lt;version&gt;</code> token replaced by the <code>Gecko</code> token Firefox sends. Servo already claims <code>Firefox/&lt;n&gt;</code>; nothing else is made up. This is the long-standing convention every mainstream browser follows.</dd>
+  <dt>Ferrite (names its engine)</dt><dd>Servo's own string, unchanged. Honest, but some sites will refuse to sign you in.</dd>
+</dl>
+<p>The engine is built once per process, so a change applies the next time you open Ferrite. <code>FERRITE_USER_AGENT</code> still overrides both.</p>
+<div class="callout note">
+  <h4>What this does not do</h4>
+  <p>It does not fake hardware, canvas or WebGL renderer details, plugin lists or client hints, hide that a page is being automated, or pretend to be Chrome (Ferrite has none of Chrome's client hints, so that would be a contradiction a site could see). Ferrite reports what the engine is and can do; the engine itself gained <strong>WebGL and WebGL2, <code>navigator.permissions</code>, <code>Notification</code> and the async clipboard</strong>, which are real implementations that sites and sign-in scripts probe for.</p>
+</div>
+
 <h2>What leaves your machine</h2>
 <ul>
   <li><strong>Page content, to your model provider.</strong> The agent has to read pages to act, so the text it reads is sent to the provider you chose. With local Ollama, nothing leaves your computer.</li>

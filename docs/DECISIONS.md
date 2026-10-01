@@ -584,3 +584,18 @@ absent in this Servo and are listed by the probe as gaps.
 
 **Not claimed.** That the keyring write works on every platform: it is exercised only against an in-memory vault. That Linux keys persist (they do not, T-259). That the drawer looks right on macOS or Windows (it was rendered with the software renderer on Linux).
 
+## ADR-018 — Be a compatible browser, not a disguised one; hand secrets to the person
+
+**Date:** 2026-10-01. **Status:** live; the effect on Google and GitHub sign-in is **unverified** (T-262).
+
+**Context.** Google and GitHub flagged Ferrite as an insecure or automated browser. Probing the real engine with the agent idle showed nothing Ferrite-specific in the page; the signals were the engine's own: a User-Agent naming `Servo/<version>`, and missing Web APIs (WebGL, permissions, notifications, the async clipboard, service workers, WebRTC devices). The tempting fix, to hide or fake whatever a bot-detection script measures, was considered and rejected.
+
+**Decision.**
+
+1. **Close real gaps instead of forging them.** Enable what Servo already implements and ships off (`webgl` feature, WebGL2, permissions, notifications, async clipboard) and make them required checks in `probe-web-api` so they cannot silently disappear. Leave unimplemented things (service workers, `mediaDevices`, `userAgentData`, `window.chrome`) missing.
+2. **A visible, reversible identity.** The User-Agent is a Settings choice. The default is Firefox-compatible: Servo's own string with only the engine token swapped for `Gecko`, because Servo already claims `Firefox/<n>` and naming an older, well-known engine is the convention every mainstream browser follows. A person can choose the string that names Servo instead. It applies at the next launch because the engine is built once.
+3. **No forgery, no stealth.** No spoofed hardware, canvas or renderer values, plugin lists or client hints; no pretending to be Chrome (Ferrite has none of Chrome's client hints, so a Chrome UA is a contradiction a site could see); no hiding that a page is automated; no mimicking another browser's TLS fingerprint. Such measures exist to separate a person from a program, and a browser that also drives an agent should not be working to blur that line.
+4. **A person signs in, not the agent.** The page script refuses to type into sensitive fields, and a run pauses before any model call when the active page asks for a password or other secret, resuming when the person presses Continue. This is the honest answer to what these sites check (a human, with their hands, in the session), and it is also the safer one: anything an agent types came from a model, and an injected page wants exactly that.
+
+**Not claimed.** That Google or GitHub will accept the sign-in: neither is reachable from the build environment, and what each keys on is unknown. That the compatible identity is a guarantee of anything. The next step is for someone to try it and report what the page says (T-262).
+

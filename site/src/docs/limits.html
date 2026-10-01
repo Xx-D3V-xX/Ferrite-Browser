@@ -48,6 +48,7 @@ summary: Every known limit of Ferrite's defense, its evaluation and the product,
 
 <h2>Limits of the product</h2>
 <ul>
+  <li><strong>Google and GitHub sign-in may still be refused.</strong> These sites decide from the whole session, and Ferrite uses a young engine. The identity choice, the engine's added Web APIs and the sign-in handoff are what Ferrite does about it; none is a guarantee, and it has not been verified against those sites. Still missing in the engine: service workers, <code>navigator.mediaDevices</code> (WebRTC), <code>navigator.userAgentData</code> and <code>window.chrome</code>. Ferrite deliberately does not fake any of them, nor hardware, canvas or renderer details, nor hide automation.</li>
   <li><strong>Unsigned builds.</strong> Each platform asks you to confirm the first launch.</li>
   <li><strong>Web compatibility is Servo's.</strong> Ferrite renders with the Servo engine. Some web platform features are still absent there (for example <code>requestIdleCallback</code>, <code>adoptedStyleSheets</code>, <code>FontFace</code>, <code>OffscreenCanvas</code> and the Navigation API), so some sites will not work, and Google sign-in may refuse an embedded engine.</li>
   <li><strong>Linux keys do not persist across a restart</strong> with the kernel-keyring backend this build uses; see <a href="{{ROOT}}docs/models-and-settings.html">Models and settings</a>.</li>

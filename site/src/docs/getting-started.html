@@ -50,12 +50,21 @@ summary: Install Ferrite, connect your own model in Settings, run a first task, 
 <p>Approve or reject each item, then <strong>Proceed with approved</strong> or <strong>Cancel</strong>. Rejected items are blocked for the run. If you are unsure, reject: a rejected legitimate action costs you a retry, an approved malicious one can cost much more. The <em>Show dry-run evidence</em> toggle reveals what the rehearsal recorded.</p>
 <p>The <strong>Audit</strong> panel (<kbd>F12</kbd>) shows the hash-chained log and the model-activity trace.</p>
 
+<h2>5. When the agent reaches a sign-in page</h2>
+<p>Ferrite does not type passwords, one-time codes or card numbers, and it will not let the agent do so either. When a step lands on a page with a password field (or a well-known sign-in page such as Google's), the run <strong>pauses before any model call</strong> and the agent panel shows a card: <em>Sign in to accounts.google.com</em>.</p>
+<ol>
+  <li>Sign in on the page yourself, with your own hands.</li>
+  <li>Press <strong>I've done it — continue</strong>, and the agent picks up from the page as it then is. Or press <strong>Stop task</strong>.</li>
+</ol>
+<p>You are asked once per site: a multi-page sign-in on the same host does not ask at every page, and coming back to the site later asks again. The page script also refuses, as a second line of defense, to type into any password or one-time-code field.</p>
+
 <h2>Where your data lives</h2>
 <p>Everything is under one data directory: <code>$FERRITE_HOME</code> if set, otherwise <code>~/.local/share/ferrite</code> on every platform. It holds the browser profile (cookies and storage persist across restarts), saved chats, bookmarks, <code>settings.json</code> and the activity log. API keys are <em>not</em> there; they go to your operating system's credential store.</p>
 
 <h2>Troubleshooting</h2>
 <dl class="defs">
   <dt>macOS: “Ferrite” Not Opened</dt><dd>Builds are not yet notarized by Apple, so Gatekeeper blocks the first launch (it does not mean the file is damaged). Click <em>Done</em>, open <strong>System Settings → Privacy &amp; Security</strong>, scroll to <em>Security</em>, and click <strong>Open Anyway</strong> next to Ferrite, then confirm with your password. You only need to do this once. The older right-click → Open trick no longer works on macOS 15 and later. From a terminal, <code>xattr -dr com.apple.quarantine /Applications/Ferrite.app</code> does the same thing.</dd>
+  <dt>Google or GitHub says the browser “may not be secure”, or blocks sign-in</dt><dd>These sites decide from the whole session, and Ferrite is a young engine. Two things are in your hands. In <strong>Settings → Compatibility</strong>, keep <em>Firefox-compatible</em> selected (the default; it applies after a restart). And sign in yourself when the agent pauses. Neither is a guarantee: Google in particular may still refuse an engine it does not recognize. See <a href="{{ROOT}}docs/limits.html">Limits</a>.</dd>
   <dt>No AI model connected</dt><dd>Open Settings and finish steps 2 to 6 above. The agent fails closed without a model: it will not act without one.</dd>
   <dt>“The provider rejected this key”</dt><dd>The key is wrong, revoked, or for another provider. Re-paste it; keys are shown masked.</dd>
   <dt>“Could not reach Ollama at …”</dt><dd>Start Ollama on this computer, then press <em>Load models</em> again. A local server must be <code>localhost</code> or <code>127.0.0.1</code>.</dd>

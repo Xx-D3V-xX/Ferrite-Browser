@@ -217,9 +217,11 @@ mod activity_panel;
 mod agent_panel;
 mod agent_run;
 mod icons;
+mod identity;
 mod page_input;
 mod runtime_guard;
 mod settings_panel;
+mod signin;
 use activity_panel::AuditTab;
 use icons::{icon, Icon};
 
@@ -1186,6 +1188,11 @@ pub struct LiveAgentLoop {
     guard: Option<ferrite_ipi::comparator::RuntimeGuard>,
     /// Actions the guard has blocked so far in this run.
     guard_blocks: u32,
+    /// The host the person already pressed *Continue* on at a sign-in
+    /// handoff (see `signin`), so the agent is not stopped again at every page
+    /// of the same sign-in. Forgotten when the agent reaches a page that needs
+    /// no one.
+    signin_cleared_host: Option<String>,
 }
 
 impl LiveAgentLoop {
@@ -1211,6 +1218,7 @@ impl LiveAgentLoop {
             last_page_sig: None,
             guard: None,
             guard_blocks: 0,
+            signin_cleared_host: None,
         }
     }
 
@@ -1581,6 +1589,10 @@ pub struct FerriteBrowser {
     /// The Settings drawer's state: the saved and in-progress model choices,
     /// the key being typed, and the keyring/environment/network it talks to.
     pub settings: settings_panel::SettingsState,
+    /// Set while the agent is paused on a page that needs the person (a
+    /// sign-in or another secret): the run is stopped before any model call and
+    /// the agent panel shows a card with *Continue*. See `signin`.
+    pub signin_handoff: Option<signin::SignInWall>,
     // ── New-tab hero: quick-access tile favicons ────────────────────────────
     /// The decoded favicon for each of `QUICK_ACCESS_TILES`, same indexing
     /// convention as `tab_favicons`/`tab_titles`/... elsewhere in this file
@@ -1707,6 +1719,7 @@ impl Default for FerriteBrowser {
             model_cache_dir: None,
             show_settings_panel: false,
             settings: settings_panel::SettingsState::default(),
+            signin_handoff: None,
             tile_favicons: vec![None; QUICK_ACCESS_TILES.len()],
             favicons_cache_dir: None,
         }
@@ -1821,6 +1834,9 @@ pub enum FerriteBrowserMessage {
     AgentCompleted(String),
     AgentFailed(String),
     StopAgent,
+    /// The person pressed *Continue* on the sign-in handoff card: the agent
+    /// picks up from the page as it is now.
+    SigninContinue,
     // ── Chats ─────────────────────────────────────────────────────────────────
     /// Starts a fresh, empty chat (the sidebar's "New chat" button, and
     /// Cmd/Ctrl+Shift+O). Refused, with a notice, while a run is active or a
@@ -2300,6 +2316,39 @@ pub fn update(
         }
         FerriteBrowserMessage::AgentFailed(s) => {
             return conclude_run(state, Outcome::Failed(s));
+        }
+        FerriteBrowserMessage::SigninContinue => {
+            let (Some(wall), Some(mut live)) =
+                (state.signin_handoff.take(), state.live_loop.take())
+            else {
+                return Task::none();
+            };
+            activity::record(
+                "sign-in handoff",
+                &wall.host,
+                "continued by the user",
+                true,
+                "",
+                0,
+            );
+            live.signin_cleared_host = Some(wall.host.clone());
+            // Tell the model what happened, in the observation it is about to
+            // read: it must not assume the sign-in succeeded or failed, only
+            // that the person has finished with the page.
+            let note = format!(
+                "Observation: the user handled the sign-in or secret prompt on {} themselves \
+                 and pressed Continue. Look at the page and carry on with the task.",
+                wall.host
+            );
+            match live.messages.last_mut() {
+                Some(last) if last.role == ferrite_model::Role::User => {
+                    last.content.push_str("\n\n");
+                    last.content.push_str(&note);
+                }
+                _ => live.messages.push(Message::user(note)),
+            }
+            let run_id = state.run_id;
+            return spawn_next_step(state, run_id, live);
         }
         FerriteBrowserMessage::StopAgent => {
             state.run_id += 1;
@@ -2902,6 +2951,7 @@ fn conclude_run(state: &mut FerriteBrowser, outcome: Outcome) -> Task<FerriteBro
     }
     state.agent_is_running = false;
     state.live_loop = None;
+    state.signin_handoff = None;
     state.pending_task = None;
     state.pending_seed = None;
     // "Stop the current run before switching chats" is stale the moment the
@@ -5052,13 +5102,42 @@ fn spawn_next_step(
         }
     };
 
+    // The page as it is now, read once on this thread (after the previous
+    // action ran): the sign-in handoff below and the fast lane both use it.
+    let page_digest = observe_active_page(state);
+
+    // A page that needs the person (a password field, a known sign-in host)
+    // stops the run here, before any model call, and asks. Nothing executes
+    // while it waits; *Continue* resumes from the page as it then is.
+    let active_url = state
+        .tab_urls
+        .get(state.active_tab)
+        .cloned()
+        .unwrap_or_default();
+    if let signin::Gate::Pause(wall) = signin::gate(
+        &mut live.signin_cleared_host,
+        &active_url,
+        page_digest.as_ref(),
+    ) {
+        activity::record(
+            "sign-in handoff",
+            &wall.host,
+            "waiting for the user",
+            true,
+            "",
+            0,
+        );
+        state.signin_handoff = Some(wall);
+        state.live_loop = Some(live);
+        return scroll_to_latest(state);
+    }
+
     // The optional Laya fast lane: only when it is configured AND the active
-    // page can be read right now (the digest is taken on this thread, after
-    // the previous action ran). Anything less and this step is exactly the
+    // page can be read right now. Anything less and this step is exactly the
     // normal LLM step.
     let laya_timing = state.laya.clone();
     let fast_inputs = state.laya.clone().and_then(|decider| {
-        let digest = observe_active_page(state)?;
+        let digest = page_digest.clone()?;
         let signature = agent_run::page_signature(&digest);
         if let (Some(last), Some(previous)) = (live.history.last_mut(), live.last_page_sig) {
             if last.page_changed.is_none() {
@@ -7018,6 +7097,10 @@ pub fn launch() -> iced::Result {
                 );
             }
             let favicon_task = Task::done(FerriteBrowserMessage::FetchTileFavicons);
+            // The engine is built by the first session, once per process, so
+            // the saved browser identity (the User-Agent sites see) is handed
+            // over now, before it exists.
+            ferrite_servo::session::set_user_agent(state.settings.identity.user_agent());
             match HeadlessServoSession::new(1280, 700) {
                 Ok(session) => {
                     state.servo_sessions.insert(0, session);
