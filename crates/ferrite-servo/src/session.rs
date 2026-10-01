@@ -278,6 +278,13 @@ pub fn audit_guard_decision(primitive: &str, origin: Option<&str>, allowed: bool
 #[cfg(feature = "servo")]
 const SVG_COMPAT_JS: &str = include_str!("svg_compat.js");
 
+/// A process-wide counter for frame numbers, so two tabs never share one.
+#[cfg(feature = "servo")]
+pub(crate) fn next_frame_seq() -> u64 {
+    static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
+    NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+}
+
 /// Defines web interfaces Servo lacks that real sites test for; see the
 /// script's own header.
 #[cfg(feature = "servo")]
@@ -668,6 +675,10 @@ mod inner {
         /// converted from whatever `servo::PixelFormat` the page's icon
         /// decoded to.
         favicon: SharedFavicon,
+        /// Set when the engine says it has a new frame; cleared when the
+        /// session has read that frame back. Reading pixels is by far the most
+        /// expensive thing a tick does, so an unchanged page costs nothing.
+        frame_ready: Rc<std::cell::Cell<bool>>,
     }
 
     impl WebViewDelegate for HeadlessDelegate {
@@ -686,6 +697,7 @@ mod inner {
 
         fn notify_new_frame_ready(&self, webview: servo::WebView) {
             webview.paint();
+            self.frame_ready.set(true);
         }
 
         fn notify_load_status_changed(&self, webview: servo::WebView, status: servo::LoadStatus) {
@@ -803,7 +815,13 @@ mod inner {
         width: u32,
         height: u32,
         /// Cached last frame as raw RGBA bytes (width × height × 4).
-        last_frame: Option<Vec<u8>>,
+        last_frame: Option<std::sync::Arc<Vec<u8>>>,
+        /// Unique (process-wide) number of `last_frame`; changes exactly when
+        /// the pixels do, so a caller can tell "same picture" without
+        /// comparing or copying them.
+        frame_seq: u64,
+        /// Shared with the delegate: the engine has painted something new.
+        frame_ready: Rc<std::cell::Cell<bool>>,
         /// Most recently synced load status (updated in `spin()`).
         last_load_status: LoadStatus,
         /// Most recently synced current URL (updated in `spin()`).
@@ -912,6 +930,7 @@ mod inner {
             let shared_console_errors: Rc<std::cell::RefCell<Vec<String>>> =
                 Rc::new(std::cell::RefCell::new(Vec::new()));
             let shared_favicon: SharedFavicon = Rc::new(std::cell::RefCell::new(None));
+            let frame_ready = Rc::new(std::cell::Cell::new(true));
 
             // ── Rendering context ──────────────────────────────────────────
             let rendering_context = Rc::new(
@@ -937,6 +956,7 @@ mod inner {
                 page_title: shared_page_title.clone(),
                 console_errors: shared_console_errors.clone(),
                 favicon: shared_favicon.clone(),
+                frame_ready: frame_ready.clone(),
             });
             let webview = make(&servo, rendering_context.clone(), delegate);
 
@@ -950,6 +970,8 @@ mod inner {
                 width,
                 height,
                 last_frame: None,
+                frame_seq: 0,
+                frame_ready,
                 last_load_status: LoadStatus::Loading,
                 current_url: "about:blank".to_string(),
                 shared_load_status,
@@ -1088,6 +1110,12 @@ mod inner {
         }
 
         fn read_frame(&mut self) {
+            // Nothing new was painted since the last read: keep the picture we
+            // have (and its number) rather than copying megabytes of identical
+            // pixels out of the GL context sixty times a second.
+            if !self.frame_ready.get() && self.last_frame.is_some() {
+                return;
+            }
             // Read back the current frame after paint.
             //
             // `pump_engine()` may have called `make_current()` on another
@@ -1100,7 +1128,9 @@ mod inner {
                 servo::DeviceIntSize::new(self.width as i32, self.height as i32),
             );
             if let Some(rgba) = self.rendering_context.read_to_image(rect) {
-                self.last_frame = Some(rgba.into_raw());
+                self.frame_ready.set(false);
+                self.last_frame = Some(std::sync::Arc::new(rgba.into_raw()));
+                self.frame_seq = super::next_frame_seq();
             }
         }
 
@@ -1115,7 +1145,18 @@ mod inner {
         pub fn get_frame(&self) -> Option<(u32, u32, Vec<u8>)> {
             self.last_frame
                 .as_ref()
-                .map(|b| (self.width, self.height, b.clone()))
+                .map(|b| (self.width, self.height, b.as_ref().clone()))
+        }
+
+        /// The current frame without copying it: `(sequence, width, height,
+        /// pixels)`. The sequence number changes exactly when the picture
+        /// does, so a caller that already has that number needs nothing
+        /// (this is what keeps scrolling smooth: a handle is built once per
+        /// new picture, not once per redraw).
+        pub fn frame_shared(&self) -> Option<(u64, u32, u32, std::sync::Arc<Vec<u8>>)> {
+            self.last_frame
+                .as_ref()
+                .map(|b| (self.frame_seq, self.width, self.height, b.clone()))
         }
 
         /// Returns `(width, height, rgba_bytes)` of the page's current favicon, or
@@ -1265,6 +1306,7 @@ mod inner {
         pub fn resize(&mut self, width: u32, height: u32) {
             self.width = width;
             self.height = height;
+            self.frame_ready.set(true);
             self.webview.resize(PhysicalSize { width, height });
         }
 
@@ -1287,6 +1329,7 @@ mod inner {
         /// tab that was never focused/shown does not react to input.
         pub fn set_active(&self, active: bool) {
             if active {
+                self.frame_ready.set(true);
                 self.webview.show();
                 self.webview.focus();
             } else {
@@ -1533,6 +1576,10 @@ impl HeadlessServoSession {
     pub fn spin(&mut self) {}
 
     pub fn get_frame(&self) -> Option<(u32, u32, Vec<u8>)> {
+        None
+    }
+
+    pub fn frame_shared(&self) -> Option<(u64, u32, u32, std::sync::Arc<Vec<u8>>)> {
         None
     }
 

@@ -1269,6 +1269,11 @@ pub struct FerriteBrowser {
     pub show_js_console: bool,
     pub audit_entries: Vec<AuditEntry>,
     pub servo_sessions: HashMap<usize, HeadlessServoSession>,
+    /// The picture each tab last showed, as a ready-to-draw handle, keyed by
+    /// tab and tagged with the engine's frame number. A handle is built once
+    /// per *new* picture; building one per redraw (what this replaced) copied
+    /// and re-uploaded the whole page sixty times a second.
+    frame_cache: HashMap<usize, (u64, ImageHandle)>,
     pub is_loading: bool,
     pub can_go_back: bool,
     pub can_go_forward: bool,
@@ -1675,6 +1680,7 @@ impl Default for FerriteBrowser {
             show_js_console: false,
             audit_entries: vec![],
             servo_sessions: HashMap::new(),
+            frame_cache: HashMap::new(),
             is_loading: false,
             can_go_back: false,
             can_go_forward: false,
@@ -2696,6 +2702,7 @@ pub fn update(
                     }
                 }
             }
+            refresh_frame_cache(state);
             let active = state.active_tab;
             if let Some(session) = state.servo_sessions.get(&active) {
                 state.can_go_back = session.can_go_back();
@@ -3774,6 +3781,42 @@ fn add_tab(state: &mut FerriteBrowser) -> (usize, Option<String>) {
 /// starts at its creation size, not at the size the previous tab was last
 /// resized to, and treating them as equal left every tab after the first
 /// displayed at the wrong size with pointer input landing in the wrong place.
+/// Keeps `frame_cache` current for the active tab: a new handle only when the
+/// engine produced a new picture, and none kept for tabs that are gone.
+fn refresh_frame_cache(state: &mut FerriteBrowser) {
+    state
+        .frame_cache
+        .retain(|index, _| state.servo_sessions.contains_key(index));
+    let active = state.active_tab;
+    let Some((seq, width, height, pixels)) = state
+        .servo_sessions
+        .get(&active)
+        .and_then(HeadlessServoSession::frame_shared)
+    else {
+        return;
+    };
+    if state.frame_cache.get(&active).map(|(s, _)| *s) == Some(seq) {
+        return;
+    }
+    // The pixels are shared with the session, not copied into the handle.
+    let handle = ImageHandle::from_rgba(
+        width,
+        height,
+        iced_widget::core::image::Bytes::from_owner(SharedPixels(pixels)),
+    );
+    state.frame_cache.insert(active, (seq, handle));
+}
+
+/// A shared RGBA buffer as `Bytes`, so the image handle borrows the engine's
+/// frame instead of owning a copy of it.
+struct SharedPixels(std::sync::Arc<Vec<u8>>);
+
+impl AsRef<[u8]> for SharedPixels {
+    fn as_ref(&self) -> &[u8] {
+        self.0.as_slice()
+    }
+}
+
 fn sync_active_webview(state: &mut FerriteBrowser) {
     let active = state.active_tab;
     for (index, session) in &state.servo_sessions {
@@ -6515,13 +6558,11 @@ pub fn view(state: &FerriteBrowser) -> Element<'_, FerriteBrowserMessage> {
             // Home / new-tab page — always shown for about:blank, even if Servo
             // has produced a blank white frame for that URL.
             new_tab_page(state)
-        } else if let Some((w, h, bytes)) = state
-            .servo_sessions
-            .get(&active)
-            .and_then(|s| s.get_frame())
-        {
-            // Live Servo frame — interactive via mouse_area
-            let handle = ImageHandle::from_rgba(w, h, bytes);
+        } else if let Some((_, handle)) = state.frame_cache.get(&active) {
+            // Live Servo frame — interactive via mouse_area. The handle is
+            // cached per picture (`refresh_frame_cache`), so a redraw that
+            // changes nothing re-uploads nothing.
+            let handle = handle.clone();
             let img = ServoImage::new(handle)
                 .width(Length::Fill)
                 .height(Length::Fill);
