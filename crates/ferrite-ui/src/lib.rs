@@ -221,6 +221,7 @@ mod agent_run;
 mod chrome;
 mod icons;
 mod identity;
+mod markdown;
 mod page_input;
 mod pages;
 mod runtime_guard;
@@ -1961,6 +1962,8 @@ pub enum FerriteBrowserMessage {
     ThreadAnimTick,
     /// The answer card's Copy button: puts the full answer on the clipboard.
     CopyAnswer(String),
+    /// A link in an agent answer, clicked: opens in a new tab.
+    OpenLink(String),
     /// Toggles one expandable part of the thread (see `FerriteBrowser::expanded`).
     ToggleExpand(String),
     // ── IPI consent ───────────────────────────────────────────────────────────
@@ -2119,6 +2122,20 @@ pub fn update(
             // A new tab starts at the address bar, ready to type, as in every
             // browser.
             return focus_address_bar(state);
+        }
+        FerriteBrowserMessage::OpenLink(url) => {
+            // The answer's text came from a model that has read untrusted
+            // pages, so a link only ever opens because a person clicked it,
+            // only for http(s), and in a tab of its own.
+            let lower = url.to_ascii_lowercase();
+            if !(lower.starts_with("https://") || lower.starts_with("http://")) {
+                return Task::none();
+            }
+            let (index, session_error) = add_tab(state);
+            if let Some(e) = session_error {
+                eprintln!("[ferrite-ui] Servo session tab {index}: {e}");
+            }
+            return update(state, FerriteBrowserMessage::NavigateRequested(url));
         }
         FerriteBrowserMessage::CloseTab(i) => {
             close_tab_at(state, i);

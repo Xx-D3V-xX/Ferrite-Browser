@@ -58,8 +58,9 @@ const ENTRANCE_SLIDE: f32 = 6.0;
 /// Characters of a user message shown before "Show more".
 const USER_TEXT_LIMIT: usize = 600;
 /// Characters of an answer shown before "Show more".
-const ANSWER_TEXT_LIMIT: usize = 900;
 /// Characters of a step's result shown before "Show more".
+/// How much of a page's text shows before "Show more".
+const PAGE_PREVIEW_CHARS: usize = 140;
 const RESULT_TEXT_LIMIT: usize = 140;
 /// The most characters ever laid out for one expanded text (Copy still copies
 /// all of it); keeps a 20,000-character answer from making layout crawl.
@@ -230,8 +231,6 @@ pub(crate) enum ExpandPart<'a> {
     Steps,
     /// A long user message.
     User,
-    /// A long answer / question.
-    Answer,
     /// One step's long result (by step index).
     Result(&'a usize),
 }
@@ -241,7 +240,6 @@ pub(crate) fn expand_key(turn_id: &str, part: ExpandPart<'_>) -> String {
     match part {
         ExpandPart::Steps => format!("steps:{turn_id}"),
         ExpandPart::User => format!("user:{turn_id}"),
-        ExpandPart::Answer => format!("answer:{turn_id}"),
         ExpandPart::Result(i) => format!("result:{turn_id}:{i}"),
     }
 }
@@ -354,7 +352,7 @@ fn icon_button<'a>(
 }
 
 /// A quiet text-style button ("Show more", "Copy"): transparent until hovered.
-fn link_button_style(theme: &Theme, status: button::Status) -> button::Style {
+pub(crate) fn link_button_style(theme: &Theme, status: button::Status) -> button::Style {
     let palette = palette_for_theme(theme);
     button::Style {
         background: Some(Background::Color(match status {
@@ -985,14 +983,46 @@ fn step_row<'a>(v: StepView<'a>, palette: &'static Palette) -> Element<'a, Ferri
     } else {
         palette.text_dim
     };
-    lines.push(expandable_text(
-        v.result,
-        RESULT_TEXT_LIMIT,
-        v.result_expanded,
-        v.result_key,
-        11.0,
-        fade(result_color, a),
-    ));
+    // A page read is a headline (what page, how far down) with the raw text
+    // collapsed under it, not a wall of grey text.
+    match crate::agent_run::parse_page_read(v.result).filter(|_| !v.blocked) {
+        Some(read) => {
+            let mut headline = if read.title.is_empty() {
+                read.host.clone()
+            } else {
+                format!("{} \u{b7} {}", read.title, read.host)
+            };
+            if let Some(scroll) = &read.scroll {
+                headline.push_str(&format!(" \u{b7} {scroll}"));
+            }
+            lines.push(
+                text(truncate(&headline, 110))
+                    .size(11)
+                    .color(fade(palette.text_dim, a))
+                    .width(Length::Fill)
+                    .wrapping(text::Wrapping::WordOrGlyph)
+                    .into(),
+            );
+            if !read.text.is_empty() {
+                lines.push(expandable_text(
+                    &read.text,
+                    PAGE_PREVIEW_CHARS,
+                    v.result_expanded,
+                    v.result_key,
+                    11.0,
+                    fade(tint(palette.text_dim, 0.8), a),
+                ));
+            }
+        }
+        None => lines.push(expandable_text(
+            v.result,
+            RESULT_TEXT_LIMIT,
+            v.result_expanded,
+            v.result_key,
+            11.0,
+            fade(result_color, a),
+        )),
+    }
     container(column(lines).spacing(2).width(Length::Fill))
         .padding([4, 0])
         .width(Length::Fill)
@@ -1224,21 +1254,11 @@ fn outcome_card<'a>(
         },
     );
     let a = eased(t);
-    let turn_id = turn.id.to_string();
-    let key = expand_key(&turn_id, ExpandPart::Answer);
-    let expanded = state.expanded.contains(&key);
 
     let card: Element<FerriteBrowserMessage> = match &turn.outcome {
         Outcome::InProgress => return None,
         Outcome::Answered(answer) => {
-            let body = expandable_text(
-                answer,
-                ANSWER_TEXT_LIMIT,
-                expanded,
-                key,
-                13.0,
-                fade(palette.text, a),
-            );
+            let body = answer_body(answer, palette, a);
             let copy = button(
                 row![
                     icon(Icon::Copy, ICON_SIZE_SM, palette.accent),
@@ -1258,14 +1278,7 @@ fn outcome_card<'a>(
             )
         }
         Outcome::AskedUser(question) => {
-            let body = expandable_text(
-                question,
-                ANSWER_TEXT_LIMIT,
-                expanded,
-                key,
-                13.0,
-                fade(palette.text, a),
-            );
+            let body = answer_body(question, palette, a);
             answer_frame(
                 column![
                     row![
@@ -1308,6 +1321,30 @@ fn outcome_card<'a>(
             .into(),
     };
     Some(entrance(card, t))
+}
+
+/// The most of an answer that is laid out; a longer one ends with a note.
+const ANSWER_RENDER_LIMIT: usize = 24_000;
+
+/// What the model wrote, laid out as headings, lists, code, tables and links
+/// (see `markdown`).
+fn answer_body<'a>(
+    answer: &str,
+    palette: &'static Palette,
+    alpha: f32,
+) -> Element<'a, FerriteBrowserMessage> {
+    if answer.chars().count() > ANSWER_RENDER_LIMIT {
+        let shown: String = answer.chars().take(ANSWER_RENDER_LIMIT).collect();
+        return column![
+            crate::markdown::view(&shown, palette, 13.0, alpha),
+            text("The rest of this answer is not shown. Use Copy to read all of it.")
+                .size(11)
+                .color(fade(palette.text_dim, alpha)),
+        ]
+        .spacing(6)
+        .into();
+    }
+    crate::markdown::view(answer, palette, 13.0, alpha)
 }
 
 /// The answer/question card frame: a raised surface; the question variant gets
@@ -2277,7 +2314,6 @@ mod tests {
     fn expand_keys_are_distinct_per_turn_and_part() {
         let a = expand_key("t1", ExpandPart::Steps);
         assert_ne!(a, expand_key("t2", ExpandPart::Steps));
-        assert_ne!(a, expand_key("t1", ExpandPart::Answer));
         assert_ne!(
             expand_key("t1", ExpandPart::Result(&0)),
             expand_key("t1", ExpandPart::Result(&1))
