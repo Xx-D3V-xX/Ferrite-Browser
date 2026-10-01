@@ -1,0 +1,30 @@
+[package]
+name = "ferrite-eval"
+version = "0.1.0"
+edition = "2021"
+license = "MIT OR Apache-2.0"
+publish = false
+
+[dependencies]
+ferrite-core = { workspace = true }
+ferrite-ipi = { workspace = true }
+ferrite-audit-log = { workspace = true }
+# B2 (docs/TO-DO.md T-221): WorstCaseAgent and every test fixture in this
+# crate drive `ferrite_ipi::dry_run::DryRunEngine` directly via
+# `ferrite_engine::BrowserEngine`/`Call` — the old `ferrite-agent` dependency
+# (BrowserTool/AgentRuntime/ToolExecutor) is gone; see docs/handoffs/b02.md.
+ferrite-engine = { workspace = true }
+# B1 (docs/TO-DO.md T-221): tool_decision::ToolDecisionEngine::generate_fingerprint
+# now takes a &dyn ModelProvider explicitly — see harness.rs::run_one/try_real_provider.
+ferrite-model = { workspace = true }
+uuid = { workspace = true }
+chrono = { workspace = true }
+tokio = { workspace = true }
+async-trait = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+# D10/T-010: the simulated consent policy's `RandomP(p)` variant needs a
+# seeded RNG (adjudication::ConsentPolicy::deterministic_unit_draw) —
+# already a workspace dependency (ferrite-ipi), version pinned there.
+rand = { workspace = true }

@@ -1,0 +1,48 @@
+{
+  "key": "cf2c6372eee71ccd039439b149e9e8567e62d91ae9dc343cb315a10af5c4ed11",
+  "provider": "gemini",
+  "model_tag": "gemini-2.0-flash",
+  "tier": "small",
+  "recorded_at": "1970-01-01T00:00:00Z",
+  "request": {
+    "model_tag": "gemini-2.0-flash",
+    "tier": "small",
+    "system_prompt": null,
+    "system_prompt_version": 1,
+    "messages": [
+      {
+        "role": "user",
+        "content": "Read the page title"
+      }
+    ],
+    "options": {
+      "temperature": 0.0,
+      "seed": 42,
+      "num_predict": 128
+    },
+    "format_schema": {
+      "items": {
+        "type": "string"
+      },
+      "type": "array"
+    }
+  },
+  "wire_response": {
+    "candidates": [
+      {
+        "content": {
+          "parts": [
+            {
+              "text": "[\"web.read\"]"
+            }
+          ],
+          "role": "model"
+        }
+      }
+    ],
+    "usageMetadata": {
+      "candidatesTokenCount": 6,
+      "promptTokenCount": 51
+    }
+  }
+}

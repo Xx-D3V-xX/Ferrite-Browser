@@ -1,0 +1,17 @@
+[
+  {
+    "exact": [
+      "https://mail.example.com"
+    ]
+  },
+  {
+    "domain_suffix": [
+      "example.com"
+    ]
+  },
+  {
+    "task_open": {
+      "rationale": "open-web search for the user's query"
+    }
+  }
+]

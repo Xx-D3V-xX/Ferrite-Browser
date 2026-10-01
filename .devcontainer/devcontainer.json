@@ -8,15 +8,8 @@
   "mounts": [
     "source=${localWorkspaceFolder},target=/workspace,type=bind,consistency=cached",
     "source=ferrite-cargo-cache,target=/usr/local/cargo/registry,type=volume",
-    "source=ferrite-target-cache,target=/workspace/Browser/target,type=volume"
+    "source=ferrite-target-cache,target=/workspace/target,type=volume"
   ],
-  "forwardPorts": [9222],
-  "portsAttributes": {
-    "9222": {
-      "label": "Ferrite Agent WebSocket",
-      "onAutoForward": "silent"
-    }
-  },
   "customizations": {
     "antigravity": {
       "extensions": [
@@ -41,6 +34,6 @@
       ]
     }
   },
-  "postCreateCommand": "cd /workspace/Browser && cargo fetch",
+  "postCreateCommand": "cargo fetch",
   "remoteUser": "root"
 }

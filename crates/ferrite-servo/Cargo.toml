@@ -1,0 +1,35 @@
+[package]
+name = "ferrite-servo"
+version = "0.1.0"
+edition = "2021"
+license = "MIT OR Apache-2.0"
+publish = false
+
+[features]
+# Enable Servo engine integration:
+#   cargo build -p ferrite-servo --features servo
+#   cargo build -p ferrite-shell --features ferrite-servo/servo
+servo = ["dep:servo"]
+
+[dependencies]
+ferrite-audit-log = { workspace = true }
+uuid = { workspace = true }
+raw-window-handle = { workspace = true }
+winit = { workspace = true }
+log = { workspace = true }
+# Force aws_lc_rs backend — Servo's net component imports rustls::crypto::aws_lc_rs
+# directly. Without this the workspace resolver selects `ring` and that import
+# fails to compile.
+rustls = { workspace = true }
+url = { workspace = true }
+
+# Optional — only resolved when the `servo` feature is enabled.
+# The crates.io package `servo`; Rust imports use `use servo::...`.
+servo = { workspace = true, optional = true }
+
+# cargo-machete can't see the `use servo::...` imports inside
+# #[cfg(feature = "servo")] blocks without building with that feature
+# enabled (it does static analysis without --with-metadata by default) —
+# false-positive "unused dependency" without this.
+[package.metadata.cargo-machete]
+ignored = ["servo"]

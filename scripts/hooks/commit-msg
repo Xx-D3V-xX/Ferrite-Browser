@@ -1,0 +1,8 @@
+#!/bin/sh
+# scripts/hooks/commit-msg — reject AI attribution and boilerplate trailers.
+# Installed via: git config core.hooksPath scripts/hooks (see scripts/hooks/install.sh)
+# Required by docs/REBUILD_DIRECTIVE.md R4/§11.
+if grep -qiE 'co-authored-by:.*(claude|anthropic|copilot)|generated with|🤖|ai-assisted' "$1"; then
+  echo "commit-msg: AI attribution is not permitted in commit messages." >&2
+  exit 1
+fi

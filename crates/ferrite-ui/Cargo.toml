@@ -1,0 +1,68 @@
+[package]
+name = "ferrite-ui"
+version = "0.1.0"
+edition = "2021"
+license = "MIT OR Apache-2.0"
+publish = false
+
+[dependencies]
+iced = { workspace = true }
+iced_widget = { workspace = true }
+ferrite-core = { workspace = true }
+ferrite-audit-log = { workspace = true }
+ferrite-servo = { workspace = true }
+ferrite-agent = { workspace = true }
+ferrite-ipi = { workspace = true }
+# B3 (docs/TO-DO.md T-224/T-220): BorrowedServoEngine gives the live tab's
+# HeadlessServoSession a BrowserEngine face; ferrite_agent::browser_loop
+# drives it (AgentAction/execute_action/run_agent_loop). C1 removed a then-
+# unused direct `ferrite-engine` dependency (`cargo machete`-flagged,
+# docs/TO-DO.md); the agent-context wiring below is what needs it back.
+ferrite-engine-servo = { workspace = true }
+# Agent context wiring: the UI thread asks the borrowed engine for the active
+# page's `PageDigest` (`BrowserEngine::observe_page`) to seed a run and to feed
+# the optional Laya fast lane, so this crate now names the trait and the digest
+# type directly (`ferrite-engine` sits below `ferrite-agent` and `ferrite-ui`
+# in the dependency direction, so this is not an upward import).
+ferrite-engine = { workspace = true }
+# B1 (docs/TO-DO.md T-221): ToolDecisionEngine::{generate_fingerprint,
+# fingerprint_from_task} now take a &dyn ModelProvider explicitly. B3
+# (T-224/T-229): also used to construct the real live ModelProvider at
+# startup (Ollama/Gemini via ModelConfig — mirrors
+# ferrite-eval::harness::try_real_provider()).
+ferrite-model = { workspace = true }
+tokio = { workspace = true }
+async-trait = { workspace = true }
+urlencoding = { workspace = true }
+url = { workspace = true }
+serde_json = { workspace = true }
+serde = { workspace = true }
+# C3d (bookmarks): JSON persistence for the bookmark list — round-tripped
+# through `serde`'s derive, matching every other persisted/wire type in this
+# workspace (`AuditEntry`, `CaseDefinition`, ...) rather than a hand-rolled
+# format.
+#
+# C3d (bookmarks/downloads): `dirs::home_dir()`/`dirs::download_dir()`
+# resolve the real bookmarks-file and downloads-directory paths, the same
+# crate `ferrite-model::config::default_cache_dir()` already uses for the
+# same reason (no OS-neutral equivalent in `std`) — already a workspace
+# dependency (`ferrite-model`), newly used here too.
+dirs = { workspace = true }
+# C3d (downloads): the actual GET + streamed file write — `ferrite-model`'s
+# backends already depend on this workspace-pinned `reqwest`; this is a
+# second, independent user of the same one version, not a new HTTP client.
+reqwest = { workspace = true }
+# C3d (history): `HistoryEntry::visited_at` — formatted the same way the
+# audit panel already formats `AuditEntry::timestamp` (`chrono`, already a
+# workspace dependency used by `ferrite-audit-log`).
+chrono = { workspace = true }
+# New-tab hero (real quick-access-tile favicons): decodes a fetched
+# `/favicon.ico` response into raw RGBA8 for `iced_widget::image::Handle::
+# from_rgba` — see the workspace `Cargo.toml`'s own comment on this
+# dependency for why this adds no new version to the dependency graph.
+image = { workspace = true }
+
+[dev-dependencies]
+# The fast-lane tests run a loopback-only mock Laya server (127.0.0.1:0, owned
+# by the test, no external network - R7), which needs tokio's `net` feature.
+tokio = { workspace = true, features = ["net"] }

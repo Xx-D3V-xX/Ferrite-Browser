@@ -1,0 +1,33 @@
+[package]
+name = "ferrite-model"
+version = "0.1.0"
+edition = "2024"
+license = "MIT OR Apache-2.0"
+publish = false
+
+[dependencies]
+ferrite-core = { workspace = true }
+async-trait = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+tokio = { workspace = true }
+reqwest = { workspace = true }
+chrono = { workspace = true }
+sha2 = { workspace = true }
+hex = { workspace = true }
+rand = { workspace = true }
+keyring = { workspace = true }
+dirs = { workspace = true }
+
+[dev-dependencies]
+ferrite-core = { workspace = true, features = ["test-util"] }
+# `laya.rs`'s tests run a loopback-only HTTP responder on `tokio::net::TcpListener`
+# (nothing leaves the machine, R7). The workspace tokio omits "net" on purpose
+# (T-207); it is enabled here for tests only, so no shipped crate gains it.
+tokio = { workspace = true, features = ["net"] }
+
+[features]
+# Live-provider smoke tests (`just test-live`). Off by default so `just test`
+# can never spend quota (R7).
+live-tests = []

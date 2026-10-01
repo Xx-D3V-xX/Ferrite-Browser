@@ -1,0 +1,18 @@
+[
+  {
+    "capability": "web.read",
+    "scope": {
+      "domain_suffix": [
+        "search.test"
+      ]
+    }
+  },
+  {
+    "capability": "scoped.read",
+    "scope": {
+      "exact": [
+        "https://mail.example.com"
+      ]
+    }
+  }
+]

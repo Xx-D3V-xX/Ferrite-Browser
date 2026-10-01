@@ -1,144 +1,149 @@
 name: CI
 
+# Manual trigger only — no automatic run on push or pull_request, and no
+# weekly schedule. This is a deliberate project-owner decision (recorded in
+# docs/PROGRESS.md and docs/TO-DO.md T-210), not the rebuild's original
+# design (docs/REBUILD_DIRECTIVE.md §6/A1 specified push/PR + a weekly
+# Servo-release cron; both are gone here). Use the "Run workflow" button in
+# the Actions tab for every run, including a Servo release.
 on:
-  push:
-    branches: [main]
-    paths:
-      - 'Browser/**'
-      - '.devcontainer/**'
-      - '.github/workflows/ci.yml'
-  pull_request:
-    branches: [main]
-    paths:
-      - 'Browser/**'
-      - '.devcontainer/**'
-      - '.github/workflows/ci.yml'
+  workflow_dispatch: {}
 
 jobs:
   # ─────────────────────────────────────────────────────────────
-  # Job 1: Build, lint, test — matrix across Windows & macOS
+  # Job 1: Build, lint, test. macOS only, by project-owner decision — the
+  # rebuild's original ubuntu+windows+macos matrix is gone; this repo
+  # develops and ships macOS-only for now. Servo-free (default feature
+  # set) — docs/REBUILD_DIRECTIVE.md §7.1: "Servo is optional and off by
+  # default." The real-Servo build lives in Job 2, also manual-only.
   # ─────────────────────────────────────────────────────────────
   ci:
-    name: Build, Lint & Test (${{ matrix.os }})
-    runs-on: ${{ matrix.os }}
-
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          - os: windows-latest
-            platform: windows
-            binary_suffix: ".exe"
-          - os: macos-latest
-            platform: macos
-            binary_suffix: ""
-
-    defaults:
-      run:
-        working-directory: Browser
+    name: Build, Lint & Test (macOS)
+    runs-on: macos-latest
 
     steps:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Install system dependencies (macOS)
-        if: matrix.platform == 'macos'
+      - name: Install system dependencies
         run: |
           brew update
-          brew install cmake pkg-config openssl gstreamer sqlite
-        working-directory: .
-
-      - name: Install system dependencies (Windows)
-        if: matrix.platform == 'windows'
-        shell: pwsh
-        run: |
-          choco install -y cmake sqlite
-        working-directory: .
+          brew install cmake pkg-config openssl sqlite
 
       - name: Install Rust stable
         uses: dtolnay/rust-toolchain@stable
         with:
           components: rustfmt, clippy
-          targets: wasm32-unknown-unknown
 
       - name: Cache dependencies
         uses: Swatinem/rust-cache@v2
         with:
-          workspaces: Browser
-          key: ${{ matrix.platform }}
+          key: macos
 
       - name: Fetch dependencies
         run: cargo fetch
 
       - name: Check formatting
-        if: matrix.platform == 'linux'
-        run: cargo fmt --check
+        run: cargo fmt --all --check
 
-      - name: Clippy (zero warnings)
-        run: cargo clippy --workspace -- -D warnings
+      # --all-targets: the pre-A1 CI omitted this and so never linted test
+      # code at all (docs/TO-DO.md T-207 — that hid a real clippy error for
+      # months). Do not drop it again.
+      - name: Clippy (zero warnings, all targets)
+        run: cargo clippy --workspace --all-targets -- -D warnings
+
+      - name: Unused dependencies (cargo-machete)
+        run: |
+          cargo install cargo-machete --locked
+          cargo machete
+
+      # EmbarkStudios/cargo-deny-action@v2 is a Docker container action —
+      # GitHub Actions only supports container actions on Linux runners,
+      # so it fails outright ("Container action is only supported on
+      # Linux") the moment this job's matrix is macOS-only. Native
+      # install + run instead, the same pattern cargo-machete above
+      # already uses, which works on any runner OS.
+      - name: License / advisory / duplicate-version audit (cargo-deny)
+        run: |
+          cargo install cargo-deny --locked
+          cargo deny check
+
+      - name: Doc-drift checks
+        run: |
+          sh scripts/check_purge.sh
+          sh scripts/check_no_archive_links.sh
 
       - name: Run tests
         run: cargo test --workspace
 
-      - name: Build hello-ext Wasm
-        if: matrix.platform == 'linux'
-        run: |
-          cd ../extensions/hello-ext
-          cargo build --target wasm32-unknown-unknown --release
-        working-directory: Browser
+      - name: Build (default features, no Servo)
+        run: cargo build --release -p ferrite-shell
 
-      - name: Build release binary
+  # ─────────────────────────────────────────────────────────────
+  # Job 2: Build the REAL Servo-enabled binary and publish the rolling
+  # "latest" release. Manual-only (workflow_dispatch), macOS only —
+  # docs/REBUILD_DIRECTIVE.md §7.1: the Servo build costs tens of GB and
+  # 30-60 minutes; this project's owner has decided no automatic trigger
+  # (push, PR, or schedule) gets to pay that cost — every run, including a
+  # release, is an explicit "Run workflow" click.
+  # ─────────────────────────────────────────────────────────────
+  build-servo-release:
+    name: Build Servo release (macOS)
+    runs-on: macos-latest
+    if: github.event_name == 'workflow_dispatch'
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install system dependencies
+        run: |
+          brew update
+          brew install cmake pkg-config openssl gstreamer sqlite
+
+      - name: Install Rust stable
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache dependencies
+        uses: Swatinem/rust-cache@v2
+        with:
+          key: servo-macos
+
+      - name: Build release binary (with Servo)
         run: cargo build --release -p ferrite-shell --features ferrite-servo/servo
 
-      # ── Derive binary label from commit message ───────────────
-      # Convention: include [T<task>.<block>] anywhere in the commit.
-      # Examples:  [T7.3]   [T9.1]   [T14.2]
-      # Fallback: first 7 chars of the commit SHA.
       - name: Derive binary label
         id: label
         shell: bash
         run: |
-          MSG="${{ github.event.head_commit.message }}"
-          if [[ "$MSG" =~ \[T([0-9]+\.[0-9]+)\] ]]; then
-            LABEL="${BASH_REMATCH[1]}"
-          else
-            SHA="${{ github.sha }}"
-            LABEL="${SHA:0:7}"
-          fi
-          echo "binary_label=$LABEL" >> "$GITHUB_OUTPUT"
-          echo "Resolved binary label: $LABEL"
+          SHA="${{ github.sha }}"
+          echo "binary_label=${SHA:0:7}" >> "$GITHUB_OUTPUT"
 
       - name: Stage executable
         shell: bash
         run: |
           LABEL="${{ steps.label.outputs.binary_label }}"
-          PLATFORM="${{ matrix.platform }}"
-          EXT="${{ matrix.binary_suffix }}"
           mkdir -p staged
-          cp "target/release/ferrite-shell${EXT}" "staged/ferrite-${LABEL}-${PLATFORM}${EXT}"
-          echo "Staged: staged/ferrite-${LABEL}-${PLATFORM}${EXT}"
+          cp "target/release/ferrite-shell" "staged/ferrite-${LABEL}-macos"
 
       - name: Upload executable artifact
         uses: actions/upload-artifact@v4
         with:
-          name: ferrite-${{ steps.label.outputs.binary_label }}-${{ matrix.platform }}
-          path: Browser/staged/
+          name: ferrite-${{ steps.label.outputs.binary_label }}-macos
+          path: staged/
           retention-days: 90
 
   # ─────────────────────────────────────────────────────────────
-  # Job 2: Publish a rolling "latest" GitHub Release.
-  # Runs only on pushes to main — never on PRs.
-  #
-  # Every push replaces the previous "latest" release's assets.
-  # The release tag stays "latest"; only the binaries inside
-  # it change. Full history is preserved via the commit SHA
-  # baked into each filename.
+  # Job 3: Publish the rolling "latest" GitHub Release from the manual
+  # Servo build above. Every run replaces the previous "latest" release's
+  # assets; full history is preserved via the commit SHA baked into the
+  # filename.
   # ─────────────────────────────────────────────────────────────
   release:
     name: Publish rolling release
     runs-on: ubuntu-22.04
-    needs: ci
-    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    needs: build-servo-release
+    if: github.event_name == 'workflow_dispatch'
 
     permissions:
       contents: write
@@ -147,25 +152,12 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
-      # Rederive the label — same logic as the ci job above
       - name: Derive binary label
         id: label
         shell: bash
         run: |
-          MSG="${{ github.event.head_commit.message }}"
-          if [[ "$MSG" =~ \[T([0-9]+\.[0-9]+)\] ]]; then
-            LABEL="${BASH_REMATCH[1]}"
-          else
-            SHA="${{ github.sha }}"
-            LABEL="${SHA:0:7}"
-          fi
-          echo "binary_label=$LABEL" >> "$GITHUB_OUTPUT"
-
-      - name: Download Windows artifact
-        uses: actions/download-artifact@v4
-        with:
-          name: ferrite-${{ steps.label.outputs.binary_label }}-windows
-          path: downloaded/windows
+          SHA="${{ github.sha }}"
+          echo "binary_label=${SHA:0:7}" >> "$GITHUB_OUTPUT"
 
       - name: Download macOS artifact
         uses: actions/download-artifact@v4
@@ -173,7 +165,6 @@ jobs:
           name: ferrite-${{ steps.label.outputs.binary_label }}-macos
           path: downloaded/macos
 
-      # ── Build release body with metadata ─────────────────────
       - name: Build release notes
         id: notes
         shell: bash
@@ -182,33 +173,27 @@ jobs:
           SHA="${{ github.sha }}"
           SHORT="${SHA:0:7}"
           DATE=$(date -u +"%Y-%m-%d %H:%M UTC")
-          MSG="${{ github.event.head_commit.message }}"
 
           cat <<EOF > release_notes.md
-          ## ferrite-browser · latest
+          ## ferrite · latest
 
-          > This release is **overwritten on every push to main.**
-          > It always contains the most recent passing build.
+          > This release is built manually only (workflow_dispatch) — no
+          > automatic push, PR, or schedule trigger. It always contains the
+          > most recent manually-triggered build, which may be behind
+          > \`main\`.
 
           | Field   | Value |
           |---------|-------|
           | Label   | \`$LABEL\` |
           | Commit  | [\`$SHORT\`](https://github.com/${{ github.repository }}/commit/$SHA) |
           | Date    | $DATE |
-          | Message | $MSG |
 
           ### Downloads
           | Platform | File |
           |----------|------|
-          | Windows  | \`ferrite-${LABEL}-windows.exe\` |
           | macOS    | \`ferrite-${LABEL}-macos\` |
           EOF
 
-          echo "Generated release notes"
-
-      # ── Delete old "latest" tag so we can recreate it ────────
-      # softprops/action-gh-release can't update a lightweight tag
-      # already pointing to a different commit — easier to nuke it.
       - name: Delete existing "latest" tag (if any)
         shell: bash
         env:
@@ -216,17 +201,15 @@ jobs:
         run: |
           gh release delete latest --yes --cleanup-tag 2>/dev/null || true
 
-      # ── Create fresh "latest" release with both binaries ─────
       - name: Create GitHub Release
         uses: softprops/action-gh-release@v2
         with:
           tag_name: latest
-          name: "ferrite-browser · latest build"
+          name: "ferrite · latest build"
           body_path: release_notes.md
-          prerelease: true          # marks it as "Pre-release" — not a stable tag
+          prerelease: true
           make_latest: true
           files: |
-            downloaded/windows/ferrite-${{ steps.label.outputs.binary_label }}-windows.exe
             downloaded/macos/ferrite-${{ steps.label.outputs.binary_label }}-macos
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

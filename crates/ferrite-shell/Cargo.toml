@@ -1,0 +1,17 @@
+[package]
+name = "ferrite-shell"
+version = "0.1.0"
+edition = "2024"
+license = "MIT OR Apache-2.0"
+publish = false
+
+[dependencies]
+ferrite-audit-log = { workspace = true }
+ferrite-servo = { workspace = true }
+ferrite-ui = { workspace = true }
+ferrite-agent = { workspace = true }
+ferrite-core = { workspace = true }
+ferrite-engine = { workspace = true }
+ferrite-model = { workspace = true }
+tokio = { workspace = true }
+uuid = { workspace = true }

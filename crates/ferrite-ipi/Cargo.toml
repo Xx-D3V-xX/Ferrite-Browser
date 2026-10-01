@@ -1,0 +1,40 @@
+[package]
+name = "ferrite-ipi"
+version = "0.1.0"
+edition = "2021"
+license = "MIT OR Apache-2.0"
+publish = false
+
+[dependencies]
+ferrite-core = { workspace = true }
+ferrite-engine = { workspace = true }
+ferrite-model = { workspace = true }
+uuid = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+tokio = { workspace = true }
+ammonia = { workspace = true }
+regex = { workspace = true }
+sha2 = { workspace = true }
+hex = { workspace = true }
+aes-gcm = { workspace = true }
+rand = { workspace = true }
+chrono = { workspace = true }
+url = { workspace = true }
+async-trait = { workspace = true }
+rusqlite = { workspace = true }
+
+[dev-dependencies]
+# Adds tokio's `test-util` feature (paused/advanceable virtual clock) only
+# for this crate's own test/bench targets — dev-dependency features are not
+# unified into normal `build`/release compilation, so this does not change
+# `tokio`'s feature set for `just build`/`just build-servo` or any other
+# crate. Needed so the dry-run timeout test can advance virtual time
+# (`#[tokio::test(start_paused = true)]`) instead of a real sleep, per R8.
+tokio = { workspace = true, features = ["test-util"] }
+
+[features]
+# Test-only constructors (e.g. a fixed-bytes twin key), mirroring
+# ferrite-core's `test-util` feature. Never enabled outside test builds.
+test-util = []

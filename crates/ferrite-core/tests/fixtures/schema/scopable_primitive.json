@@ -1,0 +1,18 @@
+[
+  "navigate",
+  "dom.read",
+  "dom.query",
+  "dom.write",
+  "form.fill",
+  "click",
+  "scroll",
+  "wait",
+  "download",
+  "tab.open",
+  "tab.close",
+  "cookie.read",
+  "storage.read",
+  "clipboard.read",
+  "clipboard.write",
+  "screenshot"
+]

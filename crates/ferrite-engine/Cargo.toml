@@ -1,0 +1,23 @@
+[package]
+name = "ferrite-engine"
+version = "0.1.0"
+edition = "2021"
+license = "MIT OR Apache-2.0"
+publish = false
+
+[features]
+# Exposes `pub mod conformance` — the action-suite assertions this crate's
+# own MockEngine tests use. Kept behind a feature (rather than plain
+# `#[cfg(test)]`) so `ferrite-engine-servo` can reuse the same assertions
+# against `ServoEngine` from its own test binary, without pulling test-only
+# code into a normal (non-test) build of this crate (R9).
+test-util = []
+
+[dependencies]
+ferrite-core = { workspace = true }
+serde = { workspace = true }
+thiserror = { workspace = true }
+
+[dev-dependencies]
+serde_json = { workspace = true }
+ferrite-engine = { path = ".", features = ["test-util"] }

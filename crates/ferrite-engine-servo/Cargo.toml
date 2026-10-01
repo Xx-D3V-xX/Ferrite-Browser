@@ -1,0 +1,23 @@
+[package]
+name = "ferrite-engine-servo"
+version = "0.1.0"
+edition = "2021"
+license = "MIT OR Apache-2.0"
+publish = false
+
+[features]
+# Enable the real Servo-backed BrowserEngine:
+#   cargo build -p ferrite-engine-servo --features engine-servo
+# Named `engine-servo` per docs/REBUILD_DIRECTIVE.md §6/A9's own wording
+# (distinct from `ferrite-servo`'s own `servo` feature, which this crate
+# enables underneath it — see the crate's module docs for why both exist).
+engine-servo = ["ferrite-servo/servo"]
+
+[dependencies]
+ferrite-core = { workspace = true }
+ferrite-engine = { workspace = true }
+ferrite-servo = { workspace = true }
+serde_json = { workspace = true }
+
+[dev-dependencies]
+ferrite-engine = { workspace = true, features = ["test-util"] }

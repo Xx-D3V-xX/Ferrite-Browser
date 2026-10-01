@@ -1,0 +1,44 @@
+#!/bin/sh
+# scripts/hooks/pre-commit — secret scan, then fmt/clippy gate on staged crates.
+# Installed via: git config core.hooksPath scripts/hooks (see scripts/hooks/install.sh)
+# Required by docs/REBUILD_DIRECTIVE.md R11. Scoped to crates with staged
+# changes (not the whole workspace) so an unrelated crate's pre-existing
+# warnings never block a commit to a crate that's actually clean.
+set -e
+
+# ── Secret scan (§10.1: "Add OLLAMA_API_KEY to a secret-scan pre-commit
+# check") ────────────────────────────────────────────────────────────────
+# Targeted at an actual VALUE being committed (KEY=something-that-looks-
+# like-a-token), not the env-var NAME appearing in code or docs — every
+# file in this crate legitimately mentions OLLAMA_API_KEY by name, and a
+# name-only match would fire on every commit and train everyone to ignore
+# this check.
+SECRET_PATTERN='(OLLAMA_API_KEY|FERRITE_GEMINI_API_KEY)[[:space:]]*[:=][[:space:]]*.[A-Za-z0-9_-]{10,}'
+SECRET_HITS=$(git diff --cached -U0 -- . ':!scripts/hooks/pre-commit' \
+  | grep -E '^\+' \
+  | grep -vE '^\+\+\+' \
+  | grep -inE "$SECRET_PATTERN" || true)
+if [ -n "$SECRET_HITS" ]; then
+  echo "pre-commit: a staged line looks like it assigns a real value to OLLAMA_API_KEY or FERRITE_GEMINI_API_KEY:" >&2
+  echo "$SECRET_HITS" >&2
+  echo "pre-commit: if this is a real key, remove it before committing. If it's a placeholder (e.g. in a doc example), use an obviously-fake value like 'sk-...' or reword to avoid the pattern." >&2
+  exit 1
+fi
+
+CRATES=$(git diff --cached --name-only --diff-filter=ACM \
+  | grep -E '^crates/[^/]+/' \
+  | sed -E 's#^crates/([^/]+)/.*#\1#' \
+  | sort -u)
+
+if [ -z "$CRATES" ]; then
+  exit 0
+fi
+
+CARGO="${CARGO:-cargo}"
+command -v "$CARGO" >/dev/null 2>&1 || { echo "pre-commit: cargo not found, skipping fmt/clippy gate" >&2; exit 0; }
+
+for crate in $CRATES; do
+  echo "pre-commit: checking $crate" >&2
+  "$CARGO" fmt -p "$crate" --check || { echo "pre-commit: cargo fmt --check failed for $crate" >&2; exit 1; }
+  "$CARGO" clippy -p "$crate" --all-targets -- -D warnings || { echo "pre-commit: cargo clippy failed for $crate" >&2; exit 1; }
+done

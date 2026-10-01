@@ -1,0 +1,23 @@
+[package]
+name = "ferrite-agent"
+version = "0.1.0"
+edition = "2021"
+license = "MIT OR Apache-2.0"
+publish = false
+
+[dependencies]
+serde = { workspace = true }
+serde_json = { workspace = true }
+tokio = { workspace = true }
+chrono = { workspace = true }
+ferrite-core = { workspace = true }
+ferrite-engine = { workspace = true }
+ferrite-model = { workspace = true }
+uuid = { workspace = true }
+dirs = { workspace = true }
+
+[dev-dependencies]
+# `decider.rs`'s tests run a loopback-only HTTP responder on
+# `tokio::net::TcpListener` (nothing leaves the machine, R7). The workspace
+# tokio omits "net" on purpose (T-207); enabled here for tests only.
+tokio = { workspace = true, features = ["net"] }

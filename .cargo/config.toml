@@ -1,0 +1,11 @@
+# docs/REBUILD_DIRECTIVE.md §7.4 asks for a shared target-dir set here via
+# `build.target-dir`. Deviating deliberately: that key takes a literal path
+# with no `~`/env-var expansion, and this repo is explicitly multi-OS/
+# multi-contributor (D13) — a path baked in here would be wrong for anyone
+# whose home directory isn't this machine's. Same effect, portable: the
+# `justfile` exports `CARGO_TARGET_DIR` (which cargo does expand/respect)
+# defaulting to `~/.cache/ferrite-target`, overridable per-contributor.
+# `just disk` reports its size regardless of where it landed.
+
+[net]
+retry = 3

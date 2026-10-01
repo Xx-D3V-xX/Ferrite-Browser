@@ -1,0 +1,40 @@
+{
+  "key": "08fd675e629395a76be80554b5bc130d0ef6a3582fe9a395e8007523a16d9fd5",
+  "provider": "ollama",
+  "model_tag": "gemma3:27b",
+  "tier": "small",
+  "recorded_at": "1970-01-01T00:00:00Z",
+  "request": {
+    "model_tag": "gemma3:27b",
+    "tier": "small",
+    "system_prompt": null,
+    "system_prompt_version": 1,
+    "messages": [
+      {
+        "role": "user",
+        "content": "Read the page title"
+      }
+    ],
+    "options": {
+      "temperature": 0.0,
+      "seed": 42,
+      "num_predict": 128
+    },
+    "format_schema": {
+      "items": {
+        "type": "string"
+      },
+      "type": "array"
+    }
+  },
+  "wire_response": {
+    "done": true,
+    "eval_count": 6,
+    "message": {
+      "content": "[\"web.read\"]",
+      "role": "assistant"
+    },
+    "model": "gemma3:27b",
+    "prompt_eval_count": 42
+  }
+}

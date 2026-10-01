@@ -45,31 +45,37 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     && rm -rf /var/lib/apt/lists/*
 
 # ── Rust toolchain ─────────────────────────────────────────────────────────
+# No wasm32-unknown-unknown target: that was for the Wasm/Extism extension
+# sandbox, deleted per docs/REBUILD_DIRECTIVE.md §4 — nothing in the current
+# workspace targets Wasm.
 RUN curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | \
     sh -s -- -y --default-toolchain stable --no-modify-path && \
-    rustup target add wasm32-unknown-unknown && \
     rustup component add clippy rustfmt rust-analyzer
 
 # ── Pre-warm Cargo registry ────────────────────────────────────────────────
 # Copy only manifests first so this layer is cached unless deps change.
-WORKDIR /build/Browser
-COPY Browser/Cargo.toml ./Cargo.toml
-COPY Browser/crates/ferrite-shell/Cargo.toml          ./crates/ferrite-shell/Cargo.toml
-COPY Browser/crates/ferrite-capability-broker/Cargo.toml ./crates/ferrite-capability-broker/Cargo.toml
-COPY Browser/crates/ferrite-audit-log/Cargo.toml      ./crates/ferrite-audit-log/Cargo.toml
-COPY Browser/crates/ferrite-policy/Cargo.toml         ./crates/ferrite-policy/Cargo.toml
-COPY Browser/crates/ferrite-servo/Cargo.toml          ./crates/ferrite-servo/Cargo.toml
-COPY Browser/crates/ferrite-ui/Cargo.toml             ./crates/ferrite-ui/Cargo.toml
-COPY Browser/crates/ferrite-sandbox/Cargo.toml        ./crates/ferrite-sandbox/Cargo.toml
+# Workspace lives at the repo root since the P0 flatten (was Browser/*).
+# Members list here must match Cargo.toml's [workspace] members exactly —
+# ferrite-capability-broker/ferrite-policy/ferrite-sandbox are deleted, not
+# stubbed, do not add them back here.
+WORKDIR /workspace
+COPY Cargo.toml ./Cargo.toml
+COPY crates/ferrite-shell/Cargo.toml     ./crates/ferrite-shell/Cargo.toml
+COPY crates/ferrite-servo/Cargo.toml     ./crates/ferrite-servo/Cargo.toml
+COPY crates/ferrite-ui/Cargo.toml        ./crates/ferrite-ui/Cargo.toml
+COPY crates/ferrite-audit-log/Cargo.toml ./crates/ferrite-audit-log/Cargo.toml
+COPY crates/ferrite-agent/Cargo.toml     ./crates/ferrite-agent/Cargo.toml
+COPY crates/ferrite-ipi/Cargo.toml       ./crates/ferrite-ipi/Cargo.toml
+COPY crates/ferrite-eval/Cargo.toml      ./crates/ferrite-eval/Cargo.toml
 
 # Create stub lib.rs / main.rs for each crate so `cargo fetch` resolves fully
 RUN for dir in \
-        ferrite-capability-broker \
-        ferrite-audit-log \
-        ferrite-policy \
         ferrite-servo \
         ferrite-ui \
-        ferrite-sandbox; do \
+        ferrite-audit-log \
+        ferrite-agent \
+        ferrite-ipi \
+        ferrite-eval; do \
     mkdir -p crates/$dir/src && \
     echo "// stub" > crates/$dir/src/lib.rs; \
     done && \

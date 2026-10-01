@@ -1,0 +1,190 @@
+[graph]
+targets = []
+
+[advisories]
+version = 2
+yanked = "deny"
+ignore = [
+  # RUSTSEC-2026-0192: ttf-parser's author has declared it unmaintained.
+  # Pulled in transitively through the iced/cosmic-text font-rendering
+  # stack (iced_glyphon -> cosmic-text -> {fontdb, rustybuzz} -> ttf-parser,
+  # and separately via winit -> sctk-adwaita -> ab_glyph -> owned_ttf_parser
+  # -> ttf-parser). No safe upgrade exists per the advisory; this workspace
+  # has no direct dependency on it and no fix to apply. Re-check when iced
+  # or winit are next bumped — either may have migrated to skrifa by then.
+  "RUSTSEC-2026-0192",
+  # RUSTSEC-2026-0206: rustybuzz is unmaintained (same cosmic-text/iced
+  # font stack as above). No fix available; not a direct dependency.
+  "RUSTSEC-2026-0206",
+  # RUSTSEC-2024-0384: `instant` is unmaintained. Deep transitive-only
+  # (parking_lot's old feature path via the iced/winit stack). No fix.
+  "RUSTSEC-2024-0384",
+  # RUSTSEC-2024-0436: `paste` is unmaintained (proc-macro helper, pulled
+  # in transitively by several crates in the iced/wgpu stack). No fix.
+  "RUSTSEC-2024-0436",
+  # RUSTSEC-2026-0194 / RUSTSEC-2026-0195: quick-xml quadratic-time and
+  # unbounded-allocation DoS advisories. quick-xml here is Servo-only
+  # (feature-gated, not in the default-feature dependency graph any
+  # ferrite-* crate touches — `cargo tree -i quick-xml` prints nothing
+  # without --features servo). No newer version available as of 2026-09
+  # (`cargo update -p quick-xml` finds none). Re-check at the next Servo
+  # bump or when a fixed quick-xml lands.
+  "RUSTSEC-2026-0194",
+  "RUSTSEC-2026-0195",
+  # RUSTSEC-2026-0285: rustls TLS 1.3 handshake-message encryption-level
+  # confusion. UNLIKE the others above, this IS on this workspace's real
+  # network path (ferrite-agent's reqwest -> hyper-rustls -> rustls, used
+  # for actual Gemini API calls) — flagging prominently rather than
+  # burying it: no patched rustls version exists yet as of 2026-09
+  # (`cargo update -p rustls` finds none beyond what's already applied).
+  # Per the advisory text itself, the handshake transcript stays
+  # authenticated and a network attacker cannot use this to alter or
+  # complete a handshake — the practical effect is a protocol-confusion
+  # edge case, not a confidentiality break — but this should be re-checked
+  # for a patch on every future dependency refresh, not forgotten here.
+  "RUSTSEC-2026-0285",
+]
+# unicode-segmentation 1.13.0 (transitive via cosmic-text/iced_graphics/
+# iced_widget/winit) was yanked upstream after this Cargo.lock was last
+# regenerated. `yanked = "deny"` catches it here rather than silently.
+# Not ignored — the fix is a `cargo update -p unicode-segmentation` the
+# next time the lockfile is regenerated (T-### filed in docs/TO-DO.md),
+# since a yanked-but-otherwise-fine version has a real, unblocked upgrade
+# path, unlike the ttf-parser advisory above.
+
+[licenses]
+version = 2
+allow = [
+  "MIT",
+  "Apache-2.0",
+  "Apache-2.0 WITH LLVM-exception",
+  "BSD-2-Clause",
+  "BSD-3-Clause",
+  "ISC",
+  "Unicode-3.0",
+  "Zlib",
+  "MPL-2.0",
+  "CC0-1.0",
+  "BSL-1.0",
+  "CDLA-Permissive-2.0", # webpki-roots' Mozilla root-cert bundle license
+]
+confidence-threshold = 0.8
+
+[bans]
+multiple-versions = "deny"
+wildcards = "deny"
+# Our own crates depend on each other via bare path deps (workspace.dependencies'
+# `{ path = "..." }` entries carry no semver requirement), which cargo-deny's
+# wildcard check otherwise flags identically to a real `dep = "*"` on a
+# registry crate. This exempts path/git deps from that check; registry
+# wildcards are still denied.
+allow-wildcard-paths = true
+
+# Every entry below traces to ONE structural cause, not 30 individually
+# unrelated problems: this workspace depends on a pinned Servo release
+# (0.6.0 from crates.io; it was the git tag v0.0.5 before ADR-013) AND on the current iced/winit graphics stack
+# in the same build — two dependency trees from different eras that
+# inevitably disagree on transitive versions of foundational crates
+# (syn, windows-sys, parking_lot, hashbrown, etc.). This is the same
+# situation CLAUDE.md already documents for Servo's inherited Dependabot
+# alerts ("non-actionable until the next Servo bump") — these are that
+# same fact, surfaced by a different tool. NOT individually vetted for a
+# safety implication beyond "which side of the Servo/iced split are you
+# on" — re-run `cargo deny check bans` after any Servo or iced/winit
+# version bump and prune entries that no longer duplicate.
+skip = [
+  { name = "ahash" },
+  { name = "bitflags" },
+  { name = "calloop" },
+  { name = "calloop-wayland-source" },
+  { name = "cfg_aliases" },
+  { name = "getrandom" },
+  { name = "hashbrown" },
+  { name = "jni-sys" },
+  { name = "libloading" },
+  { name = "linux-raw-sys" },
+  { name = "ndk-sys" },
+  { name = "objc2" },
+  { name = "objc2-foundation" },
+  { name = "parking_lot" },
+  { name = "parking_lot_core" },
+  { name = "phf" },
+  { name = "phf_generator" },
+  { name = "phf_shared" },
+  { name = "r-efi" },
+  { name = "redox_syscall" },
+  { name = "rustc-hash" },
+  { name = "rustix" },
+  { name = "siphasher" },
+  { name = "smithay-client-toolkit" },
+  { name = "syn" },
+  # Added at the Servo 0.6.0 bump (ADR-013): zerofrom-derive (icu) and servo's
+  # own stack resolve different synstructure versions; proc-macro support crate.
+  { name = "synstructure" },
+  { name = "thiserror" },
+  { name = "thiserror-impl" },
+  { name = "ttf-parser" },
+  { name = "windows-core" },
+  { name = "windows-sys" },
+
+  # A second, separately-caused batch (A3, T-103), appended to the same
+  # `skip` key rather than a second `[bans] skip = [...]` table (TOML
+  # disallows redefining a key in one table — cargo-deny would refuse to
+  # parse this file if these were split into two): `keyring` (the OS-
+  # keyring fallback §10.1 requires) and `dirs` (home-directory resolution
+  # for ~/.cache/ferrite-model) each pull their own copies of the
+  # windows-targets/windows_*_{msvc,gnu,gnullvm} per-target crates and of
+  # `dirs`/`dirs-sys` themselves, at versions the iced/winit stack above
+  # already has different ones of. Same structural situation as the block
+  # above (two dependency trees, different eras, meeting in one
+  # workspace), different cause — called out separately in this comment so
+  # the two are traceable to their actual sources rather than blurred into
+  # one undifferentiated pile.
+  { name = "dirs" },
+  { name = "dirs-sys" },
+  { name = "windows-targets" },
+  { name = "windows_aarch64_gnullvm" },
+  { name = "windows_aarch64_msvc" },
+  { name = "windows_i686_gnu" },
+  { name = "windows_i686_gnullvm" },
+  { name = "windows_i686_msvc" },
+  { name = "windows_x86_64_gnu" },
+  { name = "windows_x86_64_gnullvm" },
+  { name = "windows_x86_64_msvc" },
+
+  # A third batch (C1, T-231): enabling `iced_widget`'s `svg` feature pulls
+  # in `resvg`/`usvg` 0.42.0 via `iced_tiny_skia`/`iced_wgpu`, which depend
+  # on one version newer of `fontdb`/`kurbo` than `iced_tiny_skia`/
+  # `cosmic-text` already carry elsewhere in the same iced 0.13 stack. Same
+  # structural situation as both batches above (two versions of the same
+  # crate meeting inside one dependency tree, not a real security
+  # concern) — called out separately since its cause (the `svg` feature
+  # flag, not Servo or the OS-keyring crates) is different from either.
+  { name = "fontdb" },
+  { name = "kurbo" },
+
+  # A fourth batch (new-tab hero: real quick-access-tile favicons):
+  # `ferrite-ui` gained a direct dependency on the `image` crate (decoding a
+  # fetched `/favicon.ico` into RGBA8 — see `Cargo.toml`'s own comment on
+  # this dependency) at 0.25, the same version already present in this
+  # lockfile as a transitive dependency of `libservo` (confirmed via
+  # `cargo tree -p ferrite-ui -i image@0.25.10` — no new *version* enters the
+  # graph). `iced_graphics` (part of the same always-on iced/winit stack the
+  # three batches above already trace duplicates to) independently depends
+  # on `image` 0.24, one major version older, for its own unrelated internal
+  # use — the two were never going to unify without `iced_renderer` bumping
+  # its own pin. `image` 0.25's `png` decoder (`0.18`) is one version newer
+  # than the `png` 0.17 `tiny-skia`/`resvg`/`sctk-adwaita` already carry
+  # elsewhere in the same iced/winit stack — the same "two versions of the
+  # same crate meeting inside one dependency tree, not a real security
+  # concern" shape as every batch above, not re-litigated per crate.
+  { name = "image" },
+  { name = "png" },
+]
+
+[sources]
+unknown-registry = "deny"
+unknown-git = "deny"
+allow-git = [
+  "https://github.com/servo/servo",
+]

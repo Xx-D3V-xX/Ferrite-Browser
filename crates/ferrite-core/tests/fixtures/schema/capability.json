@@ -1,0 +1,9 @@
+[
+  "web.read",
+  "web.navigate",
+  "web.interact",
+  "web.download",
+  "scoped.read",
+  "clipboard.read",
+  "clipboard.write"
+]
