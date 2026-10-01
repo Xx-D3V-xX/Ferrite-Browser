@@ -71,6 +71,17 @@ struct FerriteWebViewDelegate {
 
 #[cfg(feature = "servo")]
 impl servo::WebViewDelegate for FerriteWebViewDelegate {
+    /// Ferrite has no permission prompt yet, so every request Servo forwards
+    /// (notifications, persistent storage, wake lock) is refused outright
+    /// rather than left unanswered.
+    fn request_permission(&self, _webview: servo::WebView, request: servo::PermissionRequest) {
+        eprintln!(
+            "[ferrite-shell] denied permission request: {:?}",
+            request.feature()
+        );
+        request.deny();
+    }
+
     /// Called whenever Servo has a new composited frame ready to display.
     fn notify_new_frame_ready(&self, webview: servo::WebView) {
         webview.paint();

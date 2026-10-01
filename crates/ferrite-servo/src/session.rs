@@ -665,6 +665,19 @@ mod inner {
     }
 
     impl WebViewDelegate for HeadlessDelegate {
+        /// Ferrite has no permission prompt yet, so every request Servo
+        /// forwards (notifications, persistent storage, wake lock) is refused
+        /// outright rather than left unanswered. Servo does not forward
+        /// geolocation or getUserMedia here at all, which is why those stay
+        /// switched off (docs/TO-DO.md T-265).
+        fn request_permission(&self, _webview: servo::WebView, request: servo::PermissionRequest) {
+            eprintln!(
+                "[ferrite-session] denied permission request: {:?}",
+                request.feature()
+            );
+            request.deny();
+        }
+
         fn notify_new_frame_ready(&self, webview: servo::WebView) {
             webview.paint();
         }
