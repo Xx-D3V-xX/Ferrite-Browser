@@ -782,6 +782,9 @@ const BUSY_TICKS: u8 = 30;
 /// the 150-250ms range typical for this kind of UI entrance transition.
 const CONSENT_ANIM_STEP: f32 = 16.0 / 200.0;
 
+/// Advance per `MenuAnimTick`: the menu settles in ~140 ms.
+const MENU_ANIM_STEP: f32 = 16.0 / 140.0;
+
 /// Advance per `ThreadAnimTick` for each entering thread item's progress —
 /// ticks fire every 16ms, so an entrance takes ~220ms.
 const THREAD_ANIM_STEP: f32 = 16.0 / 220.0;
@@ -1525,6 +1528,9 @@ pub struct FerriteBrowser {
     pub hovered_tab: Option<usize>,
     /// Whether the toolbar's overflow menu is open.
     pub show_menu: bool,
+    /// Slide-in progress of the overflow menu, `0.0` (just opened) to `1.0`;
+    /// advanced by `MenuAnimTick` while it is below `1.0`. Decoration only.
+    pub menu_anim: f32,
     /// When the tab strip's empty area was last pressed (double-click =
     /// maximize).
     last_titlebar_press: Option<std::time::Instant>,
@@ -1776,6 +1782,7 @@ impl Default for FerriteBrowser {
             show_evidence: false,
             hovered_tab: None,
             show_menu: false,
+            menu_anim: 1.0,
             last_titlebar_press: None,
             scroll_queue: scroll::ScrollQueue::default(),
             pointer_moved: false,
@@ -1984,6 +1991,8 @@ pub enum FerriteBrowserMessage {
     /// Open or close the toolbar's overflow menu.
     ToggleMenu,
     CloseMenu,
+    /// One animation tick of the overflow menu's slide-in.
+    MenuAnimTick,
     /// A row of the overflow menu was picked: close the menu, then do it.
     Menu(chrome::MenuCommand),
     /// Open the library drawer on a given tab (from the overflow menu).
@@ -2116,6 +2125,7 @@ pub fn update(
         }
         FerriteBrowserMessage::SelectTab(i) => {
             select_tab_at(state, i);
+            return widgets::unfocus();
         }
         FerriteBrowserMessage::AddressBarChanged(s) => {
             state.address_bar_edited = true;
@@ -2403,6 +2413,7 @@ pub fn update(
                 // Opening the panel puts the cursor in the composer, ready to
                 // type, with the thread at its newest message.
                 if state.sidebar_view == SidebarView::Thread {
+                    state.address_bar_focused = false;
                     return Task::batch([
                         text_input::focus(text_input::Id::new(AGENT_INPUT_ID)),
                         scroll_to_latest(state),
@@ -2844,6 +2855,10 @@ pub fn update(
         // ── Chrome ───────────────────────────────────────────────────────────
         FerriteBrowserMessage::ToggleMenu => {
             state.show_menu = !state.show_menu;
+            state.menu_anim = 0.0;
+        }
+        FerriteBrowserMessage::MenuAnimTick => {
+            state.menu_anim = (state.menu_anim + MENU_ANIM_STEP).min(1.0);
         }
         FerriteBrowserMessage::CloseMenu => {
             state.show_menu = false;
@@ -2871,16 +2886,20 @@ pub fn update(
         FerriteBrowserMessage::NextTab => {
             let count = state.tabs.len();
             select_tab_at(state, (state.active_tab + 1) % count.max(1));
+            return widgets::unfocus();
         }
         FerriteBrowserMessage::PrevTab => {
             let count = state.tabs.len().max(1);
             select_tab_at(state, (state.active_tab + count - 1) % count);
+            return widgets::unfocus();
         }
         FerriteBrowserMessage::SelectTabNumber(i) => {
             select_tab_at(state, i);
+            return widgets::unfocus();
         }
         FerriteBrowserMessage::SelectLastTab => {
             select_tab_at(state, state.tabs.len().saturating_sub(1));
+            return widgets::unfocus();
         }
         FerriteBrowserMessage::Noop => {}
         FerriteBrowserMessage::ConsentPanelTick => {
@@ -2944,6 +2963,7 @@ pub fn update(
             state.find_query.clear();
             state.find_match_count = 0;
             state.find_current_index = 0;
+            state.address_bar_focused = false;
             return text_input::focus(text_input::Id::new(FIND_INPUT_ID));
         }
         FerriteBrowserMessage::CloseFindBar => {
@@ -3983,7 +4003,9 @@ fn select_tab_at(state: &mut FerriteBrowser, i: usize) -> bool {
     state.active_tab = i;
     state.address_bar_input = address_bar_text(&state.tab_urls[i]);
     state.address_bar_edited = false;
-    // Scroll and pointer input belong to the page that was showing.
+    // Scroll and pointer input belong to the page that was showing, and the
+    // address bar no longer holds the keyboard (the callers unfocus it).
+    state.address_bar_focused = false;
     state.scroll_queue.clear();
     state.pointer_moved = false;
     wake(state);
@@ -5708,27 +5730,33 @@ pub fn view(state: &FerriteBrowser) -> Element<'_, FerriteBrowserMessage> {
     let js_panel: Option<Element<FerriteBrowserMessage>> = if state.show_js_console {
         let hdr = container(
             row![
-                text("  JS Console")
-                    .size(12)
-                    .color(palette.text)
+                text("JS console")
+                    .size(TEXT_BODY)
+                    .font(font_weight(iced::font::Weight::Semibold))
+                    .color(palette.text),
+                text(format!("{MOD_LABEL}+J"))
+                    .size(TEXT_CAPTION)
+                    .color(palette.text_dim)
                     .width(Length::Fill),
-                text(format!("({} shortcut)", MOD_LABEL))
-                    .size(11)
-                    .color(palette.text_dim),
-                button(text("Clear").size(11))
-                    .padding([2, 8])
+                button(text("Clear").size(TEXT_CAPTION))
+                    .padding([2.0, SP_SM])
                     .style(panel_btn_inactive)
                     .on_press(FerriteBrowserMessage::JsConsoleClear),
+                tip(
+                    button(icon(Icon::Close, 10.0, palette.text_dim))
+                        .padding(5)
+                        .style(close_btn_style)
+                        .on_press(FerriteBrowserMessage::ToggleJsConsole),
+                    "Close",
+                    palette,
+                ),
             ]
-            .spacing(8)
+            .spacing(SP_SM)
             .align_y(iced::Alignment::Center)
-            .padding([5, PANEL_PADDING]),
+            .padding([SP_XS + 2.0, PANEL_PADDING as f32]),
         )
         .width(Length::Fill)
-        .style(|_: &Theme| container::Style {
-            background: Some(Background::Color(palette.raised)),
-            ..container::Style::default()
-        });
+        .style(tokens::raised_bar_style);
 
         let out_rows: Vec<Element<FerriteBrowserMessage>> = if state.js_output.is_empty() {
             vec![container(
@@ -6242,6 +6270,14 @@ pub fn subscription(state: &FerriteBrowser) -> Subscription<FerriteBrowserMessag
         Subscription::none()
     };
 
+    // The overflow menu's slide-in, only while it is opening.
+    let menu_anim_tick = if state.show_menu && state.menu_anim < 1.0 {
+        time::every(std::time::Duration::from_millis(16))
+            .map(|_| FerriteBrowserMessage::MenuAnimTick)
+    } else {
+        Subscription::none()
+    };
+
     // Chat-thread entrance animations — same 16ms tick shape, gated so it only
     // runs while an item is actually fading in.
     let thread_anim_tick = if agent_panel::thread_anim_active(state) {
@@ -6295,6 +6331,7 @@ pub fn subscription(state: &FerriteBrowser) -> Subscription<FerriteBrowserMessag
         servo_tick,
         agent_event_sub,
         consent_anim_tick,
+        menu_anim_tick,
         thread_anim_tick,
     ])
 }

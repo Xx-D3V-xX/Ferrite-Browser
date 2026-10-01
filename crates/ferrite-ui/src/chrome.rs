@@ -618,31 +618,33 @@ pub(crate) fn toolbar(state: &FerriteBrowser) -> Element<'_, Msg> {
         palette,
     );
     let menu_on = state.show_menu;
-    let menu = tip(
-        button(
-            container(icon(
-                Icon::Dots,
-                BTN_ICON,
-                if menu_on {
-                    palette.accent_bright
-                } else {
-                    palette.text_dim
-                },
-            ))
-            .center(Length::Fill),
-        )
-        .width(Length::Fixed(BTN))
-        .height(Length::Fixed(BTN))
-        .padding(0)
-        .style(if menu_on {
-            toolbar_btn_on_style
-        } else {
-            toolbar_btn_style
-        })
-        .on_press(Msg::ToggleMenu),
-        "Menu",
-        palette,
-    );
+    let menu_btn = button(
+        container(icon(
+            Icon::Dots,
+            BTN_ICON,
+            if menu_on {
+                palette.accent_bright
+            } else {
+                palette.text_dim
+            },
+        ))
+        .center(Length::Fill),
+    )
+    .width(Length::Fixed(BTN))
+    .height(Length::Fixed(BTN))
+    .padding(0)
+    .style(if menu_on {
+        toolbar_btn_on_style
+    } else {
+        toolbar_btn_style
+    })
+    .on_press(Msg::ToggleMenu);
+    // No tooltip while the menu is open: it would float over the menu itself.
+    let menu: Element<Msg> = if menu_on {
+        menu_btn.into()
+    } else {
+        tip(menu_btn, "Menu", palette)
+    };
 
     let bar = row![
         back,
@@ -1125,7 +1127,11 @@ pub(crate) fn menu_overlay(state: &FerriteBrowser) -> Option<Element<'_, Msg>> {
         .height(Length::Fill)
         .align_x(Alignment::End)
         .padding(Padding {
-            top: TAB_STRIP_HEIGHT + TOOLBAR_HEIGHT - SP_XS,
+            // Slides down into place as it opens (decoration only; the rows
+            // are fully drawn from the first frame).
+            top: TAB_STRIP_HEIGHT + TOOLBAR_HEIGHT
+                - SP_XS
+                - (1.0 - crate::ease_out_cubic(state.menu_anim)) * 8.0,
             right: SP_SM,
             ..Padding::ZERO
         });

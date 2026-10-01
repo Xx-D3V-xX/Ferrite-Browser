@@ -515,3 +515,18 @@ fn the_last_tab_cannot_be_closed() {
     let _ = update(&mut state, FerriteBrowserMessage::CloseTab(0));
     assert_eq!(state.tabs.len(), 1);
 }
+
+#[test]
+fn opening_the_menu_restarts_its_slide_and_ticks_finish_it() {
+    let mut state = FerriteBrowser::default();
+    let _ = update(&mut state, FerriteBrowserMessage::ToggleMenu);
+    assert_eq!(state.menu_anim, 0.0);
+    let mut ticks = 0;
+    while state.menu_anim < 1.0 {
+        let _ = update(&mut state, FerriteBrowserMessage::MenuAnimTick);
+        ticks += 1;
+        assert!(ticks < 60, "the slide must finish");
+    }
+    // About 140 ms of 16 ms ticks: a quick settle, not a slow reveal.
+    assert!((7..=12).contains(&ticks), "{ticks} ticks");
+}
