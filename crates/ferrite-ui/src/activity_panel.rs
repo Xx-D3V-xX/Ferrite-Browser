@@ -14,7 +14,7 @@ use super::*;
 use crate::activity::{format_ms, laya_effect_summary};
 
 /// Height of the panel while the model-call view is showing.
-pub(crate) const MODELS_PANEL_HEIGHT: f32 = 380.0;
+pub(crate) const MODELS_PANEL_HEIGHT: f32 = 300.0;
 /// Newest events rendered (older ones stay in the file).
 const MAX_ROWS: usize = 150;
 
@@ -84,6 +84,14 @@ pub(crate) fn header<'a>(
             tab_button("Security log", AuditTab::Security),
             horizontal_space(),
             action,
+            tip(
+                button(icon(Icon::Close, 10.0, palette.text_dim))
+                    .padding(5)
+                    .style(close_btn_style)
+                    .on_press(FerriteBrowserMessage::ToggleAuditPanel),
+                "Close (F12)",
+                palette,
+            ),
         ]
         .spacing(8)
         .align_y(iced::Alignment::Center)

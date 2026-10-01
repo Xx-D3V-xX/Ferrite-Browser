@@ -43,6 +43,7 @@ use iced_widget::pick_list::Style as PickStyle;
 
 use super::identity::{self, BrowserIdentity};
 use super::*;
+use crate::tokens::card_style;
 
 /// Where [`ModelSettings`] lives in the data directory.
 const SETTINGS_FILE: &str = ferrite_model::settings::SETTINGS_FILE_NAME;
@@ -743,19 +744,6 @@ fn field_style(
                 ..palette.accent
             },
         }
-    }
-}
-
-fn card_style(theme: &Theme) -> container::Style {
-    let palette = palette_for_theme(theme);
-    container::Style {
-        background: Some(Background::Color(palette.raised)),
-        border: Border {
-            radius: iced::border::Radius::new(10.0),
-            width: 1.0,
-            color: palette.divider,
-        },
-        ..container::Style::default()
     }
 }
 
