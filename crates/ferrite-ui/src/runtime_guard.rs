@@ -8,7 +8,7 @@
 
 use ferrite_core::Primitive;
 use ferrite_engine::PageDigest;
-use ferrite_ipi::comparator::GuardVerdict;
+use ferrite_ipi::comparator::{GuardVerdict, RuntimeGuard};
 
 use super::{action_url, origin_of_url, primitive_of_action, AgentAction};
 
@@ -78,6 +78,52 @@ pub(crate) fn action_effects(
         }
     }
     effects
+}
+
+/// For a click by `@ref` on a link that leads to the origin the tab is already
+/// at: the navigation that click amounts to. Such a click is **either** a click
+/// or a navigation here (`RuntimeGuard::check_either`), so a task that was only
+/// ever expected to navigate ("go to this site's docs page") can follow a link
+/// there, as it could already `navigate` to the same address. `None` for
+/// anything else, including every link to another origin (which stays a click
+/// here *and* a navigation there) and a link with no known destination.
+pub(crate) fn same_site_link_navigation(
+    action: &AgentAction,
+    active_tab_url: &str,
+    digest: Option<&PageDigest>,
+) -> Option<(Primitive, Option<String>)> {
+    let AgentAction::Click { selector } = action else {
+        return None;
+    };
+    let here = origin_of_url(active_tab_url)?;
+    let element = digest?.element(selector.strip_prefix('@')?.parse::<u32>().ok()?)?;
+    let there = (element.role == "link")
+        .then_some(element.href.as_deref())
+        .flatten()
+        .and_then(effect_origin)?;
+    (there == here).then_some((Primitive::Navigate, Some(here)))
+}
+
+/// Judges `action` against `guard`: the effects it has, and the verdict.
+/// This is the one place the live loop and the tests decide an action, so
+/// they cannot drift apart.
+pub(crate) fn judge(
+    guard: &RuntimeGuard,
+    action: &AgentAction,
+    active_tab_url: &str,
+    digest: Option<&PageDigest>,
+) -> (GuardVerdict, Vec<(Primitive, Option<String>)>) {
+    let effects = action_effects(action, active_tab_url, digest);
+    let verdict = match same_site_link_navigation(action, active_tab_url, digest) {
+        // A link to the site the tab is already on is a navigation there as
+        // well as a click, so a task expected only to navigate may follow it.
+        Some(navigation) if effects.len() == 1 => guard.check_either(
+            (effects[0].0, effects[0].1.as_deref()),
+            (navigation.0, navigation.1.as_deref()),
+        ),
+        _ => guard.check_all(&effects),
+    };
+    (verdict, effects)
 }
 
 /// A line for the activity trace and the step log: what was blocked and why,
@@ -227,6 +273,88 @@ mod tests {
             .len(),
             1
         );
+    }
+
+    #[test]
+    fn a_click_on_a_same_origin_link_is_also_a_navigation_here() {
+        let digest = page(vec![
+            link(3, "https://shop.example/docs/index.html"),
+            link(4, "https://attacker.example/"),
+            link(5, "javascript:steal()"),
+            DigestElement {
+                ref_id: 6,
+                role: "button".into(),
+                href: Some("https://shop.example/x".into()),
+                ..DigestElement::default()
+            },
+        ]);
+        let click = |s: &str| AgentAction::Click { selector: s.into() };
+        assert_eq!(
+            same_site_link_navigation(&click("@3"), HERE, Some(&digest)),
+            Some((
+                Primitive::Navigate,
+                Some("https://shop.example".to_string())
+            ))
+        );
+        // Another origin, an opaque scheme, a button, an unknown ref, a CSS
+        // selector, no digest, a non-click: none of these is relaxed.
+        for selector in ["@4", "@5", "@6", "@99", "a.next", "@x"] {
+            assert_eq!(
+                same_site_link_navigation(&click(selector), HERE, Some(&digest)),
+                None,
+                "{selector}"
+            );
+        }
+        assert_eq!(same_site_link_navigation(&click("@3"), HERE, None), None);
+        assert_eq!(
+            same_site_link_navigation(&AgentAction::ReadPage, HERE, Some(&digest)),
+            None
+        );
+        assert_eq!(
+            same_site_link_navigation(&click("@3"), "about:blank", Some(&digest)),
+            None
+        );
+    }
+
+    /// The reported failure: "go to this site's docs page" is expected to need
+    /// navigation at the current site only, and following the site's own Docs
+    /// link was blocked as a click. It now runs; a link elsewhere, a button and
+    /// a read-only task are still stopped.
+    #[test]
+    fn a_navigation_task_may_follow_a_link_on_its_own_site_and_nothing_else() {
+        use ferrite_core::scope::OriginScope;
+        use ferrite_core::{Capability, ExpectedCapability, ExpectedCapabilitySet, Origin};
+        use ferrite_ipi::comparator::ExpectedFingerprint;
+
+        let site = Origin::parse("https://shop.example").expect("origin");
+        let guard_for = |cap| {
+            RuntimeGuard::new(ExpectedFingerprint::from_capabilities(
+                ExpectedCapabilitySet::new([ExpectedCapability::new(
+                    cap,
+                    OriginScope::exact([site.clone()]).expect("scope"),
+                )])
+                .expect("one capability"),
+            ))
+        };
+        let digest = page(vec![
+            link(4, "https://shop.example/docs/index.html"),
+            link(5, "https://attacker.example/"),
+            DigestElement {
+                ref_id: 6,
+                role: "button".into(),
+                ..DigestElement::default()
+            },
+        ]);
+        let verdict = |guard: &RuntimeGuard, n: &str| {
+            let action = AgentAction::Click { selector: n.into() };
+            judge(guard, &action, HERE, Some(&digest)).0
+        };
+        let navigate = guard_for(Capability::WebNavigate);
+        assert!(verdict(&navigate, "@4").allows(), "own-site link");
+        assert!(!verdict(&navigate, "@5").allows(), "link to another site");
+        assert!(!verdict(&navigate, "@6").allows(), "a button is a click");
+        assert!(verdict(&guard_for(Capability::WebInteract), "@4").allows());
+        assert!(!verdict(&guard_for(Capability::WebRead), "@4").allows());
     }
 
     #[test]

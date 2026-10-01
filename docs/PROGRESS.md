@@ -4832,3 +4832,9 @@ The first macOS run of the Settings branch failed one `ferrite-ui` test (`openin
 **Deliberately left off, with the measurement (T-265):** WebRTC (`getUserMedia` resolves with no consent prompt), geolocation (never settles), service workers (half built), Web Animations (no `finished`), container queries, multi-column, variable fonts, writing modes (panic). **Not verified:** any effect on a real site; pixel comparison was by painted-pixel count because frame hashes vary with animation timing.
 
 **Follow-up, same day:** asked to do whatever else could be done from here, re-tested the rejected switches. Both web view delegates now deny every permission request Servo forwards (explicit and logged). That did not make geolocation or WebRTC safe: Servo never forwards either to the embedder, so they stay off. The Web Animations object is a stub (only `effect`), so no shim. Branch hygiene: work lives only on `feat/defense-eval-corpus-and-laya-latency`.
+
+## 2026-10-01 — coordinator — Own-site links for navigation tasks; project site renders in Ferrite (T-266)
+
+**Reported by the owner (two screenshots):** the project site renders wrongly in Ferrite, and "go to this sites docs page" was blocked at the click on the Docs link.
+
+**Found, by loading the built site in the real engine:** `background-clip: text` fills a solid box over the hero words in Servo; `1fr` grid tracks grow to their content and pushed the demo card and a list past their columns; CSS counters incremented inside `::before` render as 0. **Done:** a gradient underline instead of gradient text, `minmax(0, 1fr)` tracks, explicit step numbers; re-rendered and checked section by section. **Defense:** see T-266: a click on a link to the site the tab is already on is judged as a click or a navigation there. 9 tests in `runtime_guard`, 2 in the guard; ui tests (323), clippy clean.

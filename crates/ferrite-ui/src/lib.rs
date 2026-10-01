@@ -3368,8 +3368,7 @@ fn handle_agent_step(
             }
             _ => None,
         };
-        let effects = runtime_guard::action_effects(&action, &tab_url, digest.as_ref());
-        let verdict = guard.check_all(&effects);
+        let (verdict, effects) = runtime_guard::judge(guard, &action, &tab_url, digest.as_ref());
         let audited = effects.first().map_or_else(
             || (primitive_of_action(&action).as_str(), None),
             |(p, o)| (p.as_str(), o.as_deref()),
