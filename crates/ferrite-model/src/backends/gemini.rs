@@ -228,6 +228,33 @@ impl GeminiProvider {
             detail: bounded(&e.to_string()),
         })
     }
+
+    /// Every model this key may call `generateContent` on, sorted — what the
+    /// Settings screen offers. Doubles as the key check: a bad key is a 4xx
+    /// here, before any task has spent a call on it.
+    ///
+    /// # Errors
+    ///
+    /// Transport, status or parse failures, each typed. The key never
+    /// appears in an error: it is in the request URL, so every message is
+    /// redacted.
+    pub async fn list_models(&self) -> Result<Vec<String>, ModelError> {
+        let response = self
+            .client
+            .get(&self.base_url)
+            .query(&[("key", self.api_key.expose()), ("pageSize", "1000")])
+            .send()
+            .await
+            .map_err(|e| ModelError::Transport {
+                provider: ProviderId::Gemini,
+                detail: bounded(&redact(&e.to_string(), self.api_key.expose())),
+            })?;
+        let response =
+            http::classify(ProviderId::Gemini, response, self.max_response_bytes).await?;
+        let body =
+            http::read_bounded(ProviderId::Gemini, response, self.max_response_bytes).await?;
+        parse_models_response(&body)
+    }
 }
 
 #[async_trait]
@@ -269,6 +296,38 @@ impl ModelProvider for GeminiProvider {
             reaches_network: true,
         }
     }
+}
+
+/// Parses `GET .../models`: the bare model names (no `models/` prefix, which
+/// is what [`GeminiProvider`] puts in the URL itself) of every model that can
+/// `generateContent`, sorted. Embedding and other model kinds are left out:
+/// choosing one for the agent would fail on its first call.
+pub(crate) fn parse_models_response(body: &[u8]) -> Result<Vec<String>, ModelError> {
+    let json: serde_json::Value =
+        serde_json::from_slice(body).map_err(|e| ModelError::MalformedJson {
+            provider: ProviderId::Gemini,
+            detail: format!("{} (body: {})", e, bounded(&String::from_utf8_lossy(body))),
+        })?;
+    let models = json
+        .get("models")
+        .and_then(serde_json::Value::as_array)
+        .ok_or_else(|| ModelError::MalformedJson {
+            provider: ProviderId::Gemini,
+            detail: format!("no \"models\" array (body: {})", bounded(&json.to_string())),
+        })?;
+    let mut names: Vec<String> = models
+        .iter()
+        .filter(|m| {
+            m.get("supportedGenerationMethods")
+                .and_then(serde_json::Value::as_array)
+                .is_some_and(|methods| methods.iter().any(|v| v == "generateContent"))
+        })
+        .filter_map(|m| m.get("name").and_then(serde_json::Value::as_str))
+        .map(|name| name.strip_prefix("models/").unwrap_or(name).to_string())
+        .collect();
+    names.sort_unstable();
+    names.dedup();
+    Ok(names)
 }
 
 /// Removes a key that a transport error quoted back out of the request URL.
@@ -483,5 +542,28 @@ mod tests {
         );
         assert!(provider.capabilities().reaches_network);
         assert_eq!(provider.capabilities().tier, ModelTier::Main);
+    }
+
+    #[test]
+    fn the_model_list_keeps_only_models_that_can_generate_and_strips_the_prefix() {
+        let body = br#"{
+          "models": [
+            {"name":"models/gemini-2.5-pro","supportedGenerationMethods":["generateContent","countTokens"]},
+            {"name":"models/text-embedding-004","supportedGenerationMethods":["embedContent"]},
+            {"name":"models/gemini-2.5-flash","supportedGenerationMethods":["generateContent"]},
+            {"name":"models/no-methods-listed"}
+          ]
+        }"#;
+        assert_eq!(
+            parse_models_response(body).expect("parses"),
+            vec!["gemini-2.5-flash", "gemini-2.5-pro"]
+        );
+    }
+
+    #[test]
+    fn a_model_list_of_the_wrong_shape_is_an_error() {
+        let err = parse_models_response(br#"{"data":[]}"#).expect_err("wrong shape");
+        assert!(matches!(err, ModelError::MalformedJson { .. }), "{err:?}");
+        assert!(parse_models_response(b"not json").is_err());
     }
 }

@@ -199,21 +199,26 @@ impl ModelConfig {
     /// worse in the other direction, sending a bearer token to it.
     #[must_use]
     pub fn ollama_is_local(&self) -> bool {
-        let rest = self
-            .ollama_base_url
-            .split_once("://")
-            .map_or(self.ollama_base_url.as_str(), |(_, rest)| rest);
-        let authority = rest.split(['/', '?', '#']).next().unwrap_or("");
-        let host = match authority.strip_prefix('[') {
-            // Bracketed IPv6 literal: the host is everything up to the `]`.
-            Some(after) => match after.split_once(']') {
-                Some((inner, _port)) => format!("[{inner}]"),
-                None => return false,
-            },
-            None => authority.split(':').next().unwrap_or("").to_string(),
-        };
-        matches!(host.as_str(), "localhost" | "127.0.0.1" | "[::1]")
+        is_local_url(&self.ollama_base_url)
     }
+}
+
+/// Whether `url`'s whole host is this machine (`localhost`, `127.0.0.1`,
+/// `[::1]`) — the test [`ModelConfig::ollama_is_local`] applies, and the one
+/// the Settings screen applies before accepting a "local" server address.
+#[must_use]
+pub fn is_local_url(url: &str) -> bool {
+    let rest = url.split_once("://").map_or(url, |(_, rest)| rest);
+    let authority = rest.split(['/', '?', '#']).next().unwrap_or("");
+    let host = match authority.strip_prefix('[') {
+        // Bracketed IPv6 literal: the host is everything up to the `]`.
+        Some(after) => match after.split_once(']') {
+            Some((inner, _port)) => format!("[{inner}]"),
+            None => return false,
+        },
+        None => authority.split(':').next().unwrap_or("").to_string(),
+    };
+    matches!(host.as_str(), "localhost" | "127.0.0.1" | "[::1]")
 }
 
 fn require_tag(env: &dyn EnvSource, tier: ModelTier) -> Result<String, ModelError> {

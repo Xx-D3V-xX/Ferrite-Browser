@@ -567,3 +567,20 @@ That the Windows and Linux jobs pass: they have not run. `requestIdleCallback`,
 `adoptedStyleSheets`, `FontFace`, `OffscreenCanvas` and the Navigation API are
 absent in this Servo and are listed by the probe as gaps.
 
+## ADR-017 — Model settings are a layer under the environment; keys live only in the keyring
+
+**Date:** 2026-10-01. **Status:** live; the keyring write path is unverified against a real OS keyring (T-257), and Linux key persistence is open (T-259).
+
+**Context.** A packaged app has no shell to export `FERRITE_MODEL_SMALL`, `FERRITE_MODEL_MAIN` or an API key from, so the only way to connect a model was a developer's environment. Ferrite needed an in-app way to choose a provider, store a key and pick models without weakening §10.1 (a key comes from the environment or the OS keyring "and nowhere else") or §10.2 (no model name appears in source).
+
+**Decision.**
+
+1. **One configuration system, not two.** The Settings drawer saves non-secret choices (provider, a model name per role per provider, a local server address) to `settings.json` in the data directory. `ModelSettings::to_env` renders them in the existing environment-variable vocabulary and `LayeredEnv` puts the real environment *over* them, so `ModelConfig::load` and every provider constructor run unchanged. An exported variable still wins (CI, shell overrides), and the drawer names the variables that are overriding a saved choice rather than silently ignoring the person's input.
+2. **Keys never touch the file.** They are written to the OS keyring through a new `SecretVault` (`set`/`delete`), under the account names the providers already read. `SecretStore` stays read-only, so no test or CLI path can write by omission. The key's `Debug` is redacted, so is the message that carries it while typed, and the field is cleared on save. A test asserts the settings file never contains key material.
+3. **Models are chosen from what the provider serves.** *Load models* calls the provider's listing endpoint (`/api/tags`; Gemini `models`, filtered to `generateContent`), which also proves the key before a task spends a call. The call is injected (`ModelLister`), so `FerriteBrowser::default()` carries one that refuses and no test can reach a provider.
+4. **"Local" means this machine.** A local Ollama address must be loopback (`is_local_url`, whole-host matching). That keeps the rule that a bearer token is never sent toward anything that is not the cloud service; a remote server is `FERRITE_OLLAMA_BASE_URL` with Ollama Cloud, an explicit choice.
+5. **Saving applies at once and fails safe.** `connect` builds the provider (no network); only a provider that builds is persisted, and the three fields every run reads (`model_provider`, `model_tag_small`, `model_tag_main`) are replaced. Removing a key also disconnects the running app, because a connection holds its key in memory. With no choice saved, `connect` is the old startup logic (Ollama if a key or local server is configured, else Gemini), so no existing setup changes.
+6. **A missing model is visible.** With nothing connected the agent panel says so, with the button that fixes it; the loop still fails closed (ADR-000's invariant is untouched).
+
+**Not claimed.** That the keyring write works on every platform: it is exercised only against an in-memory vault. That Linux keys persist (they do not, T-259). That the drawer looks right on macOS or Windows (it was rendered with the software renderer on Linux).
+

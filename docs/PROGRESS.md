@@ -4791,3 +4791,15 @@ about 2 s to refuse a connection to a closed loopback port. Test-only fix (a
 15 s timeout in that test); the client's behavior is unchanged. Linux and macOS
 were already green. **Not verified:** a Windows run after this change.
 
+## 2026-10-01 — coordinator — In-app model settings, and the public site (T-257, T-258, T-259)
+
+**Asked by the owner:** a way for people who download the browser to connect their own agent (provider, API key, model) in the app rather than a `.env`, in the app's own theme; and a clean marketing site with a download section and documentation centered on the defense, the metrics and how they are evaluated.
+
+**Settings (T-257, ADR-017).** `ferrite_model::settings` (persisted choices, layered env, `connect`, `list_models`), `SecretVault` (writable keyring, in-memory double), `GeminiProvider::list_models`, and `ferrite-ui`'s `settings_panel` (state, transitions, drawer, agent-panel banner, gear icon). The Library's read-only Settings tab was removed and its theme and zoom controls moved into the drawer. **Verified:** 27 `ferrite-model` settings tests and 28 `ferrite-ui` settings tests, offline; `cargo clippy --workspace --all-targets -D warnings`; every drawer state (first run, models loaded, connected, error, light theme, agent banner) and the consent panel rendered from the real `view()` under software rendering and inspected. **Not verified:** a real keyring write, a real provider listing, macOS or Windows rendering.
+
+**Found on the way (T-259):** the Linux keyring backend in use is in memory and is cleared by a reboot, so a Linux user's saved key does not persist. A persistent backend needs `libdbus` and could not be verified here, so the Cargo change was tried, did not build, and was reverted; the drawer and docs now say so.
+
+**Site (T-258).** `site/` (landing page and nine docs pages, stdlib-only builder with a link and anchor check, self-hosted font) and `.github/workflows/pages.yml` (manual). Figures are from `docs/EVALUATION.md` §8, and the headline's `RejectFlagged` assumption is stated beside them. **Verified:** the build and link check; the pages viewed in Chromium at desktop and mobile widths in both themes; the download resolver against a stubbed release and a 404. **Not verified:** the deployed site, and the live GitHub API.
+
+**README:** the Status bullets that said the live app runs on the pre-rebuild path and that the corpus has 29 cases were out of date (T-224 and T-220's live-app half are closed; the corpus is 938); corrected from the ledger.
+
