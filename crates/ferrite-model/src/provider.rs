@@ -123,6 +123,9 @@ pub struct ProviderCapabilities {
 /// calling is not here — the agent loop that needs it (A9) builds it on top
 /// of this trait rather than inside it, so a backend never has to model
 /// someone else's control flow.
+// async_trait's expansion trips `double_must_use` on newer clippy (1.99); the
+// lint is about generated code, not anything written here.
+#[allow(clippy::double_must_use)]
 #[async_trait]
 pub trait ModelProvider: Send + Sync {
     /// Which backend this is.

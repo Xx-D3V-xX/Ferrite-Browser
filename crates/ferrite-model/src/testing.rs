@@ -21,6 +21,9 @@ use async_trait::async_trait;
 /// timing is *asserted* rather than *endured*: R8 forbids a test whose
 /// outcome depends on how long a real sleep took, and a suite that actually
 /// sleeps through exponential backoff is a suite nobody runs.
+// async_trait's expansion trips `double_must_use` on newer clippy (1.99); the
+// lint is about generated code, not anything written here.
+#[allow(clippy::double_must_use)]
 #[async_trait]
 pub trait Sleeper: std::fmt::Debug + Send + Sync {
     /// Waits for `duration`.
