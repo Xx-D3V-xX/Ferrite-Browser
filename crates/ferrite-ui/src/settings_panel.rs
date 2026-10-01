@@ -41,6 +41,7 @@ use iced::widget::{checkbox, column, pick_list, row};
 use iced_widget::overlay::menu;
 use iced_widget::pick_list::Style as PickStyle;
 
+use super::identity::{self, BrowserIdentity};
 use super::*;
 
 /// Where [`ModelSettings`] lives in the data directory.
@@ -81,6 +82,8 @@ pub enum SettingsMessage {
     RemoveKey,
     /// Save and apply.
     Save,
+    /// A browser identity was chosen (see the `identity` module).
+    SetIdentity(BrowserIdentity),
 }
 
 impl std::fmt::Debug for SettingsMessage {
@@ -104,6 +107,7 @@ impl std::fmt::Debug for SettingsMessage {
             Self::UseSameModel(b) => write!(f, "UseSameModel({b})"),
             Self::RemoveKey => f.write_str("RemoveKey"),
             Self::Save => f.write_str("Save"),
+            Self::SetIdentity(i) => write!(f, "SetIdentity({i:?})"),
         }
     }
 }
@@ -205,6 +209,8 @@ pub struct SettingsState {
     pub env: Arc<dyn EnvSource + Send + Sync>,
     /// How models are listed.
     pub lister: ModelLister,
+    /// Which `User-Agent` the engine presents (applies on the next launch).
+    pub identity: BrowserIdentity,
 }
 
 impl Default for SettingsState {
@@ -227,6 +233,7 @@ impl Default for SettingsState {
             vault: Arc::new(MemoryVault::new()),
             env: Arc::new(MapEnv::new()),
             lister: offline_lister(),
+            identity: BrowserIdentity::default(),
         }
     }
 }
@@ -247,11 +254,16 @@ impl SettingsState {
             }
             None => ModelSettings::default(),
         };
+        let identity = path
+            .as_deref()
+            .map(|p| identity::load(&p.with_file_name(identity::IDENTITY_FILE)))
+            .unwrap_or_default();
         Self {
             same_model: models_are_shared(&saved),
             draft: saved.clone(),
             saved,
             path,
+            identity,
             ..Self::default()
         }
     }
@@ -543,7 +555,27 @@ pub(crate) fn update(state: &mut FerriteBrowser, message: SettingsMessage) {
         }
         SettingsMessage::RemoveKey => remove_key(state),
         SettingsMessage::Save => save(state),
+        SettingsMessage::SetIdentity(choice) => set_identity(state, choice),
     }
+}
+
+/// Records the browser identity. It is saved at once but only applies the next
+/// time the app starts (the engine is built once per process), and the drawer
+/// says so.
+fn set_identity(state: &mut FerriteBrowser, choice: BrowserIdentity) {
+    let s = &mut state.settings;
+    s.identity = choice;
+    let saved = match s.path.as_deref() {
+        Some(path) => identity::save(&path.with_file_name(identity::IDENTITY_FILE), choice),
+        None => Ok(()),
+    };
+    s.notice = Some(match saved {
+        Ok(()) => Notice::new(
+            NoticeKind::Success,
+            "Saved. Quit and reopen Ferrite for this to take effect.",
+        ),
+        Err(e) => Notice::new(NoticeKind::Error, format!("Could not save the choice: {e}")),
+    });
 }
 
 fn remove_key(state: &mut FerriteBrowser) {
@@ -900,6 +932,7 @@ pub(crate) fn view(state: &FerriteBrowser) -> Element<'_, FerriteBrowserMessage>
         status_card(state, palette),
         model_card(state, palette),
         appearance_card(state, palette),
+        identity_card(state, palette),
         footer(state, palette),
     ]
     .spacing(12)
@@ -1281,6 +1314,56 @@ fn appearance_card<'a>(
             row![zoom(75), zoom(100), zoom(125), zoom(150)]
                 .spacing(6)
                 .into(),
+        ],
+    )
+}
+
+fn identity_card<'a>(
+    state: &'a FerriteBrowser,
+    palette: &'static Palette,
+) -> Element<'a, FerriteBrowserMessage> {
+    let rows: Vec<Element<FerriteBrowserMessage>> = BrowserIdentity::ALL
+        .iter()
+        .map(|&choice| {
+            let selected = state.settings.identity == choice;
+            button(
+                row![
+                    column![
+                        text(choice.label())
+                            .size(13)
+                            .font(font_weight(iced::font::Weight::Semibold))
+                            .color(palette.text),
+                        text(choice.blurb()).size(HINT_SIZE).color(palette.text_dim),
+                    ]
+                    .spacing(2)
+                    .width(Length::Fill),
+                    text(if selected { "●" } else { "○" })
+                        .size(13)
+                        .color(if selected {
+                            palette.accent
+                        } else {
+                            palette.text_dim
+                        }),
+                ]
+                .spacing(8)
+                .align_y(iced::Alignment::Center),
+            )
+            .padding([9, 12])
+            .width(Length::Fill)
+            .style(provider_row_style(selected))
+            .on_press(FerriteBrowserMessage::Settings(
+                SettingsMessage::SetIdentity(choice),
+            ))
+            .into()
+        })
+        .collect();
+    card(
+        palette,
+        "Compatibility",
+        "How Ferrite introduces itself to websites.",
+        vec![
+            column(rows).spacing(6).into(),
+            hint(palette, "Applies the next time you open Ferrite."),
         ],
     )
 }
@@ -1966,5 +2049,47 @@ mod tests {
         if cfg!(target_os = "linux") {
             assert!(blurb.contains("cleared when you restart"), "{blurb}");
         }
+    }
+
+    #[test]
+    fn choosing_a_browser_identity_is_saved_and_says_it_needs_a_restart() {
+        let dir = ferrite_model::testing::TempDir::new("settings-ui-identity");
+        let (mut state, _) = browser(lister_returning(Ok(Vec::new())));
+        state.settings.path = Some(dir.path().join("settings.json"));
+        assert_eq!(
+            state.settings.identity,
+            BrowserIdentity::FirefoxCompatible,
+            "the default"
+        );
+
+        msg(
+            &mut state,
+            SettingsMessage::SetIdentity(BrowserIdentity::Ferrite),
+        );
+        assert_eq!(state.settings.identity, BrowserIdentity::Ferrite);
+        let n = state.settings.notice.as_ref().expect("notice");
+        assert_eq!(n.kind, NoticeKind::Success);
+        assert!(n.text.contains("reopen"), "{}", n.text);
+
+        // A new process reads it back from the same folder.
+        let reloaded = SettingsState::load_from(Some(dir.path().to_path_buf()));
+        assert_eq!(reloaded.identity, BrowserIdentity::Ferrite);
+    }
+
+    #[test]
+    fn an_identity_that_cannot_be_saved_is_reported_but_still_chosen_for_now() {
+        let dir = ferrite_model::testing::TempDir::new("settings-ui-identity-unwritable");
+        let blocker = dir.path().join("a-file");
+        std::fs::write(&blocker, "x").unwrap();
+        let (mut state, _) = browser(lister_returning(Ok(Vec::new())));
+        state.settings.path = Some(blocker.join("settings.json"));
+        msg(
+            &mut state,
+            SettingsMessage::SetIdentity(BrowserIdentity::Ferrite),
+        );
+        assert_eq!(
+            state.settings.notice.as_ref().unwrap().kind,
+            NoticeKind::Error
+        );
     }
 }

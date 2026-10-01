@@ -584,3 +584,45 @@ absent in this Servo and are listed by the probe as gaps.
 
 **Not claimed.** That the keyring write works on every platform: it is exercised only against an in-memory vault. That Linux keys persist (they do not, T-259). That the drawer looks right on macOS or Windows (it was rendered with the software renderer on Linux).
 
+## ADR-018 — Be a compatible browser, not a disguised one; hand secrets to the person
+
+**Date:** 2026-10-01. **Status:** live; the effect on Google and GitHub sign-in is **unverified** (T-262).
+
+**Context.** Google and GitHub flagged Ferrite as an insecure or automated browser. Probing the real engine with the agent idle showed nothing Ferrite-specific in the page; the signals were the engine's own: a User-Agent naming `Servo/<version>`, and missing Web APIs (WebGL, permissions, notifications, the async clipboard, service workers, WebRTC devices). The tempting fix, to hide or fake whatever a bot-detection script measures, was considered and rejected.
+
+**Decision.**
+
+1. **Close real gaps instead of forging them.** Enable what Servo already implements and ships off (`webgl` feature, WebGL2, permissions, notifications, async clipboard) and make them required checks in `probe-web-api` so they cannot silently disappear. Leave unimplemented things (service workers, `mediaDevices`, `userAgentData`, `window.chrome`) missing.
+2. **A visible, reversible identity.** The User-Agent is a Settings choice. The default is Firefox-compatible: Servo's own string with only the engine token swapped for `Gecko`, because Servo already claims `Firefox/<n>` and naming an older, well-known engine is the convention every mainstream browser follows. A person can choose the string that names Servo instead. It applies at the next launch because the engine is built once.
+3. **No forgery, no stealth.** No spoofed hardware, canvas or renderer values, plugin lists or client hints; no pretending to be Chrome (Ferrite has none of Chrome's client hints, so a Chrome UA is a contradiction a site could see); no hiding that a page is automated; no mimicking another browser's TLS fingerprint. Such measures exist to separate a person from a program, and a browser that also drives an agent should not be working to blur that line.
+4. **A person signs in, not the agent.** The page script refuses to type into sensitive fields, and a run pauses before any model call when the active page asks for a password or other secret, resuming when the person presses Continue. This is the honest answer to what these sites check (a human, with their hands, in the session), and it is also the safer one: anything an agent types came from a model, and an injected page wants exactly that.
+
+**Not claimed.** That Google or GitHub will accept the sign-in: neither is reachable from the build environment, and what each keys on is unknown. That the compatible identity is a guarantee of anything. The next step is for someone to try it and report what the page says (T-262).
+
+## ADR-019 — Fix engine rendering gaps with verified switches and one narrow, visible script
+
+**Date:** 2026-10-01. **Status:** live; the effect on GitHub's own pages is unverified (T-264). **Amends ADR-018:** its sentence that a page "sees nothing Ferrite-specific" with the agent idle is no longer true, because one compatibility script is now injected.
+
+**Context.** After ADR-018 the owner could sign in to GitHub but its layout and icons were broken, and other sites looked wrong. Reproduced in the real engine: Servo paints an inline `<svg>` from the serialized element alone, so any colour that comes from a stylesheet or is inherited (the normal way sites colour icons) paints black, invisible on a dark theme; and two JavaScript APIs that sites call during start-up (`adoptedStyleSheets`, `document.fonts.load`) did not exist, which the owner's console log showed throwing repeatedly.
+
+**Decision.**
+
+1. **Enable a Servo switch only after measuring that the feature works.** `adoptedStyleSheets`, FontFace and `attr()` were enabled. Container queries (rules dropped), writing modes (the layout engine panics on mixed text) and multi-column layout (no effect) were tried and left off: a half-built feature is worse than a missing one, because pages detect it and skip their fallback.
+2. **One script, one job, visible.** `svg_compat.js` copies the colour styles an SVG's elements already resolve onto those same elements as inline `style`. It touches only `<svg>` subtrees and only inline style, makes no network request, adds no behaviour of its own, is injected through Servo's supported `UserContentManager` (not by patching the engine), and is documented in its own header. Its footprint on a page is a `data-svg-compat` attribute on each SVG, inline styles on SVG shapes and a `window.__ferriteSvgCompat` flag; it does not change what the agent's page script reads.
+3. **Regression-test the painted result.** The bug is only visible in pixels, so `probe-web-api` samples a painted pixel, and the check was confirmed to fail with the script disabled.
+4. **A sweep, not a guess (T-265).** On the owner's request to turn on everything necessary, every default-off boolean preference was enabled alone in the real engine and judged by what it does: seven that expose a working API that fails soft are on; WebRTC (media capture with no consent prompt), geolocation (never settles), service workers (half built) and Web Animations (no `finished`) are off, each for the measured reason recorded in T-265. Testing, internal and security-weakening switches are never candidates.
+5. **No site-specific hacks.** The script knows nothing about GitHub. Gaps that have no switch (`aspect-ratio` on block boxes, `:has()`, `@container`, `mask-image`, `backdrop-filter`, subgrid, ...) are listed in T-264 and left for the engine, or for a polyfill proven on its own, rather than papered over blind.
+
+**Not claimed.** That GitHub now renders correctly: it is unreachable from the build environment, and the gaps above will keep breaking some of its pages. That the script is free: a page with very many icons is processed in slices of 40, but its cost on a large real page was not measured. That icons recoloured after load (hover, theme switch) are updated.
+
+## ADR-020 — A blocked action in the real run asks the person; it does not just stop
+
+**Date:** 2026-10-01. **Status:** live. **Amends ADR-014:** "everything else is blocked" becomes "everything else waits for a person".
+
+**Context.** The runtime guard held the real run to the predicted fingerprint and refused anything else with a fixed sentence. The prediction comes from the request's words, so a request like "go to the docs page" predicted navigation only, and the agent's first click was refused with no way for the owner to say yes. The owner's report: clicks, navigation and form filling were blocked for nearly everything, so the agent was pointless.
+
+**Decision.** The verdict is unchanged; what happens to a *blocked* verdict changed. The run pauses and shows a card with the action and the site (never text a page wrote): *Allow once*, *Allow for this task* (approves the tool or the site for the task, the same approval the pre-run consent panel produces), *Don't allow* (the old behaviour, including the four-block stop). A person's yes is the only way a deviation runs, and every answer is audited. `js.execute` is still always a deviation and always asked.
+
+**Not changed.** The rules and the model layer that build the prediction, the comparator, and the evaluation: no reported number moves. Whether a navigation task should *predict* clicks and form fills is a separate, open choice (it would reduce prompts and change the claim).
+
+**Limits.** A person who allows everything gets no protection from this card, which is the human limit already published; a click on a link is judged at the page's own origin before the request is made (ADR-014's stated limit).

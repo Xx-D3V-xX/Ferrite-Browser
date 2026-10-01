@@ -466,6 +466,18 @@ pub(crate) fn view_agent_sidebar(state: &FerriteBrowser) -> Element<'_, FerriteB
     } else {
         items.push(thread_body(state));
     }
+    // The agent is paused on a page that needs the person: say so, above the
+    // composer where the eye already is, with the one button that resumes it.
+    if let Some(wall) = &state.signin_handoff {
+        items.push(sep());
+        items.push(view_signin_card(wall, palette));
+    }
+    // The guard stopped an action outside what the request implied. The run
+    // waits; nothing outside the prediction runs until the person answers.
+    if let Some(pending) = &state.pending_runtime {
+        items.push(sep());
+        items.push(view_runtime_card(pending, palette));
+    }
     if state.sidebar_view == SidebarView::Thread || reviewing {
         items.push(sep());
         items.push(view_composer(state));
@@ -580,6 +592,110 @@ fn new_chat_tip() -> &'static str {
     } else {
         "New chat (Ctrl+Shift+O)"
     }
+}
+
+/// The sign-in handoff card: what the page wants, why Ferrite is not doing it,
+/// and *Continue* / *Stop task*.
+fn view_signin_card<'a>(
+    wall: &'a super::signin::SignInWall,
+    palette: &'static Palette,
+) -> Element<'a, FerriteBrowserMessage> {
+    container(
+        column![
+            row![
+                icon(Icon::Warning, ICON_SIZE, palette.warn),
+                text(wall.title())
+                    .size(13)
+                    .font(font_weight(iced::font::Weight::Semibold))
+                    .color(palette.text)
+                    .width(Length::Fill)
+                    .wrapping(text::Wrapping::WordOrGlyph),
+            ]
+            .spacing(8)
+            .align_y(iced::Alignment::Center),
+            text(wall.body())
+                .size(11)
+                .color(palette.text_dim)
+                .wrapping(text::Wrapping::Word),
+            row![
+                button(text("I’ve done it — continue").size(12))
+                    .padding([7, 12])
+                    .style(accent_btn_style)
+                    .on_press(FerriteBrowserMessage::SigninContinue),
+                button(text("Stop task").size(12))
+                    .padding([7, 12])
+                    .style(panel_btn_inactive)
+                    .on_press(FerriteBrowserMessage::StopAgent),
+            ]
+            .spacing(8),
+        ]
+        .spacing(10),
+    )
+    .padding(12)
+    .width(Length::Fill)
+    .style(move |_: &Theme| container::Style {
+        background: Some(Background::Color(Color {
+            a: 0.10,
+            ..palette.warn
+        })),
+        ..container::Style::default()
+    })
+    .into()
+}
+
+/// The runtime-consent card: what the agent wants to do that the request did
+/// not imply, and *Allow once* / *Allow for this task* / *Don't allow*. Says
+/// only the action and the site, never text a page wrote.
+fn view_runtime_card<'a>(
+    pending: &'a super::PendingRuntimeConsent,
+    palette: &'static Palette,
+) -> Element<'a, FerriteBrowserMessage> {
+    container(
+        column![
+            row![
+                icon(Icon::Warning, ICON_SIZE, palette.warn),
+                text("The agent wants to do something your request did not ask for")
+                    .size(13)
+                    .font(font_weight(iced::font::Weight::Semibold))
+                    .color(palette.text)
+                    .width(Length::Fill)
+                    .wrapping(text::Wrapping::WordOrGlyph),
+            ]
+            .spacing(8)
+            .align_y(iced::Alignment::Center),
+            text(pending.summary())
+                .size(11)
+                .color(palette.text_dim)
+                .wrapping(text::Wrapping::WordOrGlyph),
+            row![
+                button(text("Allow once").size(12))
+                    .padding([7, 12])
+                    .style(accent_btn_style)
+                    .on_press(FerriteBrowserMessage::RuntimeAllowOnce),
+                button(text("Allow for this task").size(12))
+                    .padding([7, 12])
+                    .style(panel_btn_inactive)
+                    .on_press(FerriteBrowserMessage::RuntimeAllowTask),
+                button(text("Don’t allow").size(12))
+                    .padding([7, 12])
+                    .style(panel_btn_inactive)
+                    .on_press(FerriteBrowserMessage::RuntimeDeny),
+            ]
+            .spacing(8)
+            .wrap(),
+        ]
+        .spacing(10),
+    )
+    .padding(12)
+    .width(Length::Fill)
+    .style(move |_: &Theme| container::Style {
+        background: Some(Background::Color(Color {
+            a: 0.10,
+            ..palette.warn
+        })),
+        ..container::Style::default()
+    })
+    .into()
 }
 
 fn view_notice<'a>(

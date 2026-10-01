@@ -4807,3 +4807,42 @@ were already green. **Not verified:** a Windows run after this change.
 
 The first macOS run of the Settings branch failed one `ferrite-ui` test (`opening_the_audit_panel_loads_the_trace_...`): the marker it recorded was gone when it read the global trace back. A sibling test sends `ClearTrace`, which empties that same log, so the two race. Pre-existing and unrelated to Settings; macOS scheduling exposed it. Reproduced (5/60 runs failed), fixed with a shared lock over the three tests that touch the global trace, 0/150 after. **Not verified:** a macOS run after the change.
 
+## 2026-10-01 — coordinator — Bot detection: what was fixable, what was not, and the sign-in handoff (T-262, T-263)
+
+**Asked by the owner:** make the agent hand sign-in to the person, and fix Google and GitHub flagging Ferrite "for everything, anyhow".
+
+**Found:** with the agent idle, a page sees nothing Ferrite-specific (probed in the real engine); gating the agent's tools on the panel would change nothing. The signals were the engine's: a `Servo/<version>` User-Agent and missing Web APIs.
+
+**Done:** WebGL and WebGL2 (the `servo` crate's `webgl` feature plus `dom_webgl2_enabled`), `navigator.permissions`, `Notification`, `navigator.clipboard` (preferences), all required checks in `probe-web-api` (passes; input probe also passes); a Browser identity setting, default Firefox-compatible; the page script refuses to type into sensitive fields; the sign-in handoff (card rendered and inspected). **Verified:** 1,191 workspace tests, clippy for the workspace and with the `servo` feature, fmt, `cargo deny`, `cargo machete`.
+
+**Deliberately not done, and why:** forging hardware, canvas, renderer, plugin or client-hint values, pretending to be Chrome, hiding automation, mimicking another browser's TLS. These are evasion rather than compatibility (ADR-018). **Not verified:** whether Google or GitHub now accept a sign-in; this environment cannot reach either.
+
+## 2026-10-01 — coordinator — Broken layout and icons on GitHub: reproduced and partly fixed (T-264)
+
+**Reported by the owner (with a screenshot and a console log):** Google still blocks sign-in; GitHub signs in but its CSS and layout are broken, and many sites look wrong.
+
+**Found, by reproducing in the real engine:** inline SVG icons coloured by CSS paint black (Servo paints from the element's own markup only), which is the empty icon boxes on a dark theme; and `adoptedStyleSheets` and `document.fonts.load` were missing (both in the owner's console). **Done:** an SVG compatibility script injected through `UserContentManager` (read-all-then-write, 40 per slice), `adoptedStyleSheets`, FontFace and `attr()` enabled. **Tried and rejected after measuring:** container queries, writing modes (panics), multi-column. **Verified:** a pixel check in `probe-web-api` that fails with the script off and passes with it, 12 colouring cases, 602 script-inserted icons on a dark page, the input, profile (set then get) and digest probes, 1,191 workspace tests, clippy for the workspace and with the `servo` feature, fmt, `cargo deny`, `cargo machete`. **Not fixed, no switch exists:** `aspect-ratio` on block boxes (computes to 0 height), `:has()`, `@container`, `mask-image`, `backdrop-filter`, subgrid and more (T-264 has the list). **Not verified:** GitHub itself. Google sign-in is unchanged and unverified (T-262).
+
+## 2026-10-01 — coordinator — Servo default-off preference sweep (T-265)
+
+**Asked by the owner:** turn on everything necessary, "every single thing".
+
+**Done:** enumerated Servo 0.6.0's boolean preferences (117, 89 default-off), excluded testing, internal, devtools and security-weakening switches, enabled each remaining candidate alone against a feature battery and a behaviour page in the real engine, and compared with a baseline. Seven are now on (`credentials`, wake lock, storage manager, OffscreenCanvas, Sanitizer, visual viewport, `execCommand`); `probe-web-api` gained seven required checks and passes, as does the input probe.
+
+**Deliberately left off, with the measurement (T-265):** WebRTC (`getUserMedia` resolves with no consent prompt), geolocation (never settles), service workers (half built), Web Animations (no `finished`), container queries, multi-column, variable fonts, writing modes (panic). **Not verified:** any effect on a real site; pixel comparison was by painted-pixel count because frame hashes vary with animation timing.
+
+**Follow-up, same day:** asked to do whatever else could be done from here, re-tested the rejected switches. Both web view delegates now deny every permission request Servo forwards (explicit and logged). That did not make geolocation or WebRTC safe: Servo never forwards either to the embedder, so they stay off. The Web Animations object is a stub (only `effect`), so no shim. Branch hygiene: work lives only on `feat/defense-eval-corpus-and-laya-latency`.
+
+## 2026-10-01 — coordinator — Own-site links for navigation tasks; project site renders in Ferrite (T-266)
+
+**Reported by the owner (two screenshots):** the project site renders wrongly in Ferrite, and "go to this sites docs page" was blocked at the click on the Docs link.
+
+**Found, by loading the built site in the real engine:** `background-clip: text` fills a solid box over the hero words in Servo; `1fr` grid tracks grow to their content and pushed the demo card and a list past their columns; CSS counters incremented inside `::before` render as 0. **Done:** a gradient underline instead of gradient text, `minmax(0, 1fr)` tracks, explicit step numbers; re-rendered and checked section by section. **Defense:** see T-266: a click on a link to the site the tab is already on is judged as a click or a navigation there. 9 tests in `runtime_guard`, 2 in the guard; ui tests (323), clippy clean.
+
+**Google sign-in (T-267), same day:** the identifier page loads, renders and takes typing in the real engine, but the sandbox's egress policy blocks `www.gstatic.com`, so Google's sign-in bundle never runs here and nothing past that point could be tested. Not fixed, not claimed. The app's console-error lines now shorten long URLs so the error survives the 400-character cut (2 tests).
+
+## 2026-10-01 — coordinator — The guard asks instead of dead-ending (T-268); speed measured (T-269)
+
+**Reported by the owner:** the agent is blocked from clicking, navigating and filling forms for almost everything; Ferrite scores 1.96 on Speedometer against Brave's 15.6; the site and Google sign-in still look wrong.
+
+**Done:** ADR-020 / T-268 (the run pauses on a blocked action and asks; 333 ui tests pass, clippy clean). T-269: dependency debug assertions off in the dev profile (measured ~20-30% on DOM work), `just run-fast` for the release profile. The deployed site still showed the old hero because the Pages workflow is manual: a deploy of this branch was triggered. **Not fixed:** Google sign-in (T-267): Google's first response is identical for three user agents, so the refusal is produced by its page script, which cannot load in the build environment; `history.pushState` to another origin throws exactly `The operation is insecure`, as the spec requires, and no other candidate API misbehaved in the engine probes. Servo's rAF cadence and style speed are upstream.

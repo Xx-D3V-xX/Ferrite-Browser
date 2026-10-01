@@ -146,6 +146,33 @@ impl RuntimeGuard {
         }
     }
 
+    /// Checks an action that counts as either of two effects and allows it if
+    /// **either** is allowed: a click on a link that leads to the origin the
+    /// tab is already at is both "a click here" and "a navigation here", and a
+    /// task scoped to navigating that origin needs no separate permission to
+    /// click. When neither is allowed the first effect's verdict is returned.
+    ///
+    /// This only ever relaxes between two effects that are both inside the
+    /// same origin, so it admits nothing a `navigate` action to that origin
+    /// would not already admit.
+    #[must_use]
+    pub fn check_either(
+        &self,
+        first: (Primitive, Option<&str>),
+        second: (Primitive, Option<&str>),
+    ) -> GuardVerdict {
+        let a = self.check(first.0, first.1);
+        if a.allows() {
+            return a;
+        }
+        let b = self.check(second.0, second.1);
+        if b.allows() {
+            b
+        } else {
+            a
+        }
+    }
+
     /// Checks every effect one action has (a click on a cross-origin link is
     /// both a click here and a navigation there) and returns the first
     /// blocking verdict, or the last allowing one when nothing blocks.
@@ -323,6 +350,48 @@ mod tests {
         assert!(!guard
             .check(Primitive::Click, Some("https://files.example"))
             .allows());
+    }
+
+    #[test]
+    fn check_either_allows_when_one_of_the_two_effects_is_admitted() {
+        let nav_only = RuntimeGuard::new(fingerprint(&[(
+            Capability::WebNavigate,
+            exact("https://docs.example"),
+        )]));
+        let click_only = RuntimeGuard::new(fingerprint(&[(
+            Capability::WebInteract,
+            exact("https://docs.example"),
+        )]));
+        let here = Some("https://docs.example");
+        for guard in [&nav_only, &click_only] {
+            assert!(guard
+                .check_either((Primitive::Click, here), (Primitive::Navigate, here))
+                .allows());
+        }
+        // Neither admitted (read-only task): blocked, and the click is what is reported.
+        let read_only = RuntimeGuard::new(fingerprint(&[(
+            Capability::WebRead,
+            exact("https://docs.example"),
+        )]));
+        let v = read_only.check_either((Primitive::Click, here), (Primitive::Navigate, here));
+        assert!(!v.allows());
+        assert!(matches!(
+            v,
+            GuardVerdict::Block(EventVerdict::ExtraPrimitive(_))
+        ));
+    }
+
+    #[test]
+    fn check_either_never_admits_another_origin() {
+        let nav = RuntimeGuard::new(fingerprint(&[(
+            Capability::WebNavigate,
+            exact("https://docs.example"),
+        )]));
+        let v = nav.check_either(
+            (Primitive::Click, Some("https://evil.example")),
+            (Primitive::Navigate, Some("https://evil.example")),
+        );
+        assert!(!v.allows());
     }
 
     #[test]

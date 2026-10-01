@@ -192,6 +192,72 @@ pub fn audit_db_path() -> std::path::PathBuf {
 #[cfg(feature = "servo")]
 pub use inner::{shutdown_engine, take_popup_sessions, HeadlessServoSession};
 
+// ── Browser identity (the User-Agent sites see) ─────────────────────────────
+
+/// The User-Agent the app asked for, read once when the engine is built. The
+/// `FERRITE_USER_AGENT` environment variable still wins over it.
+static USER_AGENT_OVERRIDE: std::sync::Mutex<Option<String>> = std::sync::Mutex::new(None);
+
+/// Sets the User-Agent the engine will present, or `None` for Servo's own.
+/// Only has an effect before the first page is opened: the engine is built
+/// once per process, so a change takes effect on the next launch.
+pub fn set_user_agent(user_agent: Option<String>) {
+    let mut slot = USER_AGENT_OVERRIDE
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    *slot = user_agent.filter(|ua| !ua.trim().is_empty());
+}
+
+#[cfg(feature = "servo")]
+fn user_agent_override() -> Option<String> {
+    USER_AGENT_OVERRIDE
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .clone()
+}
+
+/// Servo's own User-Agent for this platform (names `Servo/<version>`), or
+/// `None` in a build without the engine.
+#[must_use]
+pub fn platform_default_user_agent() -> Option<String> {
+    #[cfg(feature = "servo")]
+    {
+        Some(servo::Preferences::default().user_agent)
+    }
+    #[cfg(not(feature = "servo"))]
+    {
+        None
+    }
+}
+
+/// A Firefox-compatible form of `servo_default`: the same platform and version,
+/// with Servo's own `Servo/<version>` product token replaced by the `Gecko`
+/// token every Firefox sends.
+///
+/// This is the long-standing compatibility convention (every mainstream browser
+/// names an older engine in its User-Agent), and it is deliberately the *least*
+/// change: nothing is made up. Servo already claims `Firefox/<n>`; many sites
+/// and sign-in pages treat an unrecognized engine token as an unsupported
+/// browser, and this removes that one signal. It does not make Ferrite Firefox,
+/// and it does not change what the engine can do.
+///
+/// `None` when `servo_default` does not have the expected shape, so a changed
+/// Servo default is never silently mangled.
+#[must_use]
+pub fn compatible_user_agent(servo_default: &str) -> Option<String> {
+    let start = servo_default.find(" Servo/")?;
+    let rest = &servo_default[start + 1..];
+    let end = rest
+        .find(' ')
+        .map_or(servo_default.len(), |i| start + 1 + i);
+    let compatible = format!(
+        "{} Gecko/20100101{}",
+        &servo_default[..start],
+        &servo_default[end..]
+    );
+    compatible.contains(" Firefox/").then_some(compatible)
+}
+
 /// Commits a runtime-guard decision to the hash-chained audit log, so the
 /// containment decision is verifiable after the fact: a `CapabilityDenied`
 /// entry (`capability` = `guard.<primitive>`, `url` = the origin) for an action
@@ -207,6 +273,10 @@ pub fn audit_guard_decision(primitive: &str, origin: Option<&str>, allowed: bool
     #[cfg(not(feature = "servo"))]
     let _ = (primitive, origin, allowed);
 }
+
+/// Makes inline SVG icons keep their colours; see the script's own header.
+#[cfg(feature = "servo")]
+const SVG_COMPAT_JS: &str = include_str!("svg_compat.js");
 
 #[cfg(feature = "servo")]
 mod inner {
@@ -319,6 +389,10 @@ mod inner {
     // and share it (via `Clone`, which is a cheap `Rc` bump) across all tabs.
     thread_local! {
         static SERVO_ENGINE: RefCell<Option<Servo>> = const { RefCell::new(None) };
+        /// The one set of injected page content (see `svg_compat.js`), shared
+        /// by every tab.
+        static USER_CONTENT: RefCell<Option<Rc<servo::UserContentManager>>> =
+            const { RefCell::new(None) };
     }
 
     thread_local! {
@@ -386,7 +460,23 @@ mod inner {
     /// [`HeadlessServoSession`] must have been dropped first: each holds a
     /// handle to the engine, and shutdown happens when the last one goes.
     pub fn shutdown_engine() {
+        // The content manager talks to the engine when it is dropped, so it
+        // goes first.
+        USER_CONTENT.with(|cell| drop(cell.borrow_mut().take()));
         SERVO_ENGINE.with(|cell| drop(cell.borrow_mut().take()));
+    }
+
+    /// The page content every tab is given: the SVG compatibility script.
+    fn user_content_manager(servo: &Servo) -> Rc<servo::UserContentManager> {
+        USER_CONTENT.with(|cell| {
+            cell.borrow_mut()
+                .get_or_insert_with(|| {
+                    let manager = servo::UserContentManager::new(servo);
+                    manager.add_script(Rc::new(servo::UserScript::from(super::SVG_COMPAT_JS)));
+                    Rc::new(manager)
+                })
+                .clone()
+        })
     }
 
     /// Return (or lazily create) the process-wide `Servo` engine.
@@ -418,6 +508,44 @@ mod inner {
                     dom_indexeddb_enabled: true,
                     dom_cookiestore_enabled: true,
                     dom_intersection_observer_enabled: true,
+                    // Web APIs that sign-in and anti-abuse scripts probe for
+                    // (and that ordinary sites use) and that Servo ships off
+                    // by default. Each is a real implementation being turned
+                    // on, not a stub: see `examples/web_api_probe.rs`.
+                    dom_permissions_enabled: true,
+                    dom_notification_enabled: true,
+                    dom_async_clipboard_enabled: true,
+                    dom_webgl2_enabled: true,
+                    // Seen failing on GitHub (`e.adoptedStyleSheets is undefined`,
+                    // dozens of times while its components start) and Google
+                    // (`document.fonts.load is not a function`): both ship off.
+                    // Each was checked to *work* before being kept: a half-built
+                    // feature is worse than a missing one, because pages detect
+                    // it and skip their fallback. Tried and left off: container
+                    // queries (the property parses but `@container` rules are
+                    // dropped), writing modes (the layout engine panics on a page
+                    // mixing horizontal and vertical text) and multi-column
+                    // layout (no effect). See `docs/TO-DO.md` T-264.
+                    dom_adoptedstylesheet_enabled: true,
+                    dom_fontface_enabled: true,
+                    layout_css_attr_enabled: true,
+                    // Swept one at a time against a battery page (every
+                    // default-off boolean preference, each alone, then the
+                    // survivors together). Kept because each exposes a working
+                    // API that sites feature-detect and that fails soft:
+                    // credentials/wake lock reject rather than hang, the rest
+                    // resolve. Left off, with the reason, in `docs/TO-DO.md`
+                    // T-265: WebRTC (`getUserMedia` resolves with no consent
+                    // prompt), geolocation (the request never settles),
+                    // service workers (a non-script response still "registers"),
+                    // Web Animations (`animate()` returns no `finished`).
+                    dom_credential_management_enabled: true,
+                    dom_wakelock_enabled: true,
+                    dom_storage_manager_api_enabled: true,
+                    dom_offscreen_canvas_enabled: true,
+                    dom_sanitizer_enabled: true,
+                    dom_visual_viewport_enabled: true,
+                    dom_exec_command_enabled: true,
                     ..servo::Preferences::default()
                 };
                 // Some sites (Google's sign-in among them) decide whether a
@@ -426,6 +554,7 @@ mod inner {
                 if let Some(ua) = std::env::var("FERRITE_USER_AGENT")
                     .ok()
                     .filter(|ua| !ua.trim().is_empty())
+                    .or_else(super::user_agent_override)
                 {
                     prefs.user_agent = ua;
                 }
@@ -536,6 +665,19 @@ mod inner {
     }
 
     impl WebViewDelegate for HeadlessDelegate {
+        /// Ferrite has no permission prompt yet, so every request Servo
+        /// forwards (notifications, persistent storage, wake lock) is refused
+        /// outright rather than left unanswered. Servo does not forward
+        /// geolocation or getUserMedia here at all, which is why those stay
+        /// switched off (docs/TO-DO.md T-265).
+        fn request_permission(&self, _webview: servo::WebView, request: servo::PermissionRequest) {
+            eprintln!(
+                "[ferrite-session] denied permission request: {:?}",
+                request.feature()
+            );
+            request.deny();
+        }
+
         fn notify_new_frame_ready(&self, webview: servo::WebView) {
             webview.paint();
         }
@@ -610,16 +752,13 @@ mod inner {
             _parent: servo::WebView,
             request: servo::CreateNewWebViewRequest,
         ) {
-            match HeadlessServoSession::assemble(
-                1280,
-                700,
-                |_servo, rendering_context, delegate| {
-                    request
-                        .builder(rendering_context)
-                        .delegate(delegate)
-                        .build()
-                },
-            ) {
+            match HeadlessServoSession::assemble(1280, 700, |servo, rendering_context, delegate| {
+                request
+                    .builder(rendering_context)
+                    .delegate(delegate)
+                    .user_content_manager(user_content_manager(servo))
+                    .build()
+            }) {
                 Ok(session) => POPUP_SESSIONS.with(|q| q.borrow_mut().push(session)),
                 Err(e) => eprintln!("[ferrite-session] cannot open a page-requested tab: {e}"),
             }
@@ -719,6 +858,7 @@ mod inner {
             let session = Self::assemble(width, height, |servo, rendering_context, delegate| {
                 WebViewBuilder::new(servo, rendering_context)
                     .delegate(delegate)
+                    .user_content_manager(user_content_manager(servo))
                     .url(url::Url::parse("about:blank").unwrap())
                     .build()
             })?;
@@ -1534,5 +1674,88 @@ mod page_key_tests {
             .edit_combo(),
             None
         );
+    }
+}
+
+#[cfg(test)]
+mod user_agent_tests {
+    use super::*;
+
+    #[test]
+    fn the_compatible_form_swaps_only_the_engine_token() {
+        assert_eq!(
+            compatible_user_agent("Mozilla/5.0 (Macintosh; Intel Mac OS X 10.15; rv:153.0) Servo/0.6.0 Firefox/153.0").as_deref(),
+            Some("Mozilla/5.0 (Macintosh; Intel Mac OS X 10.15; rv:153.0) Gecko/20100101 Firefox/153.0")
+        );
+        assert_eq!(
+            compatible_user_agent(
+                "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:153.0) Servo/0.6.0 Firefox/153.0"
+            )
+            .as_deref(),
+            Some(
+                "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:153.0) Gecko/20100101 Firefox/153.0"
+            )
+        );
+    }
+
+    #[test]
+    fn an_unexpected_shape_is_left_alone_not_mangled() {
+        assert_eq!(compatible_user_agent("Mozilla/5.0 Something/1.0"), None);
+        assert_eq!(
+            compatible_user_agent("Mozilla/5.0 (X11) Servo/0.6.0"),
+            None,
+            "no Firefox token"
+        );
+        assert_eq!(compatible_user_agent(""), None);
+    }
+
+    #[test]
+    fn a_blank_override_is_no_override() {
+        set_user_agent(Some("   ".to_string()));
+        assert_eq!(USER_AGENT_OVERRIDE.lock().unwrap().clone(), None);
+    }
+}
+
+#[cfg(all(test, feature = "servo"))]
+mod svg_compat_tests {
+    use super::SVG_COMPAT_JS;
+
+    #[test]
+    fn the_svg_compat_script_parses_under_node() {
+        let node_ok = std::process::Command::new("node")
+            .arg("--version")
+            .output()
+            .map(|o| o.status.success())
+            .unwrap_or(false);
+        if !node_ok {
+            eprintln!("SKIPPED: `node` is not installed; svg_compat.js not machine-checked");
+            return;
+        }
+        let dir = std::env::temp_dir().join(format!("ferrite-svg-compat-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("svg_compat.js");
+        std::fs::write(&path, SVG_COMPAT_JS).unwrap();
+        let out = std::process::Command::new("node")
+            .arg("--check")
+            .arg(&path)
+            .output()
+            .expect("node runs");
+        let _ = std::fs::remove_dir_all(&dir);
+        assert!(
+            out.status.success(),
+            "{}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+    }
+
+    #[test]
+    fn the_script_only_writes_inline_style_on_svg_content() {
+        // The contract in the script's header, pinned: it must not touch the
+        // page outside <svg> subtrees, and must not run twice on one element.
+        assert!(SVG_COMPAT_JS.contains("__ferriteSvgFixed"));
+        assert!(SVG_COMPAT_JS.contains("querySelectorAll(SHAPES)"));
+        assert!(!SVG_COMPAT_JS.contains("document.body.appendChild"));
+        assert!(!SVG_COMPAT_JS.contains("fetch("));
+        assert!(!SVG_COMPAT_JS.contains("XMLHttpRequest"));
     }
 }
