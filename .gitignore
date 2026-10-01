@@ -64,3 +64,6 @@ gemini_key.txt
 .env.*
 *.pem
 *.key
+
+# Generated site output (python3 site/build.py)
+site/dist/

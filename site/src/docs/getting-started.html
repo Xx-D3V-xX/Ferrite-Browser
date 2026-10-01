@@ -1,0 +1,63 @@
+<!--
+title: Getting started
+order: 2
+group: Start
+summary: Install Ferrite, connect your own model in Settings, run a first task, and understand the consent prompt.
+-->
+<p class="lede">From download to a first contained agent task in a few minutes. You bring the model; Ferrite brings the browser and the defense.</p>
+
+<h2>1. Install</h2>
+<p>Grab the build for your system from the <a href="{{ROOT}}index.html#download">download section</a>. Builds are unsigned prototypes, so each platform asks you to confirm once.</p>
+<div class="table-wrap"><table>
+<thead><tr><th>Platform</th><th>File</th><th>First launch</th></tr></thead>
+<tbody>
+<tr><td>macOS (Apple silicon)</td><td><code>ferrite-&lt;commit&gt;-macos-arm64.zip</code></td><td>Unzip, drag <code>Ferrite.app</code> to Applications, then right-click and choose <em>Open</em>.</td></tr>
+<tr><td>Windows (x64)</td><td><code>ferrite-&lt;commit&gt;-windows-x64.zip</code></td><td>Unzip and run <code>ferrite.exe</code>. If SmartScreen appears, choose <em>Run anyway</em>.</td></tr>
+<tr><td>Linux (x64)</td><td><code>ferrite-&lt;commit&gt;-linux-x64.tar.gz</code></td><td>Extract, then <code>./ferrite</code>, or <code>./install.sh</code> to add a launcher entry. Needs a graphical session.</td></tr>
+</tbody></table></div>
+<p>Prefer to build it yourself? See <a href="{{ROOT}}index.html#download">Build it from source</a>.</p>
+
+<h2>2. Connect a model</h2>
+<p>The agent needs a language model. Until you connect one, the agent panel shows <strong>No AI model connected</strong> with an <em>Open settings</em> button, and the browser itself works as a normal browser.</p>
+<ol>
+  <li>Click the <strong>gear</strong> in the toolbar (or <em>Open settings</em> in the agent panel).</li>
+  <li>Under <strong>AI model</strong>, choose a provider: <em>Ollama Cloud</em>, <em>Ollama (this computer)</em> or <em>Google Gemini</em>.</li>
+  <li>For a hosted provider, paste your API key. Get one at <code>ollama.com/settings/keys</code> or <code>aistudio.google.com/apikey</code>. For local Ollama there is no key; check the server address and that Ollama is running.</li>
+  <li>Press <strong>Load models</strong>. Ferrite asks the provider what your key can use, which also confirms the key works. If it fails, the message says why (rejected key, unreachable server, timeout).</li>
+  <li>Choose a <strong>Fast model</strong>. By default the same model also serves as the <strong>Agent model</strong>; untick <em>Use the same model</em> to choose a stronger one for driving the browser.</li>
+  <li>Press <strong>Save and use</strong>. The status card turns to <em>Connected</em> and the next agent task uses it. No restart.</li>
+</ol>
+<div class="callout note">
+  <h4>What the two models do</h4>
+  <p>The <strong>fast model</strong> runs once per task to predict which capabilities the task might need, beyond what a deterministic rule layer already pinned down. The <strong>agent model</strong> reads pages and chooses each step. A small model is fine for the first; a stronger one helps with the second.</p>
+</div>
+<p>Details, including where keys and settings are stored and how environment variables interact, are in <a href="{{ROOT}}docs/models-and-settings.html">Models and settings</a>.</p>
+
+<h2>3. Run a task</h2>
+<ol>
+  <li>Open the <strong>Agent</strong> panel (toolbar, or <kbd>Ctrl</kbd>+<kbd>Shift</kbd>+<kbd>O</kbd> for a new chat).</li>
+  <li>Describe what you want in plain words, for example <em>“Summarize the top stories on Hacker News”</em>.</li>
+  <li>Watch the activity feed: each step shows what the agent did and what came back.</li>
+</ol>
+<p>Ferrite derives the task's expected fingerprint from <em>your words only</em>. Earlier agent answers and page text never feed it, so a poisoned page cannot widen what it is allowed to do.</p>
+
+<h2>4. When the consent prompt appears</h2>
+<p>If the agent attempts something outside what your request implied, a panel titled <strong>Unexpected activity detected</strong> lists each item in plain language, for example:</p>
+<ul>
+  <li><em>Used tool: js.execute</em>. Arbitrary JavaScript is always reviewed; nothing in your request could have authorized it.</li>
+  <li><em>Contacted https://attacker.example</em>. This origin is not authorized. Your request authorized <code>https://news.ycombinator.com</code>.</li>
+</ul>
+<p>Approve or reject each item, then <strong>Proceed with approved</strong> or <strong>Cancel</strong>. Rejected items are blocked for the run. If you are unsure, reject: a rejected legitimate action costs you a retry, an approved malicious one can cost much more. The <em>Show dry-run evidence</em> toggle reveals what the rehearsal recorded.</p>
+<p>The <strong>Audit</strong> panel (<kbd>F12</kbd>) shows the hash-chained log and the model-activity trace.</p>
+
+<h2>Where your data lives</h2>
+<p>Everything is under one data directory: <code>$FERRITE_HOME</code> if set, otherwise <code>~/.local/share/ferrite</code> on every platform. It holds the browser profile (cookies and storage persist across restarts), saved chats, bookmarks, <code>settings.json</code> and the activity log. API keys are <em>not</em> there; they go to your operating system's credential store.</p>
+
+<h2>Troubleshooting</h2>
+<dl class="defs">
+  <dt>No AI model connected</dt><dd>Open Settings and finish steps 2 to 6 above. The agent fails closed without a model: it will not act without one.</dd>
+  <dt>“The provider rejected this key”</dt><dd>The key is wrong, revoked, or for another provider. Re-paste it; keys are shown masked.</dd>
+  <dt>“Could not reach Ollama at …”</dt><dd>Start Ollama on this computer, then press <em>Load models</em> again. A local server must be <code>localhost</code> or <code>127.0.0.1</code>.</dd>
+  <dt>The key vanished after a reboot (Linux)</dt><dd>On Linux the key is held in the kernel keyring, which a restart clears. Export <code>OLLAMA_API_KEY</code> (or <code>FERRITE_GEMINI_API_KEY</code>) in your shell profile for a permanent key.</dd>
+  <dt>My saved choice is ignored</dt><dd>An exported <code>FERRITE_MODEL_*</code> variable overrides the file. Settings names the variables that are overriding it.</dd>
+</dl>
