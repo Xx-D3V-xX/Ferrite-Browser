@@ -4709,3 +4709,16 @@ step time will show in the new start-up log; T-250); that the Servo-feature
 build still links end to end (type-checked and linted, not built); the ~20-60
 min first build of Servo 0.6.0 and the Google Form crash (T-239) remain
 unconfirmed from the previous round.
+
+## 2026-10-01 — coordinator — Laya on the owner's Mac is MPS, not CPU
+
+**Reported by the owner (start-up log):** `device=mps, first pass 1572 ms, warm
+454 ms per step`, with the new "slower than a fast lane should be" warning.
+**Correction:** the previous entry and ADR-015 guessed CPU from the trace; the
+log disproves it. The slowness is a ~450 ms forward over a 1,024-token window on
+MPS in fp32 (Laya's default below 5 question rows; Ferrite sends 2). **Done:**
+the warm-up now also times fp16 on MPS and prints both; the new
+`FERRITE_LAYA_MPS_AMP_MIN_ROWS=1` opts in; the warning no longer suggests the
+CPU-only `FERRITE_LAYA_THREADS`. **Verified:** the 26 Python server tests (fake
+agent; no torch, no MPS here). **Not verified:** whether fp16 is actually faster
+or changes answers on his machine; no Apple hardware here.

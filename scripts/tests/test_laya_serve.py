@@ -285,6 +285,24 @@ class WarmUp(unittest.TestCase):
         with self.assertLogs("ferrite.laya", level="ERROR"):
             self.assertIsNone(self.serve.warm_up(self.Warmable(fail=True)))
 
+    def test_mps_reports_the_fp16_alternative_and_restores_the_setting(self):
+        agent = self.Warmable(device="mps", seconds=(0.9, 0.9, 0.9, 0.9, 0.9, 0.9, 0.9, 0.9, 0.9))
+        agent.mps_amp_min_rows = 5
+        seen = []
+        real = agent.warmup
+
+        def warm(shapes=None):
+            seen.append(agent.mps_amp_min_rows)
+            return real(shapes)
+
+        agent.warmup = warm
+        with self.assertLogs("ferrite.laya", level="INFO") as logs:
+            out = self.serve.warm_up(agent)
+        self.assertIn("mps_fp16_ms", out)
+        self.assertIn(1, seen)                      # fp16 was tried ...
+        self.assertEqual(agent.mps_amp_min_rows, 5)  # ... and the setting restored
+        self.assertTrue(any("MPS precision" in line for line in logs.output))
+
     def test_stops_once_the_timing_settles(self):
         agent = self.Warmable(seconds=(1.0, 0.5, 0.5, 0.5, 0.5, 0.5))
         self.serve.warm_up(agent)

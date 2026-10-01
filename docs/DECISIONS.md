@@ -526,10 +526,13 @@ the cost of the failed and declined calls. The net was a loss of several seconds
   full-length sequence, one and two questions) until timing settles, logs the
   device it landed on and warns when it is CPU or a warm step exceeds 300 ms.
   The published 17-33 ms figures are GPU numbers. On the owner's Mac calls took
-  ~1.4 s with medians of 1.3-1.5 s, i.e. every call and not only the first, so
-  it was not just a cold start; that is consistent with a CPU forward over a
-  1,024-token window, but the device was not logged then, so it is an inference
-  (T-250) that the new start-up log will settle.
+  ~1.4 s with medians of 1.3-1.5 s (every call, not only the first). I first
+  guessed CPU; the new start-up log showed otherwise: **device=mps, first pass
+  1,572 ms, warm ~454 ms per step** (one forward over a 1,024-token window), so
+  the rest of the ~1.4 s is the larger two-question request and HTTP. Laya runs
+  fp32 on MPS below 5 question rows (its own default, because fp16 loses on tiny
+  inputs) and Ferrite sends 2, so the warm-up also times fp16 and reports it;
+  `FERRITE_LAYA_MPS_AMP_MIN_ROWS=1` opts in.
 
 **Not claimed:** that Laya is faster on any particular machine. That is a
 measurement (T-234, T-250); this only guarantees that when it is not, the agent

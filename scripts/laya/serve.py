@@ -22,6 +22,9 @@ built, so an ambient ``LAYA_API_KEY`` cannot silently change behaviour.
     FERRITE_LAYA_THREADS         cap torch CPU threads              (torch default)
     FERRITE_LAYA_HEAD_MAX_LEN    override the served head length     (see below)
     FERRITE_LAYA_WARMUP          0 = skip the start-up warm-up       1
+    FERRITE_LAYA_MPS_AMP_MIN_ROWS  Apple MPS only: question rows from which fp16
+                                 autocast is used (Laya's default is 5, and Ferrite
+                                 sends 2, so it runs fp32). 1 = always fp16.
     FERRITE_LAYA_LOG_LEVEL       uvicorn log level                  info
     FERRITE_LAYA_OFFLINE         1 = set HF_HUB_OFFLINE             0
     FERRITE_HOME                 state root                         <repo>/.ferrite
@@ -207,6 +210,11 @@ def build_router(ckpt: Path):
     device = _env("FERRITE_LAYA_DEVICE") or _env("LAYA_DEVICE")
     if device:
         os.environ["LAYA_DEVICE"] = device  # so /health reports the same preference
+    amp_rows = _env("FERRITE_LAYA_MPS_AMP_MIN_ROWS")
+    if amp_rows:
+        if not amp_rows.isdigit() or int(amp_rows) < 1:
+            raise ConfigError("FERRITE_LAYA_MPS_AMP_MIN_ROWS=%r must be a positive integer" % amp_rows)
+        os.environ["LAYA_MPS_AMP_MIN_ROWS"] = amp_rows  # read by laya.Agent when it loads
     threads = _env("FERRITE_LAYA_THREADS")
     if threads:
         try:
@@ -297,10 +305,40 @@ def warm_up(agent: Any, enabled: bool = True) -> Optional[dict]:
             per_step)
     elif slow:
         _log.warning(
-            "a warm step takes ~%.0f ms on %s, slower than a fast lane should be. Try "
-            "FERRITE_LAYA_THREADS, close other heavy apps, or compare with `just laya-verify`.",
+            "a warm step takes ~%.0f ms on %s, slower than a fast lane should be. Close other "
+            "heavy apps, or compare with `python3 scripts/laya/verify.py --repeat 10`.",
             per_step, device)
-    return {"device": device, "cold_ms": cold, "warm_ms": per_step, "slow": slow}
+    result = {"device": device, "cold_ms": cold, "warm_ms": per_step, "slow": slow}
+    amp_ms = _time_mps_fp16(agent, run, shapes) if device.startswith("mps") else None
+    if amp_ms is not None:
+        result["mps_fp16_ms"] = amp_ms
+        _log.info(
+            "MPS precision: fp32 (current) %.0f ms per step, fp16 %.0f ms per step%s",
+            per_step, amp_ms,
+            "; set FERRITE_LAYA_MPS_AMP_MIN_ROWS=1 to use fp16 (slightly different numbers, "
+            "re-check with verify.py)" if amp_ms < 0.8 * per_step else "")
+    return result
+
+
+def _time_mps_fp16(agent: Any, run: Any, shapes: list) -> Optional[float]:
+    """Warm ms per step with fp16 autocast forced on (Apple MPS only), or None.
+
+    Laya runs fp32 on MPS below 5 question rows because fp16 loses on tiny inputs;
+    Ferrite's inputs are long (a 1,024-token window), where it may win. Measured, not
+    assumed, and the agent's setting is restored: this only informs the operator.
+    """
+    original = getattr(agent, "mps_amp_min_rows", None)
+    if original is None or original <= 1:
+        return None
+    try:
+        agent.mps_amp_min_rows = 1
+        run(shapes)  # first fp16 pass compiles its kernels
+        return min(run(shapes) for _ in range(2)) * 1000.0 / len(shapes)
+    except Exception:
+        _log.exception("fp16 timing failed; ignoring")
+        return None
+    finally:
+        agent.mps_amp_min_rows = original
 
 
 def configure_auth(api_key: Optional[str]) -> None:
