@@ -4782,3 +4782,12 @@ piped on stdin. All 15 tests in the crate pass here with node installed.
 **Not verified:** a Windows run. Each Windows run so far has surfaced a new
 class of failure, so expect more until one is green.
 
+## 2026-10-01 — coordinator — Windows CI: closed-port refusal is slower than Laya's timeout (T-256)
+
+The third Windows run got through every earlier failure; one `ferrite-model`
+test remained (`a_server_that_is_down_is_a_connect_error_...`): it expected
+`Connect` but the client's 1.5 s timeout fired first, because Windows takes
+about 2 s to refuse a connection to a closed loopback port. Test-only fix (a
+15 s timeout in that test); the client's behavior is unchanged. Linux and macOS
+were already green. **Not verified:** a Windows run after this change.
+
