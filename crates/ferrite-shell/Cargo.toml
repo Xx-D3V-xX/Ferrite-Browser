@@ -15,3 +15,7 @@ ferrite-engine = { workspace = true }
 ferrite-model = { workspace = true }
 tokio = { workspace = true }
 uuid = { workspace = true }
+
+# Windows: embed the app icon and version info into ferrite.exe (see build.rs).
+[target.'cfg(windows)'.build-dependencies]
+winresource = { workspace = true }
