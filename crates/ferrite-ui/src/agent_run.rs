@@ -294,6 +294,54 @@ pub(crate) fn step_result_text(observation: &str) -> String {
         .to_string()
 }
 
+/// A "read page" observation split into what a person wants to see at a
+/// glance and the raw text the model read.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct PageRead {
+    pub title: String,
+    pub host: String,
+    /// "0% down (more below)", when the page scrolls.
+    pub scroll: Option<String>,
+    /// The page text the model was given (possibly cut by the transcript).
+    pub text: String,
+}
+
+/// Recognises the `PAGE: title — url / SCROLL: .. / TEXT: ..` shape a page
+/// digest renders to; anything else is not a page read.
+#[must_use]
+pub(crate) fn parse_page_read(result: &str) -> Option<PageRead> {
+    let rest = result.strip_prefix("PAGE: ")?;
+    let (head, tail) = rest.split_once('\n').unwrap_or((rest, ""));
+    let (title, url) = head.rsplit_once(" \u{2014} ")?;
+    let mut scroll = None;
+    let mut text = String::new();
+    for line in tail.lines() {
+        if let Some(s) = line.strip_prefix("SCROLL: ") {
+            scroll = Some(s.trim().to_string());
+        } else if let Some(t) = line.strip_prefix("TEXT: ") {
+            text = t.trim().to_string();
+        } else if !text.is_empty() && !line.starts_with("ELEMENTS") {
+            text.push(' ');
+            text.push_str(line.trim());
+        }
+    }
+    let host = url
+        .trim()
+        .trim_start_matches("https://")
+        .trim_start_matches("http://")
+        .split(['/', '?', '#'])
+        .next()
+        .unwrap_or("")
+        .trim_start_matches("www.")
+        .to_string();
+    Some(PageRead {
+        title: title.trim().to_string(),
+        host,
+        scroll,
+        text,
+    })
+}
+
 /// `outcome`'s text as the run's live mirror (`FerriteBrowser::agent_response`)
 /// has always shown it: answers and questions verbatim, budget/safety stops as
 /// `[stopped: ...]`, failures as `[error] ...`, nothing for a cancel.
@@ -625,6 +673,24 @@ mod tests {
         assert_eq!(step_result_text("error: no tab 9"), "error: no tab 9");
         // A read_page result *is* the page: keep it (record_step bounds it).
         assert!(step_result_text("PAGE: T \u{2014} u\nTEXT: hi").starts_with("PAGE: T"));
+    }
+
+    #[test]
+    fn a_page_read_is_split_into_headline_scroll_and_text() {
+        let read = parse_page_read(
+            "PAGE: Hacker News \u{2014} https://news.ycombinator.com/\nSCROLL: 0% down (more below)\nTEXT: Hacker Newsnew | past 1. Pi 1.0",
+        )
+        .expect("a page read");
+        assert_eq!(read.title, "Hacker News");
+        assert_eq!(read.host, "news.ycombinator.com");
+        assert_eq!(read.scroll.as_deref(), Some("0% down (more below)"));
+        assert!(read.text.starts_with("Hacker Newsnew"));
+        // Not a page read: left as it is.
+        assert_eq!(parse_page_read("clicked @4"), None);
+        assert_eq!(parse_page_read("PAGE: no separator"), None);
+        // No scroll line, no text: still a page read.
+        let bare = parse_page_read("PAGE: T \u{2014} http://a.example").expect("bare");
+        assert_eq!((bare.scroll, bare.text.as_str()), (None, ""));
     }
 
     #[test]
