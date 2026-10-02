@@ -79,8 +79,11 @@
 // check and loop-safety limits as an LLM step. Off by default.
 //
 // ## Keyboard shortcuts (platform-aware)
-//   macOS : Cmd+T/W/R/L/J/F, Cmd+=/-/0 (zoom), Cmd+Shift+O (new agent chat), F5, F12, Alt+←/→, Esc
-//   other : Ctrl+T/W/R/L/J/F, Ctrl+=/-/0 (zoom), Ctrl+Shift+O (new agent chat), F5, F12, Alt+←/→, Esc
+//   macOS : Cmd+T/W/R/L/J/F/D, Cmd+=/-/0 (zoom), Cmd+[ / ] (back/forward),
+//           Cmd+Shift+[ / ] and Ctrl+Tab (previous/next tab), Cmd+1-8/9 (tab
+//           by number / last), Cmd+Shift+A (agent), Cmd+Shift+O (new agent
+//           chat), Cmd+, (settings), F5, F12, Alt+←/→, Esc
+//   other : the same with Ctrl in place of Cmd
 //
 // Esc is context-sensitive (C3d): it closes the find bar first if one is
 // open (`show_find_bar`), otherwise it falls through to its pre-existing
@@ -98,7 +101,7 @@
 //   `load_bookmarks_from`/`save_bookmarks_to`, injected `&Path` for
 //   testability, `default_bookmarks_path()` resolving the real one via
 //   `dirs::home_dir()` — loaded once in `launch()`, never in `Default`, the
-//   same test-safety discipline `try_real_model_provider()` already
+//   same test-safety discipline the model connection already
 //   established for the model provider).
 // - **History** has two independent halves, deliberately not one. Per-tab
 //   `GoBack`/`GoForward`/`can_go_back`/`can_go_forward` now read Servo's own
@@ -123,10 +126,9 @@
 //   `tab_titles`/`tab_urls`/`tab_favicons`/`tab_favicons`), applied via a
 //   CSS `transform: scale(...)` injected through `execute_js` (Servo has no
 //   native zoom API at this pinned version — see the session's `set_zoom`
-//   comment) and surfaced in the toolbar only when it isn't 100% (see
-//   `view()`'s toolbar composition comment for the information-architecture
-//   reasoning), plus a `default_zoom` setting for new tabs in the Settings
-//   tab.
+//   comment) and surfaced in the address bar only when it isn't 100% (a
+//   chip; the overflow menu has the +/- control), plus a `default_zoom`
+//   setting for new tabs in the Settings tab.
 // - **Find-in-page** is a dismissible overlay-styled bar (not a permanent
 //   toolbar element), driving a standards-based DOM search
 //   (`document.createTreeWalker`/`Range`, no `window.find()`) via the same
@@ -149,10 +151,10 @@
 //   interception is out of scope for this pass (stated here, not silently
 //   dropped).
 //
-// All four of bookmarks/history/downloads/settings share one toolbar entry
-// point — the Library panel (`show_library_panel`/`library_tab`) — rather
-// than four more permanent toolbar buttons; see `view()`'s toolbar
-// composition comment for why.
+// Bookmarks/history/downloads share one drawer — the Library panel
+// (`show_library_panel`/`library_tab`) — reached from the toolbar's overflow
+// menu rather than from four more permanent toolbar buttons; Settings is a
+// drawer of its own, also from that menu. See `chrome.rs`.
 //
 // ## New-tab hero: real quick-access-tile favicons
 //
@@ -216,11 +218,28 @@ mod activity;
 mod activity_panel;
 mod agent_panel;
 mod agent_run;
+mod chrome;
 mod icons;
+mod identity;
+mod markdown;
 mod page_input;
+mod pages;
 mod runtime_guard;
+mod scroll;
+mod settings_panel;
+mod signin;
+mod tokens;
+mod widgets;
 use activity_panel::AuditTab;
 use icons::{icon, Icon};
+use pages::new_tab_page;
+pub(crate) use tokens::{
+    accent_btn_style, close_btn_style, panel_btn_active, panel_btn_inactive, separator_style,
+};
+use tokens::{
+    bottom_panel_style, page_style, tip, toolbar_btn_style, RADIUS_SM, SP_MD, SP_SM, SP_XL, SP_XS,
+    TEXT_BODY, TEXT_CAPTION, TEXT_SMALL, TEXT_TITLE,
+};
 
 use ferrite_agent::browser_loop::{
     compact_observation, execute_action, run_agent_loop, trim_message_history,
@@ -241,7 +260,9 @@ use ferrite_ipi::tool_decision::{DefenseMode, LoopOutcome, ToolDecisionEngine, T
 use ferrite_ipi::IpiTask;
 use ferrite_model::{CompletionRequest, Message, ModelProvider, ModelTier, SamplingOptions};
 use ferrite_servo::session::{HeadlessServoSession, LoadStatus};
-use iced::widget::{button, column, container, mouse_area, row, scrollable, text, text_input};
+use iced::widget::{
+    button, column, container, mouse_area, row, scrollable, stack, text, text_input,
+};
 use iced::{
     keyboard, time, window, Background, Border, Color, Element, Font, Length, Padding, Size,
     Subscription, Task, Theme,
@@ -277,16 +298,15 @@ pub struct HistoryEntry {
     pub visited_at: chrono::DateTime<chrono::Utc>,
 }
 
-/// Which sub-view the Library panel currently shows — see `view()`'s
-/// toolbar composition comment for why these four live behind one toggle
-/// instead of four separate toolbar buttons.
+/// Which sub-view the Library panel currently shows. They are reached from the
+/// toolbar's overflow menu (`chrome::menu_overlay`) rather than from a toolbar
+/// button each.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum LibraryTab {
     #[default]
     Bookmarks,
     History,
     Downloads,
-    Settings,
 }
 
 /// One entry in `FerriteBrowser::downloads` — a page fetched by the
@@ -360,59 +380,6 @@ const QUICK_ACCESS_TILES: [QuickAccessTile; 6] = [
         url: "https://en.m.wikipedia.org",
     },
 ];
-
-// ---------------------------------------------------------------------------
-// Real ModelProvider construction (T-229)
-// ---------------------------------------------------------------------------
-
-/// Constructs a real, configured `ferrite_model::ModelProvider` — mirrors
-/// `ferrite-eval::harness::try_real_provider()` exactly (that function is
-/// this project's own tested, live-verified reference implementation, see
-/// `docs/EVALUATION.md` §2.6): `ModelConfig::from_env()`, Ollama first
-/// (keyring-backed, service `"ferrite"`), Gemini as the fallback.
-///
-/// Returns `None` — never an `Err` — for any construction failure (unset
-/// `FERRITE_MODEL_SMALL`/`FERRITE_MODEL_MAIN`, no key anywhere, no keyring
-/// on this machine). `FerriteBrowser::default()` falls back to
-/// `ferrite_model::MockProvider::new()` when this returns `None`, giving
-/// the fingerprint's `may_use` layer the same fail-to-empty behavior
-/// `CLAUDE.md`'s invariant requires (`must_use`, the rule layer, and
-/// therefore containment itself, is unaffected either way). The live agent
-/// loop itself still needs a real, reachable provider to choose actions at
-/// all — with none configured it surfaces as a model error on the first
-/// step, never as a bypass of the fingerprint/dry-run/consent gate in front
-/// of it.
-fn try_real_model_provider() -> Option<(Arc<dyn ModelProvider>, ferrite_model::ModelConfig)> {
-    let config = ferrite_model::ModelConfig::from_env().ok()?;
-
-    if let Ok(ollama) = ferrite_model::backends::shared_ollama(
-        &config,
-        ModelTier::Small,
-        &ferrite_model::SystemEnv,
-        &ferrite_model::OsKeyring,
-    ) {
-        let provider: Arc<dyn ModelProvider> = Arc::new(ferrite_model::Trace::new(
-            ollama,
-            ferrite_model::trace::global(),
-        ));
-        return Some((provider, config));
-    }
-
-    if let Ok(gemini) = ferrite_model::GeminiProvider::from_config(
-        &config,
-        ModelTier::Small,
-        &ferrite_model::SystemEnv,
-        &ferrite_model::OsKeyring,
-    ) {
-        let provider: Arc<dyn ModelProvider> = Arc::new(ferrite_model::Trace::new(
-            gemini,
-            ferrite_model::trace::global(),
-        ));
-        return Some((provider, config));
-    }
-
-    None
-}
 
 // ---------------------------------------------------------------------------
 // Live agent-action vocabulary helpers — map `AgentAction` (the loop's real
@@ -775,14 +742,9 @@ const ADDRESS_BAR_ID: &str = "ferrite_address_bar";
 const JS_INPUT_ID: &str = "ferrite_js_input";
 const FIND_INPUT_ID: &str = "ferrite_find_input";
 
-const TOOLBAR_HEIGHT: f32 = 46.0;
-const TAB_BAR_HEIGHT: f32 = 36.0;
 /// Width of the Library drawer on the right of the page.
 const SIDE_PANEL_WIDTH: f32 = 380.0;
-/// Every tab is this wide, so the favicon, title and close button line up
-/// from tab to tab instead of each tab taking whatever its title needs.
-const TAB_WIDTH: f32 = 190.0;
-const BORDER_RADIUS: f32 = 8.0;
+const BORDER_RADIUS: f32 = tokens::RADIUS_MD;
 const PANEL_PADDING: u16 = 12;
 
 /// Ticks (`ServoFrame`, ~16ms each) to wait after calling
@@ -807,22 +769,26 @@ const RESIZE_SETTLE_TICKS: u8 = 1;
 const ICON_SIZE: f32 = 15.0;
 const ICON_SIZE_SM: f32 = 12.0;
 
+/// The engine tick while the page is busy (one display frame at 60 Hz)...
+const ACTIVE_TICK: std::time::Duration = std::time::Duration::from_millis(16);
+/// ...and while it is sitting still.
+const IDLE_TICK: std::time::Duration = std::time::Duration::from_millis(50);
+/// Ticks without a new picture before the page counts as idle (about half a
+/// second at the active rate).
+const BUSY_TICKS: u8 = 30;
+
 /// Advance per `ConsentPanelTick` for `FerriteBrowser::consent_panel_anim` —
 /// ticks fire every 16ms (the same cadence `ServoFrame` already uses, see
 /// `subscription()`), so this reaches 1.0 in ~200ms: the fast, subtle end of
 /// the 150-250ms range typical for this kind of UI entrance transition.
 const CONSENT_ANIM_STEP: f32 = 16.0 / 200.0;
 
+/// Advance per `MenuAnimTick`: the menu settles in ~140 ms.
+const MENU_ANIM_STEP: f32 = 16.0 / 140.0;
+
 /// Advance per `ThreadAnimTick` for each entering thread item's progress —
 /// ticks fire every 16ms, so an entrance takes ~220ms.
 const THREAD_ANIM_STEP: f32 = 16.0 / 220.0;
-
-/// Number of individually-lit segments in `view()`'s top-of-window loading
-/// bar — see [`progress_segment_brightness`]. Wide enough to read as a
-/// smooth sweep rather than a few chunky blocks, narrow enough that each
-/// segment is still a real, visible width in the toolbar's `PANEL_PADDING`-
-/// inset span.
-const PROGRESS_SEGMENTS: usize = 12;
 
 // ---------------------------------------------------------------------------
 // Colour palette — C3c: real light/dark theme
@@ -857,6 +823,9 @@ const PROGRESS_SEGMENTS: usize = 12;
 /// `C_BASE`.../`C_DANGER` constants, as struct fields instead of bare idents.
 #[derive(Debug, Clone, Copy)]
 pub struct Palette {
+    /// The tab strip: one step away from `base` (the toolbar and the active
+    /// tab), so the active tab reads as part of the toolbar.
+    pub chrome: Color,
     pub base: Color,
     pub surface: Color,
     pub raised: Color,
@@ -875,6 +844,12 @@ pub struct Palette {
 /// still the default theme (see [`AppTheme`]'s `Default` impl), so a user
 /// who never touches the new toggle sees exactly what they always have.
 const DARK_PALETTE: Palette = Palette {
+    chrome: Color {
+        r: 0.040,
+        g: 0.040,
+        b: 0.052,
+        a: 1.0,
+    },
     base: Color {
         r: 0.08,
         g: 0.08,
@@ -974,6 +949,12 @@ const DARK_PALETTE: Palette = Palette {
 /// `danger` on `base` ≈ 5.2-5.4:1 — all at or above AA's 4.5:1 for normal
 /// text.
 const LIGHT_PALETTE: Palette = Palette {
+    chrome: Color {
+        r: 0.894,
+        g: 0.898,
+        b: 0.925,
+        a: 1.0,
+    },
     base: Color {
         r: 0.980,
         g: 0.980,
@@ -1239,6 +1220,14 @@ pub struct LiveAgentLoop {
     guard: Option<ferrite_ipi::comparator::RuntimeGuard>,
     /// Actions the guard has blocked so far in this run.
     guard_blocks: u32,
+    /// What the person decided about the action the guard just stopped;
+    /// consumed by that one action, then back to `Ask`.
+    guard_choice: runtime_guard::GuardChoice,
+    /// The host the person already pressed *Continue* on at a sign-in
+    /// handoff (see `signin`), so the agent is not stopped again at every page
+    /// of the same sign-in. Forgotten when the agent reaches a page that needs
+    /// no one.
+    signin_cleared_host: Option<String>,
 }
 
 impl LiveAgentLoop {
@@ -1264,6 +1253,8 @@ impl LiveAgentLoop {
             last_page_sig: None,
             guard: None,
             guard_blocks: 0,
+            guard_choice: runtime_guard::GuardChoice::Ask,
+            signin_cleared_host: None,
         }
     }
 
@@ -1271,6 +1262,23 @@ impl LiveAgentLoop {
     fn with_guard(mut self, guard: Option<ferrite_ipi::comparator::RuntimeGuard>) -> Self {
         self.guard = guard;
         self
+    }
+}
+
+/// The agent tried something outside what the request implied, and the run is
+/// paused on the question. Holds the action so *Allow* can run exactly it.
+pub struct PendingRuntimeConsent {
+    run_id: u64,
+    action: AgentAction,
+    fast: Option<(FastAction, HistoryItem)>,
+    ask: runtime_guard::RuntimeAsk,
+}
+
+impl PendingRuntimeConsent {
+    /// The one sentence the card shows.
+    #[must_use]
+    pub fn summary(&self) -> &str {
+        &self.ask.summary
     }
 }
 
@@ -1293,6 +1301,11 @@ pub struct FerriteBrowser {
     pub show_js_console: bool,
     pub audit_entries: Vec<AuditEntry>,
     pub servo_sessions: HashMap<usize, HeadlessServoSession>,
+    /// The picture each tab last showed, as a ready-to-draw handle, keyed by
+    /// tab and tagged with the engine's frame number. A handle is built once
+    /// per *new* picture; building one per redraw (what this replaced) copied
+    /// and re-uploaded the whole page sixty times a second.
+    frame_cache: HashMap<usize, (u64, ImageHandle)>,
     pub is_loading: bool,
     pub can_go_back: bool,
     pub can_go_forward: bool,
@@ -1383,7 +1396,7 @@ pub struct FerriteBrowser {
     pub resize_settle_ticks: u8,
     // ── Agent bridge ──────────────────────────────────────────────────────────
     /// The real `ferrite_model::ModelProvider` constructed at startup
-    /// (`try_real_model_provider`), or `ferrite_model::MockProvider::new()`
+    /// (`settings_panel::connect_saved`), or `ferrite_model::MockProvider::new()`
     /// (fail-to-empty) when none is configured/reachable — T-224/T-229.
     pub model_provider: Arc<dyn ferrite_model::ModelProvider>,
     /// Configured tag for `ModelTier::Small` (the fingerprint's `may_use`
@@ -1509,11 +1522,30 @@ pub struct FerriteBrowser {
     pub show_evidence: bool,
     // ── C1 design-system state ───────────────────────────────────────────────
     /// Index of the tab bar entry currently under the pointer, if any —
-    /// drives the close-button-on-hover reveal pattern (`view()`'s tab bar).
+    /// drives the close-button-on-hover reveal pattern (`chrome::tab_view`).
     /// `None` when the pointer is not over any tab; reset on `CloseTab`
     /// since a close shifts every later tab's index, and a stale hovered
     /// index would otherwise show the close button on the wrong tab.
     pub hovered_tab: Option<usize>,
+    /// Whether the toolbar's overflow menu is open.
+    pub show_menu: bool,
+    /// Slide-in progress of the overflow menu, `0.0` (just opened) to `1.0`;
+    /// advanced by `MenuAnimTick` while it is below `1.0`. Decoration only.
+    pub menu_anim: f32,
+    /// When the tab strip's empty area was last pressed (double-click =
+    /// maximize).
+    last_titlebar_press: Option<std::time::Instant>,
+    /// Wheel/trackpad input waiting to be handed to the engine on the next
+    /// `ServoFrame` tick (see `scroll`).
+    scroll_queue: scroll::ScrollQueue,
+    /// Whether the pointer moved over the page since the last tick. Moves are
+    /// recorded in `cursor_pos` as they arrive and forwarded to the engine at
+    /// most once per tick.
+    pointer_moved: bool,
+    /// Ticks left before the page counts as idle: reset to `BUSY_TICKS` by a
+    /// new picture or by input, counted down by `ServoFrame`. Decides how fast
+    /// the tick runs (`tick_interval`).
+    busy_ticks: u8,
     /// Fade/slide-in progress for the consent panel, `0.0` (just appeared)
     /// to `1.0` (fully settled) — advanced by `ConsentPanelTick` while
     /// `pending_diff` is `Some` and this is below `1.0` (see
@@ -1576,7 +1608,7 @@ pub struct FerriteBrowser {
     /// zoom (`HeadlessServoSession::set_zoom`).
     pub tab_zoom: Vec<f32>,
     /// The zoom level a freshly-added tab starts at — a genuinely-settable
-    /// preference (Settings tab, `SetDefaultZoom`), distinct from `1.0`
+    /// preference (Settings drawer, `SetDefaultZoom`), distinct from `1.0`
     /// being merely `AddTab`'s old hardcoded default.
     pub default_zoom: f32,
     // ── C3d: find-in-page ────────────────────────────────────────────────
@@ -1623,10 +1655,25 @@ pub struct FerriteBrowser {
     pub library_tab: LibraryTab,
     /// `ferrite_model::ModelConfig::cache_dir`, resolved once by `launch()`
     /// alongside `model_tag_small`/`model_tag_main` — displayed read-only in
-    /// the Settings tab. `None` when no real provider is configured
+    /// the Settings drawer's footer. `None` when no real provider is configured
     /// (`model_tag_small`/`model_tag_main` stay `"unconfigured"` in that
     /// same case).
     pub model_cache_dir: Option<String>,
+    /// Whether the Settings drawer (model provider, API key, appearance) is
+    /// shown. A right-hand drawer like the Library and the agent: one at a
+    /// time.
+    pub show_settings_panel: bool,
+    /// The Settings drawer's state: the saved and in-progress model choices,
+    /// the key being typed, and the keyring/environment/network it talks to.
+    pub settings: settings_panel::SettingsState,
+    /// Set while the agent is paused on a page that needs the person (a
+    /// sign-in or another secret): the run is stopped before any model call and
+    /// the agent panel shows a card with *Continue*. See `signin`.
+    pub signin_handoff: Option<signin::SignInWall>,
+    /// An action the guard stopped, put to the person. The run waits here;
+    /// nothing outside the prediction runs until they say so. See
+    /// `PendingRuntimeConsent`.
+    pub pending_runtime: Option<PendingRuntimeConsent>,
     // ── New-tab hero: quick-access tile favicons ────────────────────────────
     /// The decoded favicon for each of `QUICK_ACCESS_TILES`, same indexing
     /// convention as `tab_favicons`/`tab_titles`/... elsewhere in this file
@@ -1684,6 +1731,7 @@ impl Default for FerriteBrowser {
             show_js_console: false,
             audit_entries: vec![],
             servo_sessions: HashMap::new(),
+            frame_cache: HashMap::new(),
             is_loading: false,
             can_go_back: false,
             can_go_forward: false,
@@ -1734,6 +1782,12 @@ impl Default for FerriteBrowser {
             pending_task: None,
             show_evidence: false,
             hovered_tab: None,
+            show_menu: false,
+            menu_anim: 1.0,
+            last_titlebar_press: None,
+            scroll_queue: scroll::ScrollQueue::default(),
+            pointer_moved: false,
+            busy_ticks: 0,
             consent_panel_anim: 0.0,
             theme_mode: AppTheme::Dark,
             bookmarks: Vec::new(),
@@ -1751,6 +1805,10 @@ impl Default for FerriteBrowser {
             show_library_panel: false,
             library_tab: LibraryTab::default(),
             model_cache_dir: None,
+            show_settings_panel: false,
+            settings: settings_panel::SettingsState::default(),
+            signin_handoff: None,
+            pending_runtime: None,
             tile_favicons: vec![None; QUICK_ACCESS_TILES.len()],
             favicons_cache_dir: None,
         }
@@ -1818,11 +1876,8 @@ pub enum FerriteBrowserMessage {
     PageKey(ferrite_servo::session::PageKeyEvent),
     /// Mouse button released (position taken from last ServoMouseMove).
     ServoMouseRelease,
-    /// Scroll wheel event.
-    ServoScroll {
-        delta_x: f32,
-        delta_y: f32,
-    },
+    /// Scroll wheel / trackpad event; queued and delivered per tick.
+    ServoScroll(scroll::Wheel),
     /// The window's real scale factor (physical px per logical point),
     /// fetched once shortly after launch — see `scale_factor`'s doc
     /// comment on `FerriteBrowser`.
@@ -1865,6 +1920,15 @@ pub enum FerriteBrowserMessage {
     AgentCompleted(String),
     AgentFailed(String),
     StopAgent,
+    /// The person pressed *Continue* on the sign-in handoff card: the agent
+    /// picks up from the page as it is now.
+    SigninContinue,
+    /// Run the paused action this once.
+    RuntimeAllowOnce,
+    /// Run it, and allow the same kind of action for the rest of this task.
+    RuntimeAllowTask,
+    /// Do not run it; the agent is told it was blocked.
+    RuntimeDeny,
     // ── Chats ─────────────────────────────────────────────────────────────────
     /// Starts a fresh, empty chat (the sidebar's "New chat" button, and
     /// Cmd/Ctrl+Shift+O). Refused, with a notice, while a run is active or a
@@ -1898,6 +1962,8 @@ pub enum FerriteBrowserMessage {
     ThreadAnimTick,
     /// The answer card's Copy button: puts the full answer on the clipboard.
     CopyAnswer(String),
+    /// A link in an agent answer, clicked: opens in a new tab.
+    OpenLink(String),
     /// Toggles one expandable part of the thread (see `FerriteBrowser::expanded`).
     ToggleExpand(String),
     // ── IPI consent ───────────────────────────────────────────────────────────
@@ -1924,6 +1990,28 @@ pub enum FerriteBrowserMessage {
     TabHoverEnter(usize),
     /// Pointer left tab `usize`'s hit area.
     TabHoverExit(usize),
+    // ── Chrome ───────────────────────────────────────────────────────────────
+    /// Open or close the toolbar's overflow menu.
+    ToggleMenu,
+    CloseMenu,
+    /// One animation tick of the overflow menu's slide-in.
+    MenuAnimTick,
+    /// A row of the overflow menu was picked: close the menu, then do it.
+    Menu(chrome::MenuCommand),
+    /// Open the library drawer on a given tab (from the overflow menu).
+    OpenLibrary(LibraryTab),
+    /// A press on the tab strip's empty area: drag the window, or maximize on
+    /// a double-click.
+    TitleBarPressed,
+    /// Ctrl+Tab / Ctrl+Shift+Tab and the Cmd+Shift+[ ] pair.
+    NextTab,
+    PrevTab,
+    /// Cmd/Ctrl+1..8 (zero-based) and Cmd/Ctrl+9 (the last tab).
+    SelectTabNumber(usize),
+    SelectLastTab,
+    /// A press that only needs to be swallowed (on a popover's own card, so
+    /// it does not reach the click-away layer beneath).
+    Noop,
     /// One animation-subscription tick advancing
     /// `FerriteBrowser::consent_panel_anim` — see that field's docs and
     /// `subscription()`'s `consent_anim_tick`.
@@ -1953,7 +2041,7 @@ pub enum FerriteBrowserMessage {
     ZoomOut,
     /// Resets the active tab's zoom to 100%.
     ZoomReset,
-    /// Sets `FerriteBrowser::default_zoom` (Settings tab) — affects tabs
+    /// Sets `FerriteBrowser::default_zoom` (Settings drawer) — affects tabs
     /// created after this point, not the currently active one.
     SetDefaultZoom(f32),
     // ── C3d: find-in-page ────────────────────────────────────────────────
@@ -1994,6 +2082,11 @@ pub enum FerriteBrowserMessage {
     ToggleLibraryPanel,
     /// Switches the Library panel's active sub-view.
     SelectLibraryTab(LibraryTab),
+    // ── Settings drawer ──────────────────────────────────────────────────
+    /// Toggles the Settings drawer (and the toolbar's gear).
+    ToggleSettingsPanel,
+    /// One action inside the Settings drawer (see `settings_panel`).
+    Settings(settings_panel::SettingsMessage),
     // ── New-tab hero: quick-access tile favicons ────────────────────────────
     /// Sent once, at real startup (`launch()`'s startup `Task::batch`,
     /// mirroring `ServoReady`) — spawns one background fetch per
@@ -2026,12 +2119,30 @@ pub fn update(
             if let Some(e) = session_error {
                 eprintln!("[ferrite-ui] Servo session tab {index}: {e}");
             }
+            // A new tab starts at the address bar, ready to type, as in every
+            // browser.
+            return focus_address_bar(state);
+        }
+        FerriteBrowserMessage::OpenLink(url) => {
+            // The answer's text came from a model that has read untrusted
+            // pages, so a link only ever opens because a person clicked it,
+            // only for http(s), and in a tab of its own.
+            let lower = url.to_ascii_lowercase();
+            if !(lower.starts_with("https://") || lower.starts_with("http://")) {
+                return Task::none();
+            }
+            let (index, session_error) = add_tab(state);
+            if let Some(e) = session_error {
+                eprintln!("[ferrite-ui] Servo session tab {index}: {e}");
+            }
+            return update(state, FerriteBrowserMessage::NavigateRequested(url));
         }
         FerriteBrowserMessage::CloseTab(i) => {
             close_tab_at(state, i);
         }
         FerriteBrowserMessage::SelectTab(i) => {
             select_tab_at(state, i);
+            return widgets::unfocus();
         }
         FerriteBrowserMessage::AddressBarChanged(s) => {
             state.address_bar_edited = true;
@@ -2051,6 +2162,8 @@ pub fn update(
             if let Some(session) = state.servo_sessions.get(&state.active_tab) {
                 session.navigate(&url);
             }
+            // Let go of the address bar so keys reach the page again.
+            return widgets::unfocus();
         }
         FerriteBrowserMessage::GoBack => {
             if let Some(session) = state.servo_sessions.get(&state.active_tab) {
@@ -2127,6 +2240,7 @@ pub fn update(
             if state.show_audit_panel {
                 state.show_js_console = false;
                 state.show_library_panel = false;
+                state.show_settings_panel = false;
                 refresh_audit_views(state);
             }
         }
@@ -2135,6 +2249,7 @@ pub fn update(
             if state.show_js_console {
                 state.show_audit_panel = false;
                 state.show_library_panel = false;
+                state.show_settings_panel = false;
             }
         }
         FerriteBrowserMessage::SetAuditTab(tab) => {
@@ -2166,18 +2281,16 @@ pub fn update(
             state.new_tab_search_input = s;
         }
         FerriteBrowserMessage::FocusAddressBar => {
-            state.address_bar_focused = true;
-            // In order: focusing moves the caret to the end, selecting all
-            // must come after it.
-            return text_input::focus(text_input::Id::new(ADDRESS_BAR_ID))
-                .chain(text_input::select_all(text_input::Id::new(ADDRESS_BAR_ID)));
+            return focus_address_bar(state);
         }
         FerriteBrowserMessage::AddressBarPressed => {
-            // A click into an address the user has not edited selects the
-            // whole of it, as in every other browser; once they are typing,
-            // clicks place the caret as usual.
-            state.address_bar_focused = true;
-            if !state.address_bar_edited {
+            // The press that focuses the address bar selects the whole of it,
+            // as in every other browser; once it has focus, clicks place the
+            // caret as usual. (`widgets::PressProbe` reports the press: the
+            // text input itself consumes it, so a `mouse_area` around it
+            // never saw it.)
+            if !state.address_bar_focused {
+                state.address_bar_focused = true;
                 return text_input::select_all(text_input::Id::new(ADDRESS_BAR_ID));
             }
         }
@@ -2199,7 +2312,9 @@ pub fn update(
             // that function's own doc comment), so both cases route through
             // this one `EscapePressed` message and are told apart here,
             // where `state` is actually available.
-            if state.show_find_bar {
+            if state.show_menu {
+                state.show_menu = false;
+            } else if state.show_find_bar {
                 // Applied directly (not via `Task::done(CloseFindBar)`) so
                 // a single `update()` call — the shape every test in this
                 // module already calls `update()` with — observes the
@@ -2212,10 +2327,17 @@ pub fn update(
                 state.find_query.clear();
                 state.find_match_count = 0;
                 state.find_current_index = 0;
+            } else if state.pending_runtime.is_some() {
+                // The agent is waiting on a question: Escape is "no", the
+                // safe answer, never "yes".
+                return update(state, FerriteBrowserMessage::RuntimeDeny);
+            } else if state.pending_diff.is_some() {
+                return update(state, FerriteBrowserMessage::ConsentCancelled);
             } else if state.is_loading {
                 return Task::done(FerriteBrowserMessage::StopLoading);
             } else {
                 state.address_bar_focused = false;
+                return widgets::unfocus();
             }
         }
         FerriteBrowserMessage::JsInputChanged(s) => {
@@ -2249,26 +2371,22 @@ pub fn update(
         }
         // ── Servo mouse/scroll events ──────────────────────────────────────
         FerriteBrowserMessage::ServoMouseMove { x, y } => {
+            // Only record the position; the next `ServoFrame` tick forwards
+            // it. A mouse reports far more moves than there are frames, and
+            // each one used to be an engine call of its own.
             state.cursor_pos = (x, y);
-            let scale = state.scale_factor;
-            if let Some(session) = state.servo_sessions.get(&state.active_tab) {
-                // mouse_area reports logical points; HeadlessServoSession's
-                // DevicePoint space is physical pixels — see scale_factor's
-                // doc comment. Without this, a HiDPI display (or any window
-                // size other than the session's hardcoded original buffer)
-                // put the cursor Servo actually sees somewhere other than
-                // where it visually is, which is exactly the "have to hover
-                // above the link" bug this scaling fixes (C3a).
-                session.send_mouse_move(x * scale, y * scale);
-            }
+            state.pointer_moved = true;
+            wake(state);
         }
         FerriteBrowserMessage::ServoMousePress => {
             // A click on the page takes keyboard focus from the address bar
             // (the bar's own widget unfocuses itself, but this flag is what
             // `PageKey` consults).
             state.address_bar_focused = false;
+            wake(state);
             let (x, y) = state.cursor_pos;
             let scale = state.scale_factor;
+            state.pointer_moved = false;
             if let Some(session) = state.servo_sessions.get(&state.active_tab) {
                 // Re-assert the pointer position first so the press hit-tests
                 // where the cursor visually is even if no move event preceded it.
@@ -2279,9 +2397,11 @@ pub fn update(
         FerriteBrowserMessage::PageKey(event) => {
             if let Some(session) = page_key_target(state) {
                 session.send_key(&event);
+                wake(state);
             }
         }
         FerriteBrowserMessage::ServoMouseRelease => {
+            wake(state);
             let (x, y) = state.cursor_pos;
             let scale = state.scale_factor;
             if let Some(session) = state.servo_sessions.get(&state.active_tab) {
@@ -2292,16 +2412,11 @@ pub fn update(
                 session.send_mouse_up(x * scale, y * scale);
             }
         }
-        FerriteBrowserMessage::ServoScroll { delta_x, delta_y } => {
-            let (x, y) = state.cursor_pos;
-            let scale = state.scale_factor;
-            if let Some(session) = state.servo_sessions.get(&state.active_tab) {
-                // Only the position is scaled to physical pixels, matching
-                // every other pointer event above — delta_x/delta_y are
-                // already OS-level wheel/trackpad units, independent of
-                // display scale, and left as iced reports them.
-                session.send_scroll(x * scale, y * scale, delta_x as f64, delta_y as f64);
-            }
+        FerriteBrowserMessage::ServoScroll(wheel) => {
+            // Queued, not sent: pixel deltas are summed and notches eased out
+            // over the next frames by the `ServoFrame` tick (see `scroll`).
+            state.scroll_queue.push(wheel, state.scale_factor);
+            wake(state);
         }
         FerriteBrowserMessage::ScaleFactorReady(factor) => {
             state.scale_factor = factor;
@@ -2311,9 +2426,11 @@ pub fn update(
             state.show_agent_sidebar = !state.show_agent_sidebar;
             if state.show_agent_sidebar {
                 state.show_library_panel = false;
+                state.show_settings_panel = false;
                 // Opening the panel puts the cursor in the composer, ready to
                 // type, with the thread at its newest message.
                 if state.sidebar_view == SidebarView::Thread {
+                    state.address_bar_focused = false;
                     return Task::batch([
                         text_input::focus(text_input::Id::new(AGENT_INPUT_ID)),
                         scroll_to_latest(state),
@@ -2336,6 +2453,78 @@ pub fn update(
         }
         FerriteBrowserMessage::AgentFailed(s) => {
             return conclude_run(state, Outcome::Failed(s));
+        }
+        FerriteBrowserMessage::SigninContinue => {
+            let (Some(wall), Some(mut live)) =
+                (state.signin_handoff.take(), state.live_loop.take())
+            else {
+                return Task::none();
+            };
+            activity::record(
+                "sign-in handoff",
+                &wall.host,
+                "continued by the user",
+                true,
+                "",
+                0,
+            );
+            live.signin_cleared_host = Some(wall.host.clone());
+            // Tell the model what happened, in the observation it is about to
+            // read: it must not assume the sign-in succeeded or failed, only
+            // that the person has finished with the page.
+            let note = format!(
+                "Observation: the user handled the sign-in or secret prompt on {} themselves \
+                 and pressed Continue. Look at the page and carry on with the task.",
+                wall.host
+            );
+            match live.messages.last_mut() {
+                Some(last) if last.role == ferrite_model::Role::User => {
+                    last.content.push_str("\n\n");
+                    last.content.push_str(&note);
+                }
+                _ => live.messages.push(Message::user(note)),
+            }
+            let run_id = state.run_id;
+            return spawn_next_step(state, run_id, live);
+        }
+        FerriteBrowserMessage::RuntimeAllowOnce
+        | FerriteBrowserMessage::RuntimeAllowTask
+        | FerriteBrowserMessage::RuntimeDeny => {
+            let (Some(pending), Some(mut live)) =
+                (state.pending_runtime.take(), state.live_loop.take())
+            else {
+                return Task::none();
+            };
+            let decision = match message {
+                FerriteBrowserMessage::RuntimeAllowOnce => "allowed once",
+                FerriteBrowserMessage::RuntimeAllowTask => "allowed for this task",
+                _ => "denied",
+            };
+            activity::record(
+                "runtime consent",
+                pending.ask.summary.as_str(),
+                decision,
+                true,
+                "the person was asked",
+                0,
+            );
+            live.guard_choice = match message {
+                FerriteBrowserMessage::RuntimeDeny => runtime_guard::GuardChoice::Deny,
+                FerriteBrowserMessage::RuntimeAllowOnce => runtime_guard::GuardChoice::AllowOnce,
+                _ => {
+                    // Approve the tool or site for the rest of the task, the
+                    // same approval the consent panel gives before a run.
+                    live.guard = live.guard.take().map(|guard| {
+                        guard.with_approvals(
+                            pending.ask.approve_tool.clone(),
+                            pending.ask.approve_origin.clone(),
+                        )
+                    });
+                    runtime_guard::GuardChoice::Ask
+                }
+            };
+            state.live_loop = Some(live);
+            return handle_agent_step(state, pending.run_id, Ok(pending.action), pending.fast);
         }
         FerriteBrowserMessage::StopAgent => {
             state.run_id += 1;
@@ -2546,6 +2735,25 @@ pub fn update(
         FerriteBrowserMessage::ServoFrame => {
             state.progress_offset = (state.progress_offset + 0.02) % 1.0;
 
+            // Forward this tick's pointer position and scroll to the engine:
+            // at most one move and one wheel event per frame, whatever the
+            // input device's own rate. Positions are logical points; the
+            // engine counts physical pixels (see `scale_factor`).
+            {
+                let (x, y) = state.cursor_pos;
+                let scale = state.scale_factor;
+                let moved = std::mem::take(&mut state.pointer_moved);
+                let wheel = state.scroll_queue.next_frame();
+                if let Some(session) = state.servo_sessions.get(&state.active_tab) {
+                    if moved {
+                        session.send_mouse_move(x * scale, y * scale);
+                    }
+                    if let Some((dx, dy)) = wheel {
+                        session.send_scroll(x * scale, y * scale, f64::from(dx), f64::from(dy));
+                    }
+                }
+            }
+
             // Keep the active tab's Servo render buffer matched to the real
             // content-area size (see `content_area_size`'s doc comment).
             // Runs every tick (16ms) rather than off a dedicated resize
@@ -2607,10 +2815,15 @@ pub fn update(
                     for message in session.take_console_errors().into_iter().take(20) {
                         eprintln!(
                             "[page console error] tab {index}: {}",
-                            truncate(&message, 300)
+                            truncate(&shorten_urls(&message), 400)
                         );
                     }
                 }
+            }
+            if refresh_frame_cache(state) {
+                state.busy_ticks = BUSY_TICKS;
+            } else {
+                state.busy_ticks = state.busy_ticks.saturating_sub(1);
             }
             let active = state.active_tab;
             if let Some(session) = state.servo_sessions.get(&active) {
@@ -2656,6 +2869,56 @@ pub fn update(
                 state.hovered_tab = None;
             }
         }
+        // ── Chrome ───────────────────────────────────────────────────────────
+        FerriteBrowserMessage::ToggleMenu => {
+            state.show_menu = !state.show_menu;
+            state.menu_anim = 0.0;
+        }
+        FerriteBrowserMessage::MenuAnimTick => {
+            state.menu_anim = (state.menu_anim + MENU_ANIM_STEP).min(1.0);
+        }
+        FerriteBrowserMessage::CloseMenu => {
+            state.show_menu = false;
+        }
+        FerriteBrowserMessage::Menu(command) => {
+            state.show_menu = false;
+            return update(state, command.message());
+        }
+        FerriteBrowserMessage::OpenLibrary(tab) => {
+            if !state.show_library_panel {
+                let _ = update(state, FerriteBrowserMessage::ToggleLibraryPanel);
+            }
+            state.library_tab = tab;
+        }
+        FerriteBrowserMessage::TitleBarPressed => {
+            let now = std::time::Instant::now();
+            let double = chrome::is_double_click(state.last_titlebar_press, now);
+            state.last_titlebar_press = (!double).then_some(now);
+            return window::get_latest().then(move |id| match id {
+                Some(id) if double => window::toggle_maximize(id),
+                Some(id) => window::drag(id),
+                None => Task::none(),
+            });
+        }
+        FerriteBrowserMessage::NextTab => {
+            let count = state.tabs.len();
+            select_tab_at(state, (state.active_tab + 1) % count.max(1));
+            return widgets::unfocus();
+        }
+        FerriteBrowserMessage::PrevTab => {
+            let count = state.tabs.len().max(1);
+            select_tab_at(state, (state.active_tab + count - 1) % count);
+            return widgets::unfocus();
+        }
+        FerriteBrowserMessage::SelectTabNumber(i) => {
+            select_tab_at(state, i);
+            return widgets::unfocus();
+        }
+        FerriteBrowserMessage::SelectLastTab => {
+            select_tab_at(state, state.tabs.len().saturating_sub(1));
+            return widgets::unfocus();
+        }
+        FerriteBrowserMessage::Noop => {}
         FerriteBrowserMessage::ConsentPanelTick => {
             state.consent_panel_anim = (state.consent_panel_anim + CONSENT_ANIM_STEP).min(1.0);
         }
@@ -2717,6 +2980,7 @@ pub fn update(
             state.find_query.clear();
             state.find_match_count = 0;
             state.find_current_index = 0;
+            state.address_bar_focused = false;
             return text_input::focus(text_input::Id::new(FIND_INPUT_ID));
         }
         FerriteBrowserMessage::CloseFindBar => {
@@ -2801,10 +3065,23 @@ pub fn update(
             if state.show_library_panel {
                 state.show_audit_panel = false;
                 state.show_js_console = false;
-                // Both are right-hand drawers: one at a time.
+                // The right-hand drawers: one at a time.
                 state.show_agent_sidebar = false;
+                state.show_settings_panel = false;
             }
         }
+        // ── Settings drawer ─────────────────────────────────────────────────
+        FerriteBrowserMessage::ToggleSettingsPanel => {
+            state.show_settings_panel = !state.show_settings_panel;
+            if state.show_settings_panel {
+                state.show_audit_panel = false;
+                state.show_js_console = false;
+                state.show_library_panel = false;
+                state.show_agent_sidebar = false;
+                settings_panel::on_open(state);
+            }
+        }
+        FerriteBrowserMessage::Settings(message) => settings_panel::update(state, message),
         FerriteBrowserMessage::SelectLibraryTab(tab) => {
             state.library_tab = tab;
         }
@@ -2925,6 +3202,8 @@ fn conclude_run(state: &mut FerriteBrowser, outcome: Outcome) -> Task<FerriteBro
     }
     state.agent_is_running = false;
     state.live_loop = None;
+    state.signin_handoff = None;
+    state.pending_runtime = None;
     state.pending_task = None;
     state.pending_seed = None;
     // "Stop the current run before switching chats" is stale the moment the
@@ -3328,6 +3607,8 @@ fn handle_agent_step(
     // that is neither expected nor approved is not executed. The guard runs
     // first so a rejected-and-unexpected action is reported as the guard's
     // (the stronger statement) and so every blocked action is audited.
+    let choice = std::mem::take(&mut live.guard_choice);
+    let mut ask: Option<runtime_guard::RuntimeAsk> = None;
     let guard_block = live.guard.as_ref().and_then(|guard| {
         let tab_url = state
             .tab_urls
@@ -3341,23 +3622,48 @@ fn handle_agent_step(
             }
             _ => None,
         };
-        let effects = runtime_guard::action_effects(&action, &tab_url, digest.as_ref());
-        let verdict = guard.check_all(&effects);
+        let (verdict, effects) = runtime_guard::judge(guard, &action, &tab_url, digest.as_ref());
         let audited = effects.first().map_or_else(
             || (primitive_of_action(&action).as_str(), None),
             |(p, o)| (p.as_str(), o.as_deref()),
         );
-        match &verdict {
-            ferrite_ipi::comparator::GuardVerdict::Block(_) => {
+        match runtime_guard::settle(&verdict, choice) {
+            // Outside the prediction and nobody has said yes: the run waits
+            // for the person (nothing is audited or run until they answer).
+            runtime_guard::Settled::Ask => {
+                ask = runtime_guard::ask_for(&verdict, action_label(&action));
+                Some(verdict)
+            }
+            runtime_guard::Settled::Block => {
                 ferrite_servo::session::audit_guard_decision(audited.0, audited.1, false);
+                Some(verdict)
             }
-            ferrite_ipi::comparator::GuardVerdict::Approved(_) => {
-                ferrite_servo::session::audit_guard_decision(audited.0, audited.1, true);
+            runtime_guard::Settled::Run { approved } => {
+                if approved {
+                    ferrite_servo::session::audit_guard_decision(audited.0, audited.1, true);
+                }
+                None
             }
-            ferrite_ipi::comparator::GuardVerdict::Expected(_) => {}
         }
-        (!verdict.allows()).then_some(verdict)
     });
+    if let Some(ask) = ask {
+        activity::record(
+            "runtime consent",
+            ask.summary.as_str(),
+            "waiting for the person",
+            true,
+            "the agent reached outside what the request implied",
+            0,
+        );
+        state.pending_runtime = Some(PendingRuntimeConsent {
+            run_id,
+            action,
+            fast,
+            ask,
+        });
+        state.live_loop = Some(live);
+        return scroll_to_latest(state);
+    }
     if guard_block.is_some() {
         live.guard_blocks += 1;
     }
@@ -3597,6 +3903,15 @@ fn sync_nav_state(state: &mut FerriteBrowser) {
 // are kept in step in exactly one place).
 // ---------------------------------------------------------------------------
 
+/// Puts the caret in the address bar with its text selected, and records that
+/// it has focus (the focus ring and `PageKey` both read the flag). Order
+/// matters: focusing moves the caret to the end, selecting all must follow.
+fn focus_address_bar(state: &mut FerriteBrowser) -> Task<FerriteBrowserMessage> {
+    state.address_bar_focused = true;
+    text_input::focus(text_input::Id::new(ADDRESS_BAR_ID))
+        .chain(text_input::select_all(text_input::Id::new(ADDRESS_BAR_ID)))
+}
+
 /// What the address bar shows for a tab at `url`: nothing for the blank page,
 /// so the "Search or type an address" prompt shows and the first keystroke
 /// starts a fresh address instead of extending `about:blank`.
@@ -3631,6 +3946,7 @@ fn push_tab_state(state: &mut FerriteBrowser) -> usize {
 /// tab still exists then, exactly as `AddTab` always behaved).
 fn add_tab(state: &mut FerriteBrowser) -> (usize, Option<String>) {
     let index = push_tab_state(state);
+    wake(state);
     match HeadlessServoSession::new(1280, 700) {
         Ok(session) => {
             state.servo_sessions.insert(index, session);
@@ -3648,6 +3964,43 @@ fn add_tab(state: &mut FerriteBrowser) -> (usize, Option<String>) {
 /// starts at its creation size, not at the size the previous tab was last
 /// resized to, and treating them as equal left every tab after the first
 /// displayed at the wrong size with pointer input landing in the wrong place.
+/// Keeps `frame_cache` current for the active tab (returns whether it changed): a new handle only when the
+/// engine produced a new picture, and none kept for tabs that are gone.
+fn refresh_frame_cache(state: &mut FerriteBrowser) -> bool {
+    state
+        .frame_cache
+        .retain(|index, _| state.servo_sessions.contains_key(index));
+    let active = state.active_tab;
+    let Some((seq, width, height, pixels)) = state
+        .servo_sessions
+        .get(&active)
+        .and_then(HeadlessServoSession::frame_shared)
+    else {
+        return false;
+    };
+    if state.frame_cache.get(&active).map(|(s, _)| *s) == Some(seq) {
+        return false;
+    }
+    // The pixels are shared with the session, not copied into the handle.
+    let handle = ImageHandle::from_rgba(
+        width,
+        height,
+        iced_widget::core::image::Bytes::from_owner(SharedPixels(pixels)),
+    );
+    state.frame_cache.insert(active, (seq, handle));
+    true
+}
+
+/// A shared RGBA buffer as `Bytes`, so the image handle borrows the engine's
+/// frame instead of owning a copy of it.
+struct SharedPixels(std::sync::Arc<Vec<u8>>);
+
+impl AsRef<[u8]> for SharedPixels {
+    fn as_ref(&self) -> &[u8] {
+        self.0.as_slice()
+    }
+}
+
 fn sync_active_webview(state: &mut FerriteBrowser) {
     let active = state.active_tab;
     for (index, session) in &state.servo_sessions {
@@ -3667,6 +4020,12 @@ fn select_tab_at(state: &mut FerriteBrowser, i: usize) -> bool {
     state.active_tab = i;
     state.address_bar_input = address_bar_text(&state.tab_urls[i]);
     state.address_bar_edited = false;
+    // Scroll and pointer input belong to the page that was showing, and the
+    // address bar no longer holds the keyboard (the callers unfocus it).
+    state.address_bar_focused = false;
+    state.scroll_queue.clear();
+    state.pointer_moved = false;
+    wake(state);
     sync_nav_state(state);
     sync_active_webview(state);
     true
@@ -3715,6 +4074,9 @@ fn close_tab_at(state: &mut FerriteBrowser, i: usize) -> bool {
     state.active_tab = state.active_tab.min(state.tabs.len().saturating_sub(1));
     state.address_bar_input = address_bar_text(&state.tab_urls[state.active_tab]);
     state.address_bar_edited = false;
+    state.scroll_queue.clear();
+    state.pointer_moved = false;
+    wake(state);
     sync_nav_state(state);
     sync_active_webview(state);
     removed
@@ -4025,209 +4387,23 @@ fn ease_out_cubic(t: f32) -> f32 {
 // C3c: loading-indicator animation
 // ---------------------------------------------------------------------------
 //
-// Both helpers below are driven by the same `FerriteBrowser::progress_offset`
-// `ServoFrame` already advances every ~16ms tick (see that handler) —
-// consistent with `ease_out_cubic` above, no separate animation clock is
-// introduced. Kept as pure `f32 -> f32`/`(usize, usize, f32) -> f32`
-// functions rather than inlined into `view()`, the same reasoning
+// Driven by the same `FerriteBrowser::progress_offset` `ServoFrame` already
+// advances every ~16ms tick (see that handler) — consistent with
+// `ease_out_cubic` above, no separate animation clock is introduced. The
+// loading bar's sweep is `chrome::progress_band`. Kept as a pure `f32 -> f32`
+// function rather than inlined into `view()`, the same reasoning
 // `ease_out_cubic` documents: testable without spinning up Iced at all.
 
 /// A smooth "something is happening" breathing alpha, `t` in `0.0..=1.0`
 /// (`progress_offset`) with `cycles` full breaths per `t`'s wrap-around —
-/// pulled out of what were three near-duplicate inline sine expressions
-/// (the new-tab loading placeholder's "Fe" logo, the old flat-alpha
-/// progress-bar pulse this charter replaces with
-/// [`progress_segment_brightness`], and the tab bar's loading dot, which
-/// used to just be a static, unanimated `"..."` string — see that call
-/// site) into one shared curve.
+/// the one shared curve behind the loading placeholder's mark, a loading
+/// tab's dot and the Agent button's working dot.
 fn pulse_alpha(t: f32, cycles: f32, base: f32, amplitude: f32) -> f32 {
     base + amplitude * (t * std::f32::consts::TAU * cycles).sin().abs()
 }
 
-/// Brightness (`0.0..=1.0`) of progress-bar segment `i` of `segments`, at
-/// animation phase `t` (`progress_offset`, `0.0..=1.0`) — a single bright
-/// band that sweeps left to right and wraps, rather than the whole bar
-/// pulsing in lockstep, which is what makes this read as an actual
-/// "in-progress" indicator instead of a flat glow. Replaces the pre-C3c
-/// top-of-window progress bar (a single `Length::Fill` strip whose alpha
-/// pulsed uniformly via `0.55 + 0.45 * (progress_offset * TAU *
-/// 1.5).sin().abs()`) with `view()`'s new `PROGRESS_SEGMENTS`-wide row of
-/// individually-lit segments driven by this function.
-fn progress_segment_brightness(i: usize, segments: usize, t: f32) -> f32 {
-    let n = segments as f32;
-    let peak = t.clamp(0.0, 1.0) * n;
-    let raw = (i as f32 - peak).abs();
-    let wrapped = raw.min(n - raw);
-    // How many neighboring segments share the light, in segment widths —
-    // a fixed shape constant, not exposed as a parameter: nothing in this
-    // crate needs a different sweep width today, and this function's own
-    // tests below pin the resulting curve rather than treating it as a free
-    // knob.
-    const SPREAD: f32 = 1.6;
-    (1.0 - wrapped / SPREAD).clamp(0.0, 1.0)
-}
-
-// ---------------------------------------------------------------------------
-// Styling helpers
-// ---------------------------------------------------------------------------
-
-// Every function below is passed to `.style(...)` as a bare `fn` pointer
-// (see the "Colour palette" section header above), so `theme` here is the
-// real `iced::Theme` the app is currently rendering with, supplied by iced
-// itself — not ignored the way the pre-C3c `_theme` parameter name implied.
-
-fn separator_style(theme: &Theme) -> container::Style {
-    let palette = palette_for_theme(theme);
-    container::Style {
-        background: Some(Background::Color(palette.divider)),
-        ..container::Style::default()
-    }
-}
-
-fn tab_bar_style(theme: &Theme) -> container::Style {
-    let palette = palette_for_theme(theme);
-    container::Style {
-        background: Some(Background::Color(palette.surface)),
-        ..container::Style::default()
-    }
-}
-
-fn close_btn_style(theme: &Theme, status: button::Status) -> button::Style {
-    let palette = palette_for_theme(theme);
-    button::Style {
-        background: Some(Background::Color(match status {
-            button::Status::Hovered | button::Status::Pressed => Color {
-                r: 1.0,
-                g: 0.35,
-                b: 0.35,
-                a: 0.15,
-            },
-            _ => Color::TRANSPARENT,
-        })),
-        text_color: match status {
-            button::Status::Hovered | button::Status::Pressed => palette.danger,
-            _ => palette.text_dim,
-        },
-        border: Border {
-            radius: iced::border::Radius::new(4.0),
-            ..Border::default()
-        },
-        ..button::Style::default()
-    }
-}
-
-fn nav_btn_style(theme: &Theme, status: button::Status) -> button::Style {
-    let palette = palette_for_theme(theme);
-    button::Style {
-        background: Some(Background::Color(match status {
-            button::Status::Hovered => palette.raised,
-            button::Status::Pressed => Color {
-                r: palette.raised.r * 0.80,
-                g: palette.raised.g * 0.80,
-                b: palette.raised.b * 0.80,
-                a: 1.0,
-            },
-            _ => Color::TRANSPARENT,
-        })),
-        text_color: match status {
-            button::Status::Disabled => Color {
-                a: 0.20,
-                ..palette.text_dim
-            },
-            _ => palette.text,
-        },
-        border: Border {
-            radius: iced::border::Radius::new(BORDER_RADIUS),
-            ..Border::default()
-        },
-        ..button::Style::default()
-    }
-}
-
-fn toolbar_style(theme: &Theme) -> container::Style {
-    let palette = palette_for_theme(theme);
-    container::Style {
-        background: Some(Background::Color(palette.base)),
-        ..container::Style::default()
-    }
-}
-
-fn panel_btn_active(theme: &Theme, _status: button::Status) -> button::Style {
-    let palette = palette_for_theme(theme);
-    button::Style {
-        background: Some(Background::Color(palette.accent)),
-        text_color: Color::WHITE,
-        border: Border {
-            radius: iced::border::Radius::new(BORDER_RADIUS),
-            ..Border::default()
-        },
-        ..button::Style::default()
-    }
-}
-
-fn panel_btn_inactive(theme: &Theme, status: button::Status) -> button::Style {
-    let palette = palette_for_theme(theme);
-    button::Style {
-        background: Some(Background::Color(match status {
-            button::Status::Hovered | button::Status::Pressed => palette.raised,
-            _ => palette.surface,
-        })),
-        text_color: match status {
-            button::Status::Hovered => palette.text,
-            _ => palette.text_dim,
-        },
-        border: Border {
-            radius: iced::border::Radius::new(BORDER_RADIUS),
-            width: 1.0,
-            color: palette.divider,
-        },
-        ..button::Style::default()
-    }
-}
-
-fn accent_btn_style(theme: &Theme, status: button::Status) -> button::Style {
-    let palette = palette_for_theme(theme);
-    button::Style {
-        background: Some(Background::Color(match status {
-            button::Status::Hovered | button::Status::Pressed => palette.accent_bright,
-            _ => palette.accent,
-        })),
-        text_color: Color::WHITE,
-        border: Border {
-            radius: iced::border::Radius::new(BORDER_RADIUS),
-            ..Border::default()
-        },
-        ..button::Style::default()
-    }
-}
-
-fn bottom_panel_style(theme: &Theme) -> container::Style {
-    let palette = palette_for_theme(theme);
-    container::Style {
-        background: Some(Background::Color(palette.surface)),
-        border: Border {
-            color: palette.divider,
-            width: 1.0,
-            radius: iced::border::Radius {
-                top_left: BORDER_RADIUS,
-                top_right: BORDER_RADIUS,
-                bottom_left: 0.0,
-                bottom_right: 0.0,
-            },
-        },
-        shadow: iced::Shadow {
-            color: Color {
-                a: 0.3,
-                r: 0.0,
-                g: 0.0,
-                b: 0.0,
-            },
-            offset: iced::Vector::new(0.0, -4.0),
-            blur_radius: 14.0,
-        },
-        ..container::Style::default()
-    }
-}
+// Styling helpers live in `tokens.rs` (the spacing/type/radius scales, the
+// elevation recipes and every shared button/container style).
 
 // ---------------------------------------------------------------------------
 // Audit helpers
@@ -4265,6 +4441,54 @@ fn kind_label(kind: &AuditEventKind, palette: &Palette, is_light: bool) -> (&'st
                 Color::from_rgb(0.6, 0.6, 0.6)
             },
         ),
+    }
+}
+
+/// Shortens every long URL in a page's console message to its start and end,
+/// so a message full of script addresses (Google's are hundreds of characters)
+/// still shows the part that matters, the error itself, after `truncate`.
+fn shorten_urls(message: &str) -> String {
+    const KEEP_HEAD: usize = 56;
+    const KEEP_TAIL: usize = 28;
+    message
+        .split(' ')
+        .map(|word| {
+            let is_url = word.starts_with("http://") || word.starts_with("https://");
+            let len = word.chars().count();
+            if is_url && len > KEEP_HEAD + KEEP_TAIL + 3 {
+                let head: String = word.chars().take(KEEP_HEAD).collect();
+                let tail: String = word.chars().skip(len - KEEP_TAIL).collect();
+                format!("{head}…{tail}")
+            } else {
+                word.to_string()
+            }
+        })
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
+#[cfg(test)]
+mod console_message_tests {
+    use super::shorten_urls;
+
+    #[test]
+    fn a_long_script_url_keeps_its_ends_and_the_error_survives() {
+        let url = format!(
+            "https://www.google.com/xjs/_/js/k=xjs.hd.en_GB/am={}/rt=j:83:37",
+            "A".repeat(400)
+        );
+        let message =
+            format!("Error at {url} uncaught exception: SecurityError: The operation is insecure.");
+        let short = shorten_urls(&message);
+        assert!(short.chars().count() < 200, "{short}");
+        assert!(short.starts_with("Error at https://www.google.com/xjs/"));
+        assert!(short.contains("/rt=j:83:37 uncaught exception: SecurityError"));
+    }
+
+    #[test]
+    fn short_urls_and_plain_words_are_left_alone() {
+        let message = "Error at https://example.com/a.js:1:2 TypeError: x is undefined";
+        assert_eq!(shorten_urls(message), message);
     }
 }
 
@@ -5075,13 +5299,42 @@ fn spawn_next_step(
         }
     };
 
+    // The page as it is now, read once on this thread (after the previous
+    // action ran): the sign-in handoff below and the fast lane both use it.
+    let page_digest = observe_active_page(state);
+
+    // A page that needs the person (a password field, a known sign-in host)
+    // stops the run here, before any model call, and asks. Nothing executes
+    // while it waits; *Continue* resumes from the page as it then is.
+    let active_url = state
+        .tab_urls
+        .get(state.active_tab)
+        .cloned()
+        .unwrap_or_default();
+    if let signin::Gate::Pause(wall) = signin::gate(
+        &mut live.signin_cleared_host,
+        &active_url,
+        page_digest.as_ref(),
+    ) {
+        activity::record(
+            "sign-in handoff",
+            &wall.host,
+            "waiting for the user",
+            true,
+            "",
+            0,
+        );
+        state.signin_handoff = Some(wall);
+        state.live_loop = Some(live);
+        return scroll_to_latest(state);
+    }
+
     // The optional Laya fast lane: only when it is configured AND the active
-    // page can be read right now (the digest is taken on this thread, after
-    // the previous action ran). Anything less and this step is exactly the
+    // page can be read right now. Anything less and this step is exactly the
     // normal LLM step.
     let laya_timing = state.laya.clone();
     let fast_inputs = state.laya.clone().and_then(|decider| {
-        let digest = observe_active_page(state)?;
+        let digest = page_digest.clone()?;
         let signature = agent_run::page_signature(&digest);
         if let (Some(last), Some(previous)) = (live.history.last_mut(), live.last_page_sig) {
             if last.page_changed.is_none() {
@@ -5144,572 +5397,250 @@ fn spawn_next_step(
 }
 
 // ---------------------------------------------------------------------------
+// Library drawer (bookmarks / history / downloads)
+// ---------------------------------------------------------------------------
+
+/// A page row in the library: a ghost button (hover wash) holding the title
+/// and the address, navigating on press.
+fn library_page_row<'a>(
+    palette: &'static Palette,
+    title: String,
+    subtitle: String,
+    trailing: Option<String>,
+    url: String,
+) -> Element<'a, FerriteBrowserMessage> {
+    let mut cells: Vec<Element<FerriteBrowserMessage>> = vec![column![
+        text(title).size(TEXT_BODY).color(palette.text),
+        text(subtitle).size(TEXT_CAPTION).color(palette.text_dim),
+    ]
+    .spacing(2)
+    .width(Length::Fill)
+    .into()];
+    if let Some(trailing) = trailing {
+        cells.push(
+            text(trailing)
+                .size(TEXT_CAPTION)
+                .color(palette.text_dim)
+                .into(),
+        );
+    }
+    button(row(cells).spacing(SP_SM).align_y(iced::Alignment::Center))
+        .width(Length::Fill)
+        .padding([SP_SM - 2.0, SP_MD])
+        .style(tokens::menu_row_style)
+        .on_press(FerriteBrowserMessage::NavigateRequested(url))
+        .into()
+}
+
+/// What the library shows when a tab has nothing in it yet: an icon and one
+/// sentence, centred in the space, not a bare line of grey text.
+fn library_empty<'a>(
+    palette: &'static Palette,
+    glyph: Icon,
+    message: &'static str,
+) -> Element<'a, FerriteBrowserMessage> {
+    container(
+        column![
+            icon(glyph, 22.0, tokens::tint(palette.text_dim, 0.6)),
+            text(message).size(TEXT_SMALL).color(palette.text_dim),
+        ]
+        .spacing(SP_SM)
+        .align_x(iced::Alignment::Center),
+    )
+    .width(Length::Fill)
+    .padding([SP_XL, SP_MD])
+    .center_x(Length::Fill)
+    .into()
+}
+
+fn library_panel(state: &FerriteBrowser) -> Element<'_, FerriteBrowserMessage> {
+    let palette = state.palette();
+    let tab_btn = |label: &'static str, tab: LibraryTab| {
+        let is_active = state.library_tab == tab;
+        button(text(label).size(TEXT_SMALL))
+            .padding([SP_XS, SP_MD])
+            .style(if is_active {
+                panel_btn_active
+            } else {
+                panel_btn_inactive
+            })
+            .on_press(FerriteBrowserMessage::SelectLibraryTab(tab))
+    };
+    let header = container(
+        column![
+            row![
+                text("Library")
+                    .size(TEXT_TITLE)
+                    .font(font_weight(iced::font::Weight::Semibold))
+                    .color(palette.text)
+                    .width(Length::Fill),
+                tip(
+                    button(icon(Icon::Close, 10.0, palette.text_dim))
+                        .padding(SP_SM - 2.0)
+                        .style(close_btn_style)
+                        .on_press(FerriteBrowserMessage::ToggleLibraryPanel),
+                    "Close",
+                    palette,
+                ),
+            ]
+            .align_y(iced::Alignment::Center),
+            row![
+                tab_btn("Bookmarks", LibraryTab::Bookmarks),
+                tab_btn("History", LibraryTab::History),
+                tab_btn("Downloads", LibraryTab::Downloads),
+            ]
+            .spacing(SP_SM - 2.0),
+        ]
+        .spacing(SP_SM + 2.0)
+        .padding([SP_MD - 2.0, SP_MD]),
+    )
+    .width(Length::Fill)
+    .style(tokens::raised_bar_style);
+
+    fn toolbar_row(
+        button: Element<'_, FerriteBrowserMessage>,
+    ) -> Element<'_, FerriteBrowserMessage> {
+        container(button).padding([SP_SM - 2.0, SP_MD]).into()
+    }
+
+    let rows: Vec<Element<FerriteBrowserMessage>> = match state.library_tab {
+        LibraryTab::Bookmarks if state.bookmarks.is_empty() => vec![library_empty(
+            palette,
+            Icon::BookmarkOutline,
+            "No bookmarks yet. Use the star in the address bar.",
+        )],
+        LibraryTab::Bookmarks => state
+            .bookmarks
+            .iter()
+            .enumerate()
+            .map(|(i, b)| {
+                row![
+                    library_page_row(
+                        palette,
+                        truncate(&b.title, 48),
+                        truncate(&b.url, 56),
+                        None,
+                        b.url.clone()
+                    ),
+                    tip(
+                        button(icon(Icon::Trash, ICON_SIZE_SM, palette.text_dim))
+                            .padding(SP_SM - 2.0)
+                            .style(close_btn_style)
+                            .on_press(FerriteBrowserMessage::RemoveBookmark(i)),
+                        "Remove bookmark",
+                        palette,
+                    ),
+                ]
+                .spacing(SP_XS)
+                .align_y(iced::Alignment::Center)
+                .padding([0.0, SP_SM])
+                .into()
+            })
+            .collect(),
+        LibraryTab::History => {
+            let mut rows: Vec<Element<FerriteBrowserMessage>> = Vec::new();
+            if state.history.is_empty() {
+                rows.push(library_empty(
+                    palette,
+                    Icon::History,
+                    "Nothing visited yet this session.",
+                ));
+            } else {
+                rows.push(toolbar_row(
+                    button(text("Clear history").size(TEXT_SMALL))
+                        .padding([SP_XS, SP_MD])
+                        .style(panel_btn_inactive)
+                        .on_press(FerriteBrowserMessage::ClearHistory)
+                        .into(),
+                ));
+                rows.extend(state.history.iter().rev().map(|entry| {
+                    library_page_row(
+                        palette,
+                        truncate(&entry.title, 52),
+                        truncate(&entry.url, 60),
+                        Some(entry.visited_at.format("%H:%M").to_string()),
+                        entry.url.clone(),
+                    )
+                }));
+            }
+            rows
+        }
+        LibraryTab::Downloads => {
+            let mut rows = vec![toolbar_row(
+                button(text("Download current page").size(TEXT_SMALL))
+                    .padding([SP_XS + 1.0, SP_MD])
+                    .style(accent_btn_style)
+                    .on_press(FerriteBrowserMessage::DownloadCurrentPage)
+                    .into(),
+            )];
+            if state.downloads.is_empty() {
+                rows.push(library_empty(palette, Icon::Download, "No downloads yet."));
+            } else {
+                rows.extend(state.downloads.iter().rev().map(|d| {
+                    let (status_text, status_color) = match &d.state {
+                        DownloadState::InProgress {
+                            downloaded_bytes,
+                            total_bytes: Some(total),
+                        } if *total > 0 => (
+                            format!(
+                                "{} \u{2014} {}%",
+                                format_bytes(*downloaded_bytes),
+                                (*downloaded_bytes as f64 / *total as f64 * 100.0).round() as u32
+                            ),
+                            palette.text_dim,
+                        ),
+                        DownloadState::InProgress {
+                            downloaded_bytes, ..
+                        } => (
+                            format!("{} downloaded", format_bytes(*downloaded_bytes)),
+                            palette.text_dim,
+                        ),
+                        DownloadState::Completed => ("Completed".to_string(), palette.safe),
+                        DownloadState::Failed(e) => (format!("Failed: {e}"), palette.danger),
+                    };
+                    container(
+                        column![
+                            text(d.file_name.clone())
+                                .size(TEXT_BODY)
+                                .color(palette.text),
+                            text(status_text).size(TEXT_CAPTION).color(status_color),
+                        ]
+                        .spacing(2),
+                    )
+                    .width(Length::Fill)
+                    .padding([SP_SM - 2.0, SP_MD])
+                    .into()
+                }));
+            }
+            rows
+        }
+    };
+
+    // A right-hand drawer like the agent's, so the page keeps its height and
+    // the panel's content is not stranded at the far left of a full-width bar.
+    container(column![
+        header,
+        scrollable(column(rows).spacing(0).padding([SP_XS, 0.0])).height(Length::Fill)
+    ])
+    .width(Length::Fixed(SIDE_PANEL_WIDTH))
+    .height(Length::Fill)
+    .style(tokens::side_panel_style)
+    .into()
+}
+
+// ---------------------------------------------------------------------------
 // View
 // ---------------------------------------------------------------------------
 
 pub fn view(state: &FerriteBrowser) -> Element<'_, FerriteBrowserMessage> {
     let palette = state.palette();
     let is_light_theme = state.theme_mode == AppTheme::Light;
-    let active_tab_idx = state.active_tab;
-    let is_loading_active = state.is_loading;
 
-    // ── Tab bar ────────────────────────────────────────────────────────────
-    const UNDERLINE_H: f32 = 2.5;
-    const TAB_INNER_H: f32 = TAB_BAR_HEIGHT - UNDERLINE_H;
-    let can_close = state.tabs.len() > 1;
-
-    let mut tab_elements: Vec<Element<FerriteBrowserMessage>> = state
-        .tab_titles
-        .iter()
-        .enumerate()
-        .map(|(i, label)| {
-            let is_active = i == active_tab_idx;
-            let is_hovered = state.hovered_tab == Some(i);
-            let spinning = is_loading_active && i == active_tab_idx;
-
-            // Loading state shows a smoothly breathing dot (`pulse_alpha`,
-            // C3c) rather than a static "..." string — the pre-C3c version
-            // of this comment claimed it already reused the
-            // `progress_offset`-driven pattern the agent sidebar's
-            // "Working..." indicator uses, but the code above it never
-            // actually did (`text(if spinning {"..."} else {"•"})` is a
-            // fixed string, not animated at all); fixed here rather than
-            // left standing, per this project's own R2 discipline against
-            // an inaccurate comment. Once loaded, a real favicon (C3b —
-            // `HeadlessServoSession::get_favicon()`) replaces the
-            // placeholder dot for any tab that has one; a page that never
-            // sets one (about:blank, some errors) keeps the dot, same as
-            // before this existed — the accent underline below already
-            // carries most of the active/inactive signal, so the dot stays
-            // a quiet fallback, not a second competing indicator.
-            let favicon_dot = |pulsing: bool| {
-                let base_color = if is_active {
-                    palette.accent
-                } else {
-                    palette.text_dim
-                };
-                let color = if pulsing {
-                    Color {
-                        a: pulse_alpha(state.progress_offset, 1.2, 0.35, 0.65),
-                        ..base_color
-                    }
-                } else {
-                    base_color
-                };
-                text("•").size(11).color(color).into()
-            };
-            let favicon: Element<FerriteBrowserMessage> = if spinning {
-                favicon_dot(true)
-            } else {
-                match state.tab_favicons.get(i).and_then(|f| f.as_ref()) {
-                    // On the dark theme a light backing keeps dark icons visible.
-                    Some(handle) => container(
-                        ServoImage::new(handle.clone())
-                            .width(Length::Fixed(14.0))
-                            .height(Length::Fixed(14.0)),
-                    )
-                    .center(Length::Fixed(18.0))
-                    .style(move |_: &Theme| container::Style {
-                        background: (!is_light_theme).then_some(Background::Color(Color {
-                            a: 0.92,
-                            ..Color::WHITE
-                        })),
-                        border: Border {
-                            radius: iced::border::Radius::new(5.0),
-                            ..Border::default()
-                        },
-                        ..container::Style::default()
-                    })
-                    .into(),
-                    None => favicon_dot(false),
-                }
-            };
-
-            let label_elem = text(truncate(label, 20))
-                .size(13)
-                .width(Length::Fill)
-                .color(if is_active {
-                    palette.text
-                } else {
-                    palette.text_dim
-                });
-            // The favicon (or its placeholder dot) always occupies the same
-            // 18 px slot, so titles start at the same x on every tab.
-            let favicon_slot = container(favicon).center(Length::Fixed(18.0));
-
-            // Close-button-on-hover: visible for the active tab (always
-            // reachable without a hover) and for whichever tab the pointer
-            // is currently over; otherwise a same-size transparent spacer,
-            // so the row's width never jumps when the button appears.
-            let show_close = can_close && (is_active || is_hovered);
-            let close_btn: Element<FerriteBrowserMessage> = if show_close {
-                button(icon(Icon::Close, 10.0, palette.text_dim))
-                    .padding(4)
-                    .width(Length::Fixed(18.0))
-                    .height(Length::Fixed(18.0))
-                    .style(close_btn_style)
-                    .on_press(FerriteBrowserMessage::CloseTab(i))
-                    .into()
-            } else {
-                container(text(""))
-                    .width(Length::Fixed(18.0))
-                    .height(Length::Fixed(18.0))
-                    .into()
-            };
-
-            let content_row = container(
-                row![favicon_slot, label_elem, close_btn]
-                    .spacing(5)
-                    .align_y(iced::Alignment::Center),
-            )
-            .width(Length::Fixed(TAB_WIDTH))
-            .height(Length::Fixed(TAB_INNER_H))
-            .padding([0, 10])
-            .align_y(iced::Alignment::Center)
-            .style(move |_: &Theme| container::Style {
-                background: Some(Background::Color(if is_active {
-                    palette.base
-                } else if is_hovered {
-                    Color {
-                        a: 0.5,
-                        ..palette.raised
-                    }
-                } else {
-                    Color::TRANSPARENT
-                })),
-                border: Border {
-                    radius: iced::border::Radius {
-                        top_left: BORDER_RADIUS,
-                        top_right: BORDER_RADIUS,
-                        bottom_left: 0.0,
-                        bottom_right: 0.0,
-                    },
-                    ..Border::default()
-                },
-                ..container::Style::default()
-            });
-
-            let underline = container(text(""))
-                .width(Length::Fill)
-                .height(Length::Fixed(UNDERLINE_H))
-                .style(move |_: &Theme| container::Style {
-                    background: Some(Background::Color(if is_active {
-                        palette.accent
-                    } else {
-                        Color::TRANSPARENT
-                    })),
-                    ..container::Style::default()
-                });
-
-            mouse_area(
-                column![content_row, underline]
-                    .spacing(0)
-                    .width(Length::Fixed(TAB_WIDTH))
-                    .height(Length::Fixed(TAB_BAR_HEIGHT)),
-            )
-            .on_press(FerriteBrowserMessage::SelectTab(i))
-            .on_enter(FerriteBrowserMessage::TabHoverEnter(i))
-            .on_exit(FerriteBrowserMessage::TabHoverExit(i))
-            .into()
-        })
-        .collect();
-
-    // "+" new-tab button — a real `button` (not a bare `mouse_area`) so it
-    // gets the same hover/press feedback every other toolbar control has,
-    // via the same `nav_btn_style` used by Back/Forward/Reload.
-    tab_elements.push(
-        button(icon(Icon::Add, ICON_SIZE_SM, palette.text_dim))
-            .width(Length::Fixed(TAB_BAR_HEIGHT))
-            .height(Length::Fixed(TAB_BAR_HEIGHT))
-            .padding(0)
-            .style(nav_btn_style)
-            .on_press(FerriteBrowserMessage::AddTab)
-            .into(),
-    );
-
-    let tab_bar = container(
-        scrollable(
-            row(tab_elements)
-                .spacing(1)
-                .align_y(iced::Alignment::Center)
-                .padding([0, 8]),
-        )
-        .direction(scrollable::Direction::Horizontal(
-            scrollable::Scrollbar::new().margin(0).scroller_width(2),
-        )),
-    )
-    .width(Length::Fill)
-    .height(Length::Fixed(TAB_BAR_HEIGHT))
-    .align_y(iced::Alignment::Center)
-    .style(tab_bar_style);
-
-    // ── Separator ──────────────────────────────────────────────────────────
-    let sep_top = container(text(""))
-        .width(Length::Fill)
-        .height(Length::Fixed(1.0))
-        .style(separator_style);
-
-    // ── Toolbar ────────────────────────────────────────────────────────────
-    // [←] [→] [↺/✕]  [🔒 address bar ...]  [Audit] [JS]
-
-    // Back/Forward/Reload read as icon-only controls (the common browser
-    // convention) — disabled state dims the icon itself in addition to
-    // `nav_btn_style`'s existing Disabled text-color handling, so the cue
-    // survives the switch from text to a tinted glyph.
-    let nav_icon_color = |enabled: bool| {
-        if enabled {
-            palette.text
-        } else {
-            Color {
-                a: 0.25,
-                ..palette.text_dim
-            }
-        }
-    };
-
-    let back_btn = button(icon(
-        Icon::Back,
-        ICON_SIZE,
-        nav_icon_color(state.can_go_back),
-    ))
-    .padding([6, 11])
-    .style(nav_btn_style)
-    .on_press_maybe(state.can_go_back.then_some(FerriteBrowserMessage::GoBack));
-
-    let fwd_btn = button(icon(
-        Icon::Forward,
-        ICON_SIZE,
-        nav_icon_color(state.can_go_forward),
-    ))
-    .padding([6, 11])
-    .style(nav_btn_style)
-    .on_press_maybe(
-        state
-            .can_go_forward
-            .then_some(FerriteBrowserMessage::GoForward),
-    );
-
-    let reload_btn: Element<FerriteBrowserMessage> = if state.is_loading {
-        button(icon(Icon::Close, ICON_SIZE, palette.text))
-            .padding([6, 11])
-            .style(nav_btn_style)
-            .on_press(FerriteBrowserMessage::StopLoading)
-            .into()
-    } else {
-        button(icon(Icon::Reload, ICON_SIZE, palette.text))
-            .padding([6, 11])
-            .style(nav_btn_style)
-            .on_press(FerriteBrowserMessage::Reload)
-            .into()
-    };
-
-    let current_url = state
-        .tab_urls
-        .get(state.active_tab)
-        .map(String::as_str)
-        .unwrap_or("about:blank");
-    let is_https = current_url.starts_with("https://");
-    let is_http_insecure =
-        current_url.starts_with("http://") && !current_url.starts_with("https://");
-    let is_about = current_url == "about:blank";
-
-    let security_icon: Element<FerriteBrowserMessage> = if is_about {
-        text("").size(13).into()
-    } else if is_https {
-        text("HTTPS").size(10).color(palette.safe).into()
-    } else if is_http_insecure {
-        text("HTTP").size(10).color(palette.warn).into()
-    } else {
-        text("").size(13).into()
-    };
-
-    let addr_input = text_input(
-        if is_about {
-            "Search or type an address"
-        } else {
-            ""
-        },
-        &state.address_bar_input,
-    )
-    .id(text_input::Id::new(ADDRESS_BAR_ID))
-    .width(Length::Fill)
-    .padding([7, 10])
-    .size(13)
-    .style(|_: &Theme, status| {
-        let focused = matches!(status, text_input::Status::Focused);
-        text_input::Style {
-            background: Background::Color(palette.input),
-            border: Border {
-                radius: iced::border::Radius::new(20.0),
-                width: if focused { 1.5 } else { 1.0 },
-                color: if focused {
-                    palette.accent
-                } else {
-                    palette.divider
-                },
-            },
-            icon: palette.text_dim,
-            placeholder: palette.text_dim,
-            value: palette.text,
-            selection: Color {
-                a: 0.30,
-                ..palette.accent
-            },
-        }
-    })
-    .on_input(FerriteBrowserMessage::AddressBarChanged)
-    .on_submit(FerriteBrowserMessage::NavigateRequested(
-        state.address_bar_input.clone(),
-    ));
-
-    // C3d: bookmark star, in the address bar itself (the common
-    // Chrome/Firefox placement) rather than as a separate toolbar button —
-    // it is a per-page action, exactly like the address bar's own security
-    // indicator right next to it, not a panel toggle. Hidden for
-    // `about:blank` (nothing to bookmark).
-    let is_bookmarked = !is_about && state.bookmarks.iter().any(|b| b.url == current_url);
-    let bookmark_btn: Element<FerriteBrowserMessage> = if is_about {
-        container(text("")).width(Length::Fixed(22.0)).into()
-    } else {
-        button(icon(
-            if is_bookmarked {
-                Icon::BookmarkFilled
-            } else {
-                Icon::BookmarkOutline
-            },
-            ICON_SIZE_SM,
-            if is_bookmarked {
-                palette.accent
-            } else {
-                palette.text_dim
-            },
-        ))
-        .padding(4)
-        .width(Length::Fixed(22.0))
-        .style(nav_btn_style)
-        .on_press(FerriteBrowserMessage::ToggleBookmarkCurrentPage)
-        .into()
-    };
-
-    let addr_row = container(
-        row![
-            security_icon,
-            mouse_area(addr_input).on_press(FerriteBrowserMessage::AddressBarPressed),
-            bookmark_btn
-        ]
-        .spacing(6)
-        .align_y(iced::Alignment::Center)
-        .width(Length::Fill),
-    )
-    .width(Length::Fill)
-    .padding([0, 4]);
-
-    // DevTools toggles — an icon that names the panel plus its label; the
-    // old leading "v"/"+" glyph is gone, since the button's own
-    // active/inactive background (`panel_btn_active`/`panel_btn_inactive`,
-    // unchanged) already carries that state, and duplicating it as a second
-    // text glyph in front of the icon read as dev-tool clutter.
-    let toggle_icon_color = |active: bool| {
-        if active {
-            Color::WHITE
-        } else {
-            palette.text_dim
-        }
-    };
-
-    let audit_btn = button(
-        row![
-            icon(
-                Icon::Audit,
-                ICON_SIZE_SM,
-                toggle_icon_color(state.show_audit_panel)
-            ),
-            text("Audit").size(12),
-        ]
-        .spacing(6)
-        .align_y(iced::Alignment::Center),
-    )
-    .padding([5, 10])
-    .style(if state.show_audit_panel {
-        panel_btn_active
-    } else {
-        panel_btn_inactive
-    })
-    .on_press(FerriteBrowserMessage::ToggleAuditPanel);
-
-    let js_btn = button(
-        row![
-            icon(
-                Icon::Console,
-                ICON_SIZE_SM,
-                toggle_icon_color(state.show_js_console)
-            ),
-            text("JS").size(12),
-        ]
-        .spacing(6)
-        .align_y(iced::Alignment::Center),
-    )
-    .padding([5, 10])
-    .style(if state.show_js_console {
-        panel_btn_active
-    } else {
-        panel_btn_inactive
-    })
-    .on_press(FerriteBrowserMessage::ToggleJsConsole);
-
-    let agent_btn = button(
-        row![
-            icon(
-                Icon::Agent,
-                ICON_SIZE_SM,
-                toggle_icon_color(state.show_agent_sidebar)
-            ),
-            text("Agent").size(12),
-        ]
-        .spacing(6)
-        .align_y(iced::Alignment::Center),
-    )
-    .padding([5, 10])
-    .style(if state.show_agent_sidebar {
-        panel_btn_active
-    } else {
-        panel_btn_inactive
-    })
-    .on_press(FerriteBrowserMessage::ToggleAgentSidebar);
-
-    // C3c: theme toggle — shows the icon of the mode a click switches *to*
-    // (sun while dark is active, moon while light is active), the same
-    // convention most browser/OS theme switchers use, rather than an icon
-    // for the mode currently on screen.
-    let theme_btn = button(icon(
-        if is_light_theme {
-            Icon::Moon
-        } else {
-            Icon::Sun
-        },
-        ICON_SIZE,
-        palette.text_dim,
-    ))
-    .padding([6, 11])
-    .style(nav_btn_style)
-    .on_press(FerriteBrowserMessage::ToggleTheme);
-
-    // C3d: Library — the single toolbar entry point for bookmarks/history/
-    // downloads/settings (see this file's module docs). Four more features
-    // than C3c's toolbar had, but one more button, not four: a real
-    // information-architecture call, matching the same "clean, not cheap"
-    // goal the theme toggle/loader work already reads as this crate's
-    // stated aesthetic bar (see `docs/PROGRESS.md`'s C3c entry).
-    let library_btn = button(
-        row![
-            icon(
-                Icon::Menu,
-                ICON_SIZE_SM,
-                toggle_icon_color(state.show_library_panel)
-            ),
-            text("Library").size(12),
-        ]
-        .spacing(6)
-        .align_y(iced::Alignment::Center),
-    )
-    .padding([5, 10])
-    .style(if state.show_library_panel {
-        panel_btn_active
-    } else {
-        panel_btn_inactive
-    })
-    .on_press(FerriteBrowserMessage::ToggleLibraryPanel);
-
-    // C3d: zoom indicator — only present in the toolbar while the active
-    // tab's zoom isn't 100% (the brief's own explicitly-named low-clutter
-    // pattern: a permanent zoom control for the overwhelmingly common
-    // 100%-zoom case would be exactly the "wall of buttons" this charter
-    // was warned against). A default-zoom *setting* still lives in the
-    // Settings tab regardless of the current tab's own level.
-    let active_zoom = state.tab_zoom.get(active_tab_idx).copied().unwrap_or(1.0);
-    let maybe_zoom_indicator: Option<Element<FerriteBrowserMessage>> =
-        if (active_zoom - 1.0).abs() > f32::EPSILON {
-            Some(
-                container(
-                    row![
-                        button(text("-").size(13))
-                            .padding([2, 8])
-                            .style(panel_btn_inactive)
-                            .on_press(FerriteBrowserMessage::ZoomOut),
-                        button(text(format!("{}%", (active_zoom * 100.0).round() as i32)).size(12))
-                            .padding([2, 8])
-                            .style(panel_btn_inactive)
-                            .on_press(FerriteBrowserMessage::ZoomReset),
-                        button(text("+").size(13))
-                            .padding([2, 8])
-                            .style(panel_btn_inactive)
-                            .on_press(FerriteBrowserMessage::ZoomIn),
-                    ]
-                    .spacing(2)
-                    .align_y(iced::Alignment::Center),
-                )
-                .into(),
-            )
-        } else {
-            None
-        };
-
-    let mut toolbar_items: Vec<Element<FerriteBrowserMessage>> =
-        vec![back_btn.into(), fwd_btn.into(), reload_btn, addr_row.into()];
-    if let Some(zoom_indicator) = maybe_zoom_indicator {
-        toolbar_items.push(zoom_indicator);
-    }
-    toolbar_items.push(library_btn.into());
-    toolbar_items.push(audit_btn.into());
-    toolbar_items.push(js_btn.into());
-    toolbar_items.push(agent_btn.into());
-    toolbar_items.push(theme_btn.into());
-
-    let toolbar = container(
-        row(toolbar_items)
-            .spacing(4)
-            .align_y(iced::Alignment::Center)
-            .padding([0, PANEL_PADDING]),
-    )
-    .width(Length::Fill)
-    .height(Length::Fixed(TOOLBAR_HEIGHT))
-    .style(toolbar_style);
-
-    // ── Progress bar ───────────────────────────────────────────────────────
-    // C3c: a single bright band sweeps left-to-right across
-    // `PROGRESS_SEGMENTS` segments (`progress_segment_brightness`) rather
-    // than the whole bar pulsing in lockstep — a real animated "in
-    // progress" indicator, not a flat breathing strip.
-    let maybe_progress: Option<Element<FerriteBrowserMessage>> = if state.is_loading {
-        let t = state.progress_offset;
-        let segments: Vec<Element<FerriteBrowserMessage>> = (0..PROGRESS_SEGMENTS)
-            .map(|i| {
-                let brightness = progress_segment_brightness(i, PROGRESS_SEGMENTS, t);
-                container(text(""))
-                    .width(Length::FillPortion(1))
-                    .height(Length::Fixed(2.0))
-                    .style(move |_: &Theme| container::Style {
-                        background: Some(Background::Color(Color {
-                            a: 0.12 + 0.88 * brightness,
-                            ..palette.accent_bright
-                        })),
-                        ..container::Style::default()
-                    })
-                    .into()
-            })
-            .collect();
-        Some(
-            row(segments)
-                .spacing(1)
-                .width(Length::Fill)
-                .height(Length::Fixed(2.0))
-                .into(),
-        )
-    } else {
-        None
-    };
-
-    let sep_bottom = container(text(""))
+    // The tab strip and toolbar live in `chrome.rs`; the rest of the layout
+    // below is the page area, its drawers and the bottom panels.
+    let tab_bar = chrome::tab_strip(state);
+    let toolbar = chrome::toolbar(state);
+    let hairline = container(text(""))
         .width(Length::Fill)
         .height(Length::Fixed(1.0))
         .style(separator_style);
@@ -5816,27 +5747,33 @@ pub fn view(state: &FerriteBrowser) -> Element<'_, FerriteBrowserMessage> {
     let js_panel: Option<Element<FerriteBrowserMessage>> = if state.show_js_console {
         let hdr = container(
             row![
-                text("  JS Console")
-                    .size(12)
-                    .color(palette.text)
+                text("JS console")
+                    .size(TEXT_BODY)
+                    .font(font_weight(iced::font::Weight::Semibold))
+                    .color(palette.text),
+                text(format!("{MOD_LABEL}+J"))
+                    .size(TEXT_CAPTION)
+                    .color(palette.text_dim)
                     .width(Length::Fill),
-                text(format!("({} shortcut)", MOD_LABEL))
-                    .size(11)
-                    .color(palette.text_dim),
-                button(text("Clear").size(11))
-                    .padding([2, 8])
+                button(text("Clear").size(TEXT_CAPTION))
+                    .padding([2.0, SP_SM])
                     .style(panel_btn_inactive)
                     .on_press(FerriteBrowserMessage::JsConsoleClear),
+                tip(
+                    button(icon(Icon::Close, 10.0, palette.text_dim))
+                        .padding(5)
+                        .style(close_btn_style)
+                        .on_press(FerriteBrowserMessage::ToggleJsConsole),
+                    "Close",
+                    palette,
+                ),
             ]
-            .spacing(8)
+            .spacing(SP_SM)
             .align_y(iced::Alignment::Center)
-            .padding([5, PANEL_PADDING]),
+            .padding([SP_XS + 2.0, PANEL_PADDING as f32]),
         )
         .width(Length::Fill)
-        .style(|_: &Theme| container::Style {
-            background: Some(Background::Color(palette.raised)),
-            ..container::Style::default()
-        });
+        .style(tokens::raised_bar_style);
 
         let out_rows: Vec<Element<FerriteBrowserMessage>> = if state.js_output.is_empty() {
             vec![container(
@@ -5934,14 +5871,10 @@ pub fn view(state: &FerriteBrowser) -> Element<'_, FerriteBrowserMessage> {
         None
     };
 
-    // ── Find bar (C3d) ────────────────────────────────────────────────────
-    // An overlay-styled bar in the normal layout flow, not a true floating
-    // widget layer — iced 0.13's `stack` widget is never used elsewhere in
-    // this crate, and introducing it just for this one bar was not worth
-    // the new surface (see this file's module docs). Shown just above the
-    // content area, below any audit/JS/Library panel, matching the
-    // "closest to what it's searching" placement every real browser's find
-    // bar uses.
+    // ── Find bar ──────────────────────────────────────────────────────────
+    // A floating card in the page's top-right corner (like every desktop
+    // browser's), stacked over the page rather than laid out above it, so
+    // opening it never resizes the engine's render buffer.
     let find_bar: Option<Element<FerriteBrowserMessage>> = if state.show_find_bar {
         let match_label = if state.find_query.is_empty() {
             String::new()
@@ -5950,67 +5883,57 @@ pub fn view(state: &FerriteBrowser) -> Element<'_, FerriteBrowserMessage> {
         } else {
             format!("{} of {}", state.find_current_index, state.find_match_count)
         };
+        let step_btn = |kind: Icon, tip_text: &'static str, msg: FerriteBrowserMessage| {
+            tip(
+                button(container(icon(kind, ICON_SIZE_SM, palette.text_dim)).center(Length::Fill))
+                    .width(Length::Fixed(26.0))
+                    .height(Length::Fixed(26.0))
+                    .padding(0)
+                    .style(toolbar_btn_style)
+                    .on_press(msg),
+                tip_text,
+                palette,
+            )
+        };
         Some(
             container(
                 row![
-                    icon(Icon::Read, ICON_SIZE_SM, palette.text_dim),
+                    icon(Icon::Search, ICON_SIZE_SM, palette.text_dim),
                     text_input("Find in page", &state.find_query)
                         .id(text_input::Id::new(FIND_INPUT_ID))
-                        .width(Length::Fixed(240.0))
-                        .padding([5, 8])
-                        .size(13)
-                        .style(|_: &Theme, status| {
-                            let focused = matches!(status, text_input::Status::Focused);
-                            text_input::Style {
-                                background: Background::Color(palette.input),
-                                border: Border {
-                                    radius: iced::border::Radius::new(6.0),
-                                    width: if focused { 1.5 } else { 1.0 },
-                                    color: if focused {
-                                        palette.accent
-                                    } else {
-                                        palette.divider
-                                    },
-                                },
-                                icon: palette.text_dim,
-                                placeholder: palette.text_dim,
-                                value: palette.text,
-                                selection: Color {
-                                    a: 0.30,
-                                    ..palette.accent
-                                },
-                            }
-                        })
+                        .width(Length::Fixed(200.0))
+                        .padding([4, 8])
+                        .size(TEXT_BODY)
+                        .style(|theme: &Theme, status| tokens::field_style(
+                            theme, status, RADIUS_SM
+                        ))
                         .on_input(FerriteBrowserMessage::FindQueryChanged)
                         .on_submit(FerriteBrowserMessage::FindNext),
-                    text(match_label).size(12).color(palette.text_dim),
-                    button(icon(Icon::Back, ICON_SIZE_SM, palette.text_dim))
-                        .padding(6)
-                        .style(nav_btn_style)
-                        .on_press(FerriteBrowserMessage::FindPrevious),
-                    button(icon(Icon::Forward, ICON_SIZE_SM, palette.text_dim))
-                        .padding(6)
-                        .style(nav_btn_style)
-                        .on_press(FerriteBrowserMessage::FindNext),
-                    button(icon(Icon::Close, ICON_SIZE_SM, palette.text_dim))
-                        .padding(6)
-                        .style(nav_btn_style)
-                        .on_press(FerriteBrowserMessage::CloseFindBar),
+                    text(match_label)
+                        .size(TEXT_SMALL)
+                        .color(palette.text_dim)
+                        .width(Length::Fixed(64.0)),
+                    step_btn(
+                        Icon::ChevronUp,
+                        "Previous match",
+                        FerriteBrowserMessage::FindPrevious
+                    ),
+                    step_btn(
+                        Icon::ChevronDown,
+                        "Next match (Enter)",
+                        FerriteBrowserMessage::FindNext
+                    ),
+                    step_btn(
+                        Icon::Close,
+                        "Close (Esc)",
+                        FerriteBrowserMessage::CloseFindBar
+                    ),
                 ]
-                .spacing(8)
-                .align_y(iced::Alignment::Center)
-                .padding([6, PANEL_PADDING]),
+                .spacing(SP_XS)
+                .align_y(iced::Alignment::Center),
             )
-            .width(Length::Fill)
-            .style(|_: &Theme| container::Style {
-                background: Some(Background::Color(palette.raised)),
-                border: Border {
-                    color: palette.divider,
-                    width: 1.0,
-                    radius: iced::border::Radius::default(),
-                },
-                ..container::Style::default()
-            })
+            .padding([SP_XS, SP_SM])
+            .style(tokens::popover_style)
             .into(),
         )
     } else {
@@ -6019,302 +5942,7 @@ pub fn view(state: &FerriteBrowser) -> Element<'_, FerriteBrowserMessage> {
 
     // ── Library panel (C3d): bookmarks / history / downloads / settings ────
     let library_panel: Option<Element<FerriteBrowserMessage>> = if state.show_library_panel {
-        let lib_tab_btn = |label: &'static str, tab: LibraryTab| {
-            let is_active = state.library_tab == tab;
-            button(text(label).size(12))
-                .padding([4, 10])
-                .style(if is_active {
-                    panel_btn_active
-                } else {
-                    panel_btn_inactive
-                })
-                .on_press(FerriteBrowserMessage::SelectLibraryTab(tab))
-        };
-        let hdr = container(
-            column![
-                row![
-                    text("Library")
-                        .size(14)
-                        .font(font_weight(iced::font::Weight::Semibold))
-                        .color(palette.text)
-                        .width(Length::Fill),
-                    button(icon(Icon::Close, 10.0, palette.text_dim))
-                        .padding(5)
-                        .style(close_btn_style)
-                        .on_press(FerriteBrowserMessage::ToggleLibraryPanel),
-                ]
-                .align_y(iced::Alignment::Center),
-                row![
-                    lib_tab_btn("Bookmarks", LibraryTab::Bookmarks),
-                    lib_tab_btn("History", LibraryTab::History),
-                    lib_tab_btn("Downloads", LibraryTab::Downloads),
-                    lib_tab_btn("Settings", LibraryTab::Settings),
-                ]
-                .spacing(6),
-            ]
-            .spacing(10)
-            .padding([10, PANEL_PADDING]),
-        )
-        .width(Length::Fill)
-        .style(|_: &Theme| container::Style {
-            background: Some(Background::Color(palette.raised)),
-            ..container::Style::default()
-        });
-
-        let empty_row = |msg: &str| -> Element<FerriteBrowserMessage> {
-            container(text(msg.to_string()).size(12).color(palette.text_dim))
-                .padding([12, PANEL_PADDING])
-                .into()
-        };
-
-        let body_rows: Vec<Element<FerriteBrowserMessage>> = match state.library_tab {
-            LibraryTab::Bookmarks => {
-                if state.bookmarks.is_empty() {
-                    vec![empty_row(
-                        "No bookmarks yet — use the star in the address bar.",
-                    )]
-                } else {
-                    state
-                        .bookmarks
-                        .iter()
-                        .enumerate()
-                        .map(|(i, b)| {
-                            let url = b.url.clone();
-                            mouse_area(
-                                container(
-                                    row![
-                                        column![
-                                            text(b.title.clone()).size(13).color(palette.text),
-                                            text(b.url.clone()).size(11).color(palette.text_dim),
-                                        ]
-                                        .spacing(2)
-                                        .width(Length::Fill),
-                                        button(text("Remove").size(11))
-                                            .padding([3, 8])
-                                            .style(panel_btn_inactive)
-                                            .on_press(FerriteBrowserMessage::RemoveBookmark(i)),
-                                    ]
-                                    .spacing(8)
-                                    .align_y(iced::Alignment::Center)
-                                    .padding([6, PANEL_PADDING]),
-                                )
-                                .width(Length::Fill),
-                            )
-                            .on_press(FerriteBrowserMessage::NavigateRequested(url))
-                            .into()
-                        })
-                        .collect()
-                }
-            }
-            LibraryTab::History => {
-                let mut rows = vec![container(
-                    button(text("Clear history").size(11))
-                        .padding([3, 8])
-                        .style(panel_btn_inactive)
-                        .on_press(FerriteBrowserMessage::ClearHistory),
-                )
-                .padding([6, PANEL_PADDING])
-                .into()];
-                if state.history.is_empty() {
-                    rows.push(empty_row("No history yet this session."));
-                } else {
-                    rows.extend(state.history.iter().rev().map(|entry| {
-                        let url = entry.url.clone();
-                        mouse_area(
-                            container(
-                                row![
-                                    column![
-                                        text(truncate(&entry.title, 60))
-                                            .size(13)
-                                            .color(palette.text),
-                                        text(truncate(&entry.url, 70))
-                                            .size(11)
-                                            .color(palette.text_dim),
-                                    ]
-                                    .spacing(2)
-                                    .width(Length::Fill),
-                                    text(entry.visited_at.format("%H:%M").to_string())
-                                        .size(11)
-                                        .color(palette.text_dim),
-                                ]
-                                .spacing(8)
-                                .align_y(iced::Alignment::Center)
-                                .padding([6, PANEL_PADDING]),
-                            )
-                            .width(Length::Fill),
-                        )
-                        .on_press(FerriteBrowserMessage::NavigateRequested(url))
-                        .into()
-                    }));
-                }
-                rows
-            }
-            LibraryTab::Downloads => {
-                let mut rows = vec![container(
-                    button(text("Download current page").size(12))
-                        .padding([6, 12])
-                        .style(accent_btn_style)
-                        .on_press(FerriteBrowserMessage::DownloadCurrentPage),
-                )
-                .padding([6, PANEL_PADDING])
-                .into()];
-                if state.downloads.is_empty() {
-                    rows.push(empty_row("No downloads yet."));
-                } else {
-                    rows.extend(state.downloads.iter().rev().map(|d| {
-                        let (status_text, status_color) = match &d.state {
-                            DownloadState::InProgress {
-                                downloaded_bytes,
-                                total_bytes: Some(total),
-                            } if *total > 0 => (
-                                format!(
-                                    "{} — {}%",
-                                    format_bytes(*downloaded_bytes),
-                                    (*downloaded_bytes as f64 / *total as f64 * 100.0).round()
-                                        as u32
-                                ),
-                                palette.text_dim,
-                            ),
-                            DownloadState::InProgress {
-                                downloaded_bytes, ..
-                            } => (
-                                format!("{} downloaded", format_bytes(*downloaded_bytes)),
-                                palette.text_dim,
-                            ),
-                            DownloadState::Completed => ("Completed".to_string(), palette.safe),
-                            DownloadState::Failed(e) => (format!("Failed: {e}"), palette.danger),
-                        };
-                        container(
-                            column![
-                                text(d.file_name.clone()).size(13).color(palette.text),
-                                text(status_text).size(11).color(status_color),
-                            ]
-                            .spacing(2)
-                            .padding([6, PANEL_PADDING]),
-                        )
-                        .width(Length::Fill)
-                        .into()
-                    }));
-                }
-                rows
-            }
-            LibraryTab::Settings => {
-                let cfg_row = |label: &str, value: &str| -> Element<FerriteBrowserMessage> {
-                    container(
-                        row![
-                            text(label.to_string())
-                                .size(12)
-                                .color(palette.text_dim)
-                                .width(Length::Fixed(140.0)),
-                            text(value.to_string()).size(12).color(palette.text),
-                        ]
-                        .spacing(8),
-                    )
-                    .padding([4, PANEL_PADDING])
-                    .into()
-                };
-                let zoom_preset_btn = |pct: u32| {
-                    let level = pct as f32 / 100.0;
-                    let is_active = (state.default_zoom - level).abs() < f32::EPSILON;
-                    button(text(format!("{pct}%")).size(12))
-                        .padding([4, 10])
-                        .style(if is_active {
-                            panel_btn_active
-                        } else {
-                            panel_btn_inactive
-                        })
-                        .on_press(FerriteBrowserMessage::SetDefaultZoom(level))
-                };
-                vec![
-                    container(
-                        text("Model configuration (read-only)")
-                            .size(12)
-                            .color(palette.text),
-                    )
-                    .padding(Padding {
-                        top: 8.0,
-                        right: PANEL_PADDING as f32,
-                        bottom: 2.0,
-                        left: PANEL_PADDING as f32,
-                    })
-                    .into(),
-                    cfg_row("Small-tier tag", &state.model_tag_small),
-                    cfg_row("Main-tier tag", &state.model_tag_main),
-                    cfg_row(
-                        "Response cache dir",
-                        state.model_cache_dir.as_deref().unwrap_or("(unconfigured)"),
-                    ),
-                    container(text(""))
-                        .width(Length::Fill)
-                        .height(Length::Fixed(1.0))
-                        .style(separator_style)
-                        .into(),
-                    container(text("Appearance").size(12).color(palette.text))
-                        .padding(Padding {
-                            top: 6.0,
-                            right: PANEL_PADDING as f32,
-                            bottom: 2.0,
-                            left: PANEL_PADDING as f32,
-                        })
-                        .into(),
-                    container(
-                        row![
-                            text("Theme")
-                                .size(12)
-                                .color(palette.text_dim)
-                                .width(Length::Fixed(140.0)),
-                            button(text(if is_light_theme { "Light" } else { "Dark" }).size(12))
-                                .padding([4, 10])
-                                .style(panel_btn_inactive)
-                                .on_press(FerriteBrowserMessage::ToggleTheme),
-                        ]
-                        .spacing(8)
-                        .align_y(iced::Alignment::Center),
-                    )
-                    .padding([4, PANEL_PADDING])
-                    .into(),
-                    container(
-                        column![
-                            text("Default zoom for new tabs")
-                                .size(12)
-                                .color(palette.text_dim),
-                            row![
-                                zoom_preset_btn(75),
-                                zoom_preset_btn(100),
-                                zoom_preset_btn(125),
-                                zoom_preset_btn(150),
-                            ]
-                            .spacing(6),
-                        ]
-                        .spacing(6),
-                    )
-                    .padding([4, PANEL_PADDING])
-                    .into(),
-                ]
-            }
-        };
-
-        // A right-hand drawer like the agent's, so the page keeps its height
-        // and the panel's content is not stranded at the far left of a
-        // full-width bar.
-        Some(
-            container(column![
-                hdr,
-                scrollable(column(body_rows).spacing(0)).height(Length::Fill)
-            ])
-            .width(Length::Fixed(SIDE_PANEL_WIDTH))
-            .height(Length::Fill)
-            .style(|_: &Theme| container::Style {
-                background: Some(Background::Color(palette.surface)),
-                border: Border {
-                    color: palette.divider,
-                    width: 1.0,
-                    radius: iced::border::Radius::new(0.0),
-                },
-                ..container::Style::default()
-            })
-            .into(),
-        )
+        Some(library_panel(state))
     } else {
         None
     };
@@ -6333,49 +5961,8 @@ pub fn view(state: &FerriteBrowser) -> Element<'_, FerriteBrowserMessage> {
     let content: Element<FerriteBrowserMessage> = responsive(move |size: Size| {
         state.content_area_size.set(size);
         if let Some(err_msg) = state.tab_error.get(active).and_then(|e| e.as_ref()) {
-            // Error page
             let failed_url = state.tab_urls.get(active).map(String::as_str).unwrap_or("");
-            container(
-                column![
-                    text("ERR")
-                        .size(42)
-                        .font(font_weight(iced::font::Weight::Bold))
-                        .color(palette.danger),
-                    container(text("")).height(10),
-                    text("Page could not be loaded")
-                        .size(22)
-                        .font(font_weight(iced::font::Weight::Semibold))
-                        .color(palette.text),
-                    container(text("")).height(6),
-                    text(failed_url).size(13).color(palette.text_dim),
-                    container(text("")).height(4),
-                    text(err_msg.as_str()).size(12).color(palette.text_dim),
-                    container(text("")).height(28),
-                    row![
-                        button(text("Try Again").size(13))
-                            .padding([9, 24])
-                            .style(accent_btn_style)
-                            .on_press(FerriteBrowserMessage::Reload),
-                        button(text("New Tab").size(13))
-                            .padding([9, 24])
-                            .style(nav_btn_style)
-                            .on_press(FerriteBrowserMessage::NavigateRequested(
-                                "about:blank".to_string(),
-                            )),
-                    ]
-                    .spacing(12),
-                ]
-                .spacing(4)
-                .align_x(iced::Alignment::Center),
-            )
-            .width(Length::Fill)
-            .height(Length::Fill)
-            .center(Length::Fill)
-            .style(|_: &Theme| container::Style {
-                background: Some(Background::Color(palette.base)),
-                ..container::Style::default()
-            })
-            .into()
+            pages::error_page(palette, failed_url, err_msg)
         } else if state
             .tab_urls
             .get(active)
@@ -6385,14 +5972,13 @@ pub fn view(state: &FerriteBrowser) -> Element<'_, FerriteBrowserMessage> {
             // Home / new-tab page — always shown for about:blank, even if Servo
             // has produced a blank white frame for that URL.
             new_tab_page(state)
-        } else if let Some((w, h, bytes)) = state
-            .servo_sessions
-            .get(&active)
-            .and_then(|s| s.get_frame())
-        {
-            // Live Servo frame — interactive via mouse_area
-            let handle = ImageHandle::from_rgba(w, h, bytes);
-            let img = ServoImage::new(handle)
+        } else if let Some((_, handle)) = state.frame_cache.get(&active) {
+            // Live Servo frame — interactive via mouse_area. The handle is
+            // cached per picture (`refresh_frame_cache`), so a redraw that
+            // changes nothing re-uploads nothing. Pointer moves and wheel
+            // input only record intent here; `ServoFrame` forwards them once
+            // per tick (see `update`).
+            let img = ServoImage::new(handle.clone())
                 .width(Length::Fill)
                 .height(Length::Fill);
 
@@ -6402,61 +5988,21 @@ pub fn view(state: &FerriteBrowser) -> Element<'_, FerriteBrowserMessage> {
                 .on_release(FerriteBrowserMessage::ServoMouseRelease)
                 .on_scroll(|delta| {
                     use iced::mouse::ScrollDelta;
-                    let (dx, dy) = match delta {
-                        ScrollDelta::Lines { x, y } => (x * 60.0, y * 60.0),
-                        ScrollDelta::Pixels { x, y } => (x, y),
-                    };
-                    FerriteBrowserMessage::ServoScroll {
-                        delta_x: dx,
-                        delta_y: dy,
-                    }
+                    FerriteBrowserMessage::ServoScroll(match delta {
+                        ScrollDelta::Lines { x, y } => scroll::Wheel::Lines { x, y },
+                        ScrollDelta::Pixels { x, y } => scroll::Wheel::Pixels { x, y },
+                    })
                 })
                 .into()
         } else {
             // Loading placeholder (no frame yet for a non-blank URL)
-            let pulse = pulse_alpha(state.progress_offset, 1.0, 0.25, 0.20);
-            container(
-                column![
-                    text("Fe")
-                        .size(40)
-                        .font(font_weight(iced::font::Weight::Bold))
-                        .color(Color {
-                            a: pulse,
-                            ..palette.accent
-                        }),
-                    container(text("")).height(10),
-                    text("Loading...").size(14).color(palette.text_dim),
-                ]
-                .spacing(4)
-                .align_x(iced::Alignment::Center),
-            )
-            .width(Length::Fill)
-            .height(Length::Fill)
-            .center(Length::Fill)
-            .style(|_: &Theme| container::Style {
-                background: Some(Background::Color(palette.base)),
-                ..container::Style::default()
-            })
-            .into()
+            pages::loading_page(palette, state.progress_offset)
         }
     })
     .into();
 
     // ── Compose layout ──────────────────────────────────────────────────────
-    let mut layout: Vec<Element<FerriteBrowserMessage>> =
-        vec![tab_bar.into(), sep_top.into(), toolbar.into()];
-
-    if let Some(bar) = maybe_progress {
-        layout.push(bar);
-    } else {
-        layout.push(
-            container(text(""))
-                .width(Length::Fill)
-                .height(Length::Fixed(2.0))
-                .into(),
-        );
-    }
-    layout.push(sep_bottom.into());
+    let mut layout: Vec<Element<FerriteBrowserMessage>> = vec![tab_bar, toolbar, hairline.into()];
 
     // The audit and JS panels are developer-style drawers and sit below the
     // page, like browser devtools; the library is a drawer on the right.
@@ -6466,13 +6012,29 @@ pub fn view(state: &FerriteBrowser) -> Element<'_, FerriteBrowserMessage> {
         js_panel
     };
 
-    if let Some(bar) = find_bar {
-        layout.push(bar);
-    }
+    // The find bar floats over the page's top-right corner.
+    let content: Element<FerriteBrowserMessage> = match find_bar {
+        Some(bar) => stack([
+            content,
+            container(bar)
+                .width(Length::Fill)
+                .height(Length::Fill)
+                .align_x(iced::Alignment::End)
+                .padding(SP_SM)
+                .into(),
+        ])
+        .into(),
+        None => content,
+    };
 
     // Wrap browser viewport + optional agent sidebar in a horizontal row.
     let main_content: Element<FerriteBrowserMessage> = if let Some(library) = library_panel {
         iced::widget::row![content, library]
+            .width(Length::Fill)
+            .height(Length::Fill)
+            .into()
+    } else if state.show_settings_panel {
+        iced::widget::row![content, settings_panel::view(state)]
             .width(Length::Fill)
             .height(Length::Fill)
             .into()
@@ -6489,14 +6051,17 @@ pub fn view(state: &FerriteBrowser) -> Element<'_, FerriteBrowserMessage> {
         layout.push(p);
     }
 
-    container(column(layout))
+    let window: Element<FerriteBrowserMessage> = container(column(layout))
         .width(Length::Fill)
         .height(Length::Fill)
-        .style(|_: &Theme| container::Style {
-            background: Some(Background::Color(palette.base)),
-            ..container::Style::default()
-        })
-        .into()
+        .style(page_style)
+        .into();
+
+    // The overflow menu floats over everything, with a click-away layer.
+    match chrome::menu_overlay(state) {
+        Some(menu) => stack([window, menu]).into(),
+        None => window,
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -6513,239 +6078,6 @@ fn tile_monogram(label: &str) -> String {
         .next()
         .map(|c| c.to_uppercase().to_string())
         .unwrap_or_default()
-}
-
-/// A rounded, tinted square housing either the tile's real favicon (once
-/// `TileFaviconReady` has landed) or its monogram fallback — one shared
-/// container style for both, so a favicon arriving mid-session never makes
-/// the tile jump to a differently-sized/positioned glyph, only swaps what's
-/// drawn inside the same backdrop. `accent` is this tile's own hue-rotated
-/// colour (`tile_accent`) — the monogram is drawn in it directly; the real-
-/// favicon case uses it only for the backdrop's subtle tint/border, since
-/// the favicon image itself already carries the site's real colours.
-fn tile_glyph<'a>(
-    favicon: Option<&ImageHandle>,
-    monogram: &str,
-    accent: Color,
-) -> Element<'a, FerriteBrowserMessage> {
-    // A real favicon sits on a light tile so a dark icon (GitHub's, Rust's) is
-    // still visible on the dark theme; a monogram sits on a quiet tint.
-    let has_icon = favicon.is_some();
-    let backdrop_style = move |_: &Theme| container::Style {
-        background: Some(Background::Color(if has_icon {
-            Color {
-                a: 0.96,
-                ..Color::WHITE
-            }
-        } else {
-            Color { a: 0.14, ..accent }
-        })),
-        border: Border {
-            radius: iced::border::Radius::new(11.0),
-            width: 1.0,
-            color: if has_icon {
-                Color {
-                    a: 0.20,
-                    ..Color::BLACK
-                }
-            } else {
-                Color { a: 0.30, ..accent }
-            },
-        },
-        ..container::Style::default()
-    };
-    let inner: Element<'a, FerriteBrowserMessage> = match favicon {
-        Some(handle) => ServoImage::new(handle.clone())
-            .width(Length::Fixed(24.0))
-            .height(Length::Fixed(24.0))
-            .into(),
-        None => text(monogram.to_string()).size(16).color(accent).into(),
-    };
-    // `center(len)` sets BOTH width and height to `len`; pairing it with
-    // `width`/`height` first (as this once did) silently made the tile fill
-    // its whole parent.
-    container(inner)
-        .center(Length::Fixed(38.0))
-        .style(backdrop_style)
-        .into()
-}
-
-/// Width shared by the new-tab page's search field and quick-access grid so
-/// the two edges line up (six 92 px tiles with 9 px gaps).
-const NEW_TAB_CONTENT_WIDTH: f32 = 600.0;
-
-/// The new-tab page: a flat, quiet start screen — wordmark, one search field,
-/// an "ask the agent" shortcut, a grid of quick-access sites and a footer of
-/// keyboard hints. No animation and no gradients: the search field is the only
-/// thing that draws the eye, and it is usable from the first frame.
-fn new_tab_page(state: &FerriteBrowser) -> Element<'_, FerriteBrowserMessage> {
-    let palette = state.palette();
-
-    // ── Wordmark ─────────────────────────────────────────────────────────
-    let mark = container(
-        text("F")
-            .size(20)
-            .font(font_weight(iced::font::Weight::Bold))
-            .color(palette.base),
-    )
-    .center(Length::Fixed(40.0))
-    .style(|_: &Theme| container::Style {
-        background: Some(Background::Color(palette.accent)),
-        border: Border {
-            radius: iced::border::Radius::new(11.0),
-            ..Border::default()
-        },
-        ..container::Style::default()
-    });
-    let wordmark = row![
-        mark,
-        text("Ferrite")
-            .size(26)
-            .font(font_weight(iced::font::Weight::Semibold))
-            .color(palette.text),
-    ]
-    .spacing(12)
-    .align_y(iced::Alignment::Center);
-
-    // ── Search ───────────────────────────────────────────────────────────
-    let search_bar = text_input(
-        "Search the web or enter an address",
-        &state.new_tab_search_input,
-    )
-    .width(NEW_TAB_CONTENT_WIDTH)
-    .padding([14, 18])
-    .size(15)
-    .style(|_: &Theme, status| {
-        let focused = matches!(status, text_input::Status::Focused);
-        text_input::Style {
-            background: Background::Color(palette.input),
-            border: Border {
-                radius: iced::border::Radius::new(12.0),
-                width: if focused { 1.5 } else { 1.0 },
-                color: if focused {
-                    palette.accent
-                } else {
-                    palette.divider
-                },
-            },
-            icon: palette.text_dim,
-            placeholder: palette.text_dim,
-            value: palette.text,
-            selection: Color {
-                a: 0.30,
-                ..palette.accent
-            },
-        }
-    })
-    .on_input(FerriteBrowserMessage::NewTabSearchChanged)
-    .on_submit(FerriteBrowserMessage::NavigateRequested(resolve_url(
-        &state.new_tab_search_input,
-    )));
-    let search_gap = container(text("")).height(8);
-
-    // A quiet second entry point for the agent; hidden once its panel is open.
-    let agent_hint: Element<'_, FerriteBrowserMessage> = if state.show_agent_sidebar {
-        container(text("")).height(30).into()
-    } else {
-        button(
-            row![
-                icon(Icon::Agent, 14.0, palette.text_dim),
-                text("Ask the agent instead")
-                    .size(13)
-                    .color(palette.text_dim),
-            ]
-            .spacing(8)
-            .align_y(iced::Alignment::Center),
-        )
-        .padding([6, 10])
-        .style(|_: &Theme, s| {
-            let hov = matches!(s, button::Status::Hovered | button::Status::Pressed);
-            button::Style {
-                background: hov.then_some(Background::Color(palette.surface)),
-                text_color: palette.text_dim,
-                border: Border {
-                    radius: iced::border::Radius::new(8.0),
-                    ..Border::default()
-                },
-                shadow: iced::Shadow::default(),
-            }
-        })
-        .on_press(FerriteBrowserMessage::ToggleAgentSidebar)
-        .into()
-    };
-
-    // ── Quick access ─────────────────────────────────────────────────────
-    let tile_row: Vec<Element<FerriteBrowserMessage>> = QUICK_ACCESS_TILES
-        .iter()
-        .enumerate()
-        .map(|(index, tile)| {
-            let favicon = state.tile_favicons.get(index).and_then(|f| f.as_ref());
-            let glyph = tile_glyph(favicon, &tile_monogram(tile.label), palette.text_dim);
-            let url = tile.url.to_string();
-            button(
-                column![glyph, text(tile.label).size(12).color(palette.text)]
-                    .spacing(8)
-                    .align_x(iced::Alignment::Center),
-            )
-            .width(92)
-            .padding([12, 6])
-            .style(|_: &Theme, s| {
-                let hov = matches!(s, button::Status::Hovered | button::Status::Pressed);
-                button::Style {
-                    background: Some(Background::Color(if hov {
-                        palette.raised
-                    } else {
-                        palette.surface
-                    })),
-                    text_color: palette.text,
-                    border: Border {
-                        radius: iced::border::Radius::new(12.0),
-                        width: 1.0,
-                        color: palette.divider,
-                    },
-                    shadow: iced::Shadow::default(),
-                }
-            })
-            .on_press(FerriteBrowserMessage::NavigateRequested(url))
-            .into()
-        })
-        .collect();
-
-    let quick_access = column![
-        text("Quick access").size(12).color(palette.text_dim),
-        row(tile_row).spacing(9).wrap(),
-    ]
-    .spacing(12)
-    .width(NEW_TAB_CONTENT_WIDTH);
-
-    // ── Footer: keyboard hints ───────────────────────────────────────────
-    let shortcuts_text = format!(
-        "{M}+T New tab    {M}+L Address bar    {M}+R Reload    {M}+Shift+O New chat    F12 Audit log",
-        M = MOD_LABEL,
-    );
-
-    container(
-        column![
-            wordmark,
-            container(text("")).height(36),
-            search_bar,
-            search_gap,
-            agent_hint,
-            container(text("")).height(28),
-            quick_access,
-            container(text("")).height(44),
-            text(shortcuts_text).size(11).color(palette.text_dim),
-        ]
-        .align_x(iced::Alignment::Center),
-    )
-    .width(Length::Fill)
-    .height(Length::Fill)
-    .center(Length::Fill)
-    .style(|_: &Theme| container::Style {
-        background: Some(Background::Color(palette.base)),
-        ..container::Style::default()
-    })
-    .into()
 }
 
 // ---------------------------------------------------------------------------
@@ -6791,8 +6123,28 @@ fn handle_key_press(
             "=" | "+" => Some(FerriteBrowserMessage::ZoomIn),
             "-" => Some(FerriteBrowserMessage::ZoomOut),
             "0" => Some(FerriteBrowserMessage::ZoomReset),
+            "d" => Some(FerriteBrowserMessage::ToggleBookmarkCurrentPage),
+            "a" | "A" if modifiers.shift() => Some(FerriteBrowserMessage::ToggleAgentSidebar),
+            "," => Some(FerriteBrowserMessage::ToggleSettingsPanel),
+            // Cmd/Ctrl+[ and +] are back and forward (Chrome, Safari); with
+            // Shift held the OS reports the brace, which steps between tabs.
+            "[" => Some(FerriteBrowserMessage::GoBack),
+            "]" => Some(FerriteBrowserMessage::GoForward),
+            "{" => Some(FerriteBrowserMessage::PrevTab),
+            "}" => Some(FerriteBrowserMessage::NextTab),
+            // Cmd/Ctrl+1..8 jump to that tab, +9 to the last, as in Chrome.
+            digit @ ("1" | "2" | "3" | "4" | "5" | "6" | "7" | "8") => digit
+                .parse::<usize>()
+                .ok()
+                .map(|n| FerriteBrowserMessage::SelectTabNumber(n - 1)),
+            "9" => Some(FerriteBrowserMessage::SelectLastTab),
             _ => None,
         },
+        keyboard::Key::Named(Named::Tab) if modifiers.control() => Some(if modifiers.shift() {
+            FerriteBrowserMessage::PrevTab
+        } else {
+            FerriteBrowserMessage::NextTab
+        }),
         keyboard::Key::Named(Named::F5) => Some(FerriteBrowserMessage::Reload),
         keyboard::Key::Named(Named::F12) => Some(FerriteBrowserMessage::ToggleAuditPanel),
         keyboard::Key::Named(Named::ArrowLeft) if modifiers.alt() => {
@@ -6837,6 +6189,7 @@ fn is_captured_chrome_shortcut(key: &keyboard::Key, modifiers: keyboard::Modifie
     match key {
         keyboard::Key::Character(_) => mod_active,
         keyboard::Key::Named(keyboard::key::Named::F5 | keyboard::key::Named::F12) => true,
+        keyboard::Key::Named(keyboard::key::Named::Tab) => modifiers.control(),
         _ => false,
     }
 }
@@ -6880,12 +6233,46 @@ fn page_key_from_event(
     page_input::page_key_from_iced(&key_event).map(FerriteBrowserMessage::PageKey)
 }
 
+/// How long the engine tick sleeps. Every tick rebuilds the view, so a page
+/// that is sitting still should not pay 60 rebuilds a second: after
+/// `BUSY_TICKS` ticks with no new picture, no load, no input, no queued scroll
+/// and no resize, the tick slows to `IDLE_TICK`. Anything that wakes the page
+/// (see `wake`) puts it straight back to `ACTIVE_TICK`.
+fn tick_interval(state: &FerriteBrowser) -> std::time::Duration {
+    if page_is_active(state) {
+        ACTIVE_TICK
+    } else {
+        IDLE_TICK
+    }
+}
+
+fn page_is_active(state: &FerriteBrowser) -> bool {
+    let logical = state.content_area_size.get();
+    let scale = state.scale_factor;
+    let desired = (
+        (logical.width * scale).round().max(1.0) as u32,
+        (logical.height * scale).round().max(1.0) as u32,
+    );
+    state.busy_ticks > 0
+        || state.is_loading
+        || state.agent_is_running
+        || state.scroll_queue.is_pending()
+        || state.pointer_moved
+        || state.resize_settle_ticks > 0
+        || desired != state.last_resized_content_px
+}
+
+/// Marks the page busy now: input just arrived, so the next frames matter.
+fn wake(state: &mut FerriteBrowser) {
+    state.busy_ticks = BUSY_TICKS;
+}
+
 pub fn subscription(state: &FerriteBrowser) -> Subscription<FerriteBrowserMessage> {
     let keyboard_sub = keyboard::on_key_press(handle_key_press);
     let page_keys = iced::event::listen_with(page_key_from_event);
 
     let servo_tick = if !state.servo_sessions.is_empty() {
-        time::every(std::time::Duration::from_millis(16)).map(|_| FerriteBrowserMessage::ServoFrame)
+        time::every(tick_interval(state)).map(|_| FerriteBrowserMessage::ServoFrame)
     } else {
         Subscription::none()
     };
@@ -6896,6 +6283,14 @@ pub fn subscription(state: &FerriteBrowser) -> Subscription<FerriteBrowserMessag
     let consent_anim_tick = if state.pending_diff.is_some() && state.consent_panel_anim < 1.0 {
         time::every(std::time::Duration::from_millis(16))
             .map(|_| FerriteBrowserMessage::ConsentPanelTick)
+    } else {
+        Subscription::none()
+    };
+
+    // The overflow menu's slide-in, only while it is opening.
+    let menu_anim_tick = if state.show_menu && state.menu_anim < 1.0 {
+        time::every(std::time::Duration::from_millis(16))
+            .map(|_| FerriteBrowserMessage::MenuAnimTick)
     } else {
         Subscription::none()
     };
@@ -6953,6 +6348,7 @@ pub fn subscription(state: &FerriteBrowser) -> Subscription<FerriteBrowserMessag
         servo_tick,
         agent_event_sub,
         consent_anim_tick,
+        menu_anim_tick,
         thread_anim_tick,
     ])
 }
@@ -6961,8 +6357,62 @@ pub fn subscription(state: &FerriteBrowser) -> Subscription<FerriteBrowserMessag
 // Launch
 // ---------------------------------------------------------------------------
 
+/// The app icon (assets/icon/ferrite.svg rendered by scripts/make_icons.py),
+/// embedded so the binary needs no files beside it. Shown in the title bar and
+/// task switcher on Windows and Linux; macOS takes its Dock icon from the
+/// `.app` bundle (scripts/package.sh), not from the window.
+const WINDOW_ICON_PNG: &[u8] = include_bytes!("../../../assets/icon/ferrite-256.png");
+
+fn window_icon() -> Option<window::Icon> {
+    let (width, height, rgba) = decode_favicon_rgba(WINDOW_ICON_PNG)?;
+    window::icon::from_rgba(rgba, width, height).ok()
+}
+
+/// The OS window title: the active page's title and the app name. Only
+/// visible where the window keeps its native title bar (and in the task
+/// switcher everywhere).
+fn window_title(state: &FerriteBrowser) -> String {
+    chrome::window_title(
+        state
+            .tab_titles
+            .get(state.active_tab)
+            .map_or("", String::as_str),
+        state
+            .tab_urls
+            .get(state.active_tab)
+            .map_or("about:blank", String::as_str),
+    )
+}
+
+/// The window's own settings. On macOS the title bar is transparent, its text
+/// hidden and the content extended underneath it, so the traffic lights sit
+/// inside the tab strip (see `chrome`) and no native title row is left above
+/// it. Linux and Windows keep their normal decorations.
+fn window_settings() -> window::Settings {
+    window::Settings {
+        icon: window_icon(),
+        // A window smaller than this cannot show the toolbar's controls.
+        min_size: Some(Size::new(640.0, 420.0)),
+        #[cfg(target_os = "macos")]
+        platform_specific: window::settings::PlatformSpecific {
+            title_hidden: true,
+            titlebar_transparent: true,
+            fullsize_content_view: true,
+        },
+        // Lets a Linux desktop match the window to `ferrite.desktop`
+        // (and so to its icon) in the launcher and task bar.
+        #[cfg(target_os = "linux")]
+        platform_specific: window::settings::PlatformSpecific {
+            application_id: "ferrite".to_string(),
+            ..Default::default()
+        },
+        ..window::Settings::default()
+    }
+}
+
 pub fn launch() -> iced::Result {
-    iced::application("Ferrite", update, view)
+    iced::application(window_title, update, view)
+        .window(window_settings())
         .window_size(Size::new(1280.0, 800.0))
         .centered()
         // Closing the window is handled (`WindowCloseRequested`) so the engine
@@ -7000,25 +6450,21 @@ pub fn launch() -> iced::Result {
                 None => Task::none(),
             });
 
-            let mut state = FerriteBrowser::default();
-            // T-224/T-229: construct the real ModelProvider here, at actual
-            // app startup — never inside `FerriteBrowser::default()` itself
-            // (kept test-safe/R7, see that impl's own comment) — and only
-            // once, since `try_real_model_provider()` does a real OS-keyring
-            // lookup that a test must never trigger even indirectly.
-            if let Some((provider, config)) = try_real_model_provider() {
-                state.model_tag_small = config.tag(ModelTier::Small).to_string();
-                state.model_tag_main = config.tag(ModelTier::Main).to_string();
-                state.model_cache_dir = Some(config.cache_dir.display().to_string());
-                state.model_provider = provider;
-            } else {
-                eprintln!(
-                    "[ferrite-ui] no ModelProvider configured/reachable (FERRITE_MODEL_SMALL/\
-                     FERRITE_MODEL_MAIN unset, or no Ollama/Gemini credential found) — the \
-                     fingerprint's may_use layer and the live agent loop will both fail to \
-                     empty/fail closed rather than run against a real model"
-                );
-            }
+            // T-224/T-229: connect the real ModelProvider here, at actual app
+            // startup — never inside `FerriteBrowser::default()` itself (kept
+            // test-safe/R7, see that impl's own comment). The Settings
+            // drawer's saved choice is read from the data directory, the key
+            // from the environment or the OS keyring, and the exported
+            // variables still win over the file, exactly as they always did.
+            // A failure leaves the app on "No model connected"; it never
+            // stops it starting.
+            let mut state = FerriteBrowser {
+                settings: settings_panel::SettingsState::for_launch(
+                    ferrite_agent::chat::default_data_dir(),
+                ),
+                ..FerriteBrowser::default()
+            };
+            settings_panel::connect_saved(&mut state);
             // C3d: bookmarks/downloads real-path resolution and the one-time
             // bookmarks load — both only ever happen here, at real app
             // startup, never inside `FerriteBrowser::default()` (same
@@ -7091,6 +6537,10 @@ pub fn launch() -> iced::Result {
                 );
             }
             let favicon_task = Task::done(FerriteBrowserMessage::FetchTileFavicons);
+            // The engine is built by the first session, once per process, so
+            // the saved browser identity (the User-Agent sites see) is handed
+            // over now, before it exists.
+            ferrite_servo::session::set_user_agent(state.settings.identity.user_agent());
             match HeadlessServoSession::new(1280, 700) {
                 Ok(session) => {
                     state.servo_sessions.insert(0, session);
@@ -7120,7 +6570,7 @@ pub fn launch() -> iced::Result {
 // `FerriteBrowser::default()` never does either, so `update()` is directly
 // testable with a plain `FerriteBrowser` and no window, matching the
 // directive's "no rendering needed" requirement. `FerriteBrowser::default()`
-// also never calls `try_real_model_provider()` (that only happens in
+// also never reads the real keyring (`SettingsState::for_launch` only runs in
 // `launch()`, the real app entry point — see that impl's own comment), so
 // every test's `model_provider` is `MockProvider`, scripted with nothing —
 // R7 holds even for the tests below that do trigger a `tokio::task::spawn`.
@@ -7140,6 +6590,8 @@ pub fn launch() -> iced::Result {
 mod activity_tests;
 #[cfg(test)]
 mod chat_tests;
+#[cfg(test)]
+mod chrome_tests;
 #[cfg(test)]
 mod fast_lane_tests;
 #[cfg(test)]
@@ -7194,51 +6646,38 @@ mod tests {
         DryRunRecord::new(task.session_id, task.task_id)
     }
 
-    // ── R7: no automated test call reaches a live ModelProvider ──────────
+    // ── R7: no automated test call reaches the real keyring ──────────────
 
-    /// Mirrors `ferrite-eval::harness::no_automated_test_calls_try_real_provider`
-    /// (same technique, scoped to this crate's one source file): scans this
-    /// module's own source for every non-comment, non-definition call site
-    /// of `try_real_model_provider(` and fails if more than the one real
-    /// caller (`launch()`) exists. `FerriteBrowser::default()` itself never
-    /// names the function at all (it constructs `MockProvider` inline —
-    /// see that impl), so this test's job is only to catch a future edit
-    /// that accidentally adds a second call site somewhere a test could
-    /// reach.
+    /// `SettingsState::for_launch` is the one place the app reads the real OS
+    /// keyring and the process environment (`Default` and `load_from` use an
+    /// in-memory vault and an empty environment). Mirrors
+    /// `ferrite-eval::harness::no_automated_test_calls_try_real_provider`
+    /// (same technique): this crate's non-test source must call it exactly
+    /// once, from `launch()`, and no source file may call it from a test, so
+    /// a keychain prompt or a developer's exported variables can never reach
+    /// `cargo test` (R7).
     #[test]
-    fn no_automated_test_calls_try_real_model_provider_outside_launch() {
-        const NEEDLE: &str = "try_real_model_provider(";
-        let src = include_str!("lib.rs");
-        let mut real_call_sites = 0;
-        for (i, line) in src.lines().enumerate() {
-            let trimmed = line.trim_start();
-            if trimmed.starts_with("//") || trimmed.starts_with("///") {
-                continue;
-            }
-            let mut search_from = 0;
-            while let Some(rel) = line[search_from..].find(NEEDLE) {
-                let idx = search_from + rel;
-                let preceded_by_ident_char = line[..idx]
-                    .chars()
-                    .next_back()
-                    .is_some_and(|c| c.is_alphanumeric() || c == '_');
-                let is_definition = line[..idx].trim_end().ends_with("fn");
-                let in_string_literal = line[..idx].matches('"').count() % 2 == 1;
-                if !preceded_by_ident_char && !is_definition && !in_string_literal {
-                    real_call_sites += 1;
-                    assert!(
-                        line.contains("try_real_model_provider()"),
-                        "line {}: unexpected call shape: {line}",
-                        i + 1
-                    );
-                }
-                search_from = idx + NEEDLE.len();
-            }
-        }
+    fn only_launch_builds_the_settings_state_that_reads_the_real_keyring() {
+        const NEEDLE: &str = "SettingsState::for_launch(";
+        let calls = |src: &str| {
+            src.lines()
+                .filter(|l| {
+                    let t = l.trim_start();
+                    !t.starts_with("//") && l.contains(NEEDLE)
+                })
+                .count()
+        };
+        let lib = include_str!("lib.rs");
+        let lib_non_test = &lib[..lib.find("#[cfg(test)]\nmod tests").unwrap_or(lib.len())];
+        assert_eq!(calls(lib_non_test), 1, "exactly one call site (launch)");
+        // The panel module defines it and documents it; none of its own
+        // tests (everything from `mod tests` down) may call it.
+        let panel = include_str!("settings_panel.rs");
+        let panel_tests = &panel[panel.find("#[cfg(test)]\nmod tests").expect("tests")..];
         assert_eq!(
-            real_call_sites, 1,
-            "expected exactly one real call site (launch()) — found {real_call_sites}; a new \
-             one would risk a live OS-keyring lookup reaching cargo test (R7)"
+            calls(panel_tests),
+            0,
+            "no settings test may read the real keyring"
         );
     }
 
@@ -8242,50 +7681,6 @@ mod tests {
         assert_eq!(pulse_alpha(0.0, 1.0, 0.25, 0.20), 0.25);
     }
 
-    #[test]
-    fn progress_segment_brightness_peaks_at_the_segment_under_the_sweep() {
-        // t=0.0 -> peak = 0 -> segment 0 is the brightest of the ten.
-        let brightness_at: Vec<f32> = (0..10)
-            .map(|i| progress_segment_brightness(i, 10, 0.0))
-            .collect();
-        let (brightest_i, _) = brightness_at
-            .iter()
-            .enumerate()
-            .max_by(|(_, a), (_, b)| a.partial_cmp(b).unwrap())
-            .unwrap();
-        assert_eq!(brightest_i, 0);
-    }
-
-    #[test]
-    fn progress_segment_brightness_wraps_around_the_segment_ring() {
-        // t just before wrapping back to 0.0: the sweep's peak (~9.99 of
-        // 10) sits between the last segment and the first. Without
-        // wraparound, segment 0 would read as maximally *far* from the
-        // peak (a hard drop at the seam, `raw = 9.99`); with it, segment 0
-        // is close to the peak on the short way around (`wrapped ≈ 0.01`)
-        // and reads brighter than a segment on the far side of the ring.
-        let t = 0.999;
-        let brightness_first = progress_segment_brightness(0, 10, t);
-        let brightness_far_side = progress_segment_brightness(5, 10, t);
-        assert!(
-            brightness_first > brightness_far_side,
-            "expected wraparound to keep segment 0 bright near the seam: \
-             first={brightness_first} far_side={brightness_far_side}"
-        );
-    }
-
-    #[test]
-    fn progress_segment_brightness_is_bounded_zero_to_one() {
-        for i in 0..PROGRESS_SEGMENTS {
-            let mut t = 0.0_f32;
-            while t <= 1.0 {
-                let b = progress_segment_brightness(i, PROGRESS_SEGMENTS, t);
-                assert!((0.0..=1.0).contains(&b), "i={i} t={t}: brightness={b}");
-                t += 0.1;
-            }
-        }
-    }
-
     // ── C3c theme toggle ───────────────────────────────────────────────────
 
     #[test]
@@ -9062,6 +8457,14 @@ mod tests {
     #[test]
     fn decode_favicon_rgba_is_none_for_non_image_bytes() {
         assert_eq!(decode_favicon_rgba(b"not an image at all"), None);
+    }
+
+    #[test]
+    fn window_icon_decodes_to_a_256px_square() {
+        let (w, h, rgba) = decode_favicon_rgba(WINDOW_ICON_PNG).expect("embedded icon decodes");
+        assert_eq!((w, h), (256, 256));
+        assert_eq!(rgba.len(), 256 * 256 * 4);
+        assert!(window_icon().is_some());
     }
 
     #[test]

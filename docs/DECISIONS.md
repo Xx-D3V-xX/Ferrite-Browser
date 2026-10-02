@@ -538,3 +538,91 @@ the cost of the failed and declined calls. The net was a loss of several seconds
 measurement (T-234, T-250); this only guarantees that when it is not, the agent
 stops paying for it.
 
+## ADR-016 — Servo's Web Crypto is a compile-time feature; releases follow a successful manual CI run
+
+**Context.** Speedometer 3.1 failed in Ferrite with `crypto.getRandomValues()
+not supported`, `crypto is not defined` and a Next.js client-side exception.
+Servo's `Crypto` interface is declared `skip-unless CARGO_FEATURE_WEBCRYPTO`:
+without the `webcrypto` Cargo feature of the `servo` crate, `window.crypto` is
+not merely disabled, it does not exist. The `dom_crypto_subtle_enabled`
+preference (already `true`) only gates `crypto.subtle` once the interface is
+there. The `servo` dependency was declared with default features
+(`bundled`, `clipboard`, `js_jit`), which exclude `webcrypto`.
+
+**Decision.** Declare `servo = { version = "=0.6.0", features = ["webcrypto"] }`
+and set `dom_intersection_observer_enabled` in `get_or_init_servo()`. Adding the
+feature pulls the RustCrypto stack (about 800 lockfile lines; `cargo deny`
+licenses, advisories and bans stay clean) and required `cargo update -p
+hybrid-array`. The `web_api_probe` example is the regression check.
+
+CI is still manual-only (T-210). It now runs on macOS, Windows and Linux, builds
+and packages the Servo binary on each, and a separate `release.yml` fires on
+`workflow_run` of CI and publishes the rolling `latest` release only when the CI
+run's conclusion is `success`. It never checks out or runs the CI run's code: it
+downloads the artifacts only, because a `workflow_run` workflow has a write
+token.
+
+**Not claimed.** That Speedometer passes: no network was available to run it.
+That the Windows and Linux jobs pass: they have not run. `requestIdleCallback`,
+`adoptedStyleSheets`, `FontFace`, `OffscreenCanvas` and the Navigation API are
+absent in this Servo and are listed by the probe as gaps.
+
+## ADR-017 — Model settings are a layer under the environment; keys live only in the keyring
+
+**Date:** 2026-10-01. **Status:** live; the keyring write path is unverified against a real OS keyring (T-257), and Linux key persistence is open (T-259).
+
+**Context.** A packaged app has no shell to export `FERRITE_MODEL_SMALL`, `FERRITE_MODEL_MAIN` or an API key from, so the only way to connect a model was a developer's environment. Ferrite needed an in-app way to choose a provider, store a key and pick models without weakening §10.1 (a key comes from the environment or the OS keyring "and nowhere else") or §10.2 (no model name appears in source).
+
+**Decision.**
+
+1. **One configuration system, not two.** The Settings drawer saves non-secret choices (provider, a model name per role per provider, a local server address) to `settings.json` in the data directory. `ModelSettings::to_env` renders them in the existing environment-variable vocabulary and `LayeredEnv` puts the real environment *over* them, so `ModelConfig::load` and every provider constructor run unchanged. An exported variable still wins (CI, shell overrides), and the drawer names the variables that are overriding a saved choice rather than silently ignoring the person's input.
+2. **Keys never touch the file.** They are written to the OS keyring through a new `SecretVault` (`set`/`delete`), under the account names the providers already read. `SecretStore` stays read-only, so no test or CLI path can write by omission. The key's `Debug` is redacted, so is the message that carries it while typed, and the field is cleared on save. A test asserts the settings file never contains key material.
+3. **Models are chosen from what the provider serves.** *Load models* calls the provider's listing endpoint (`/api/tags`; Gemini `models`, filtered to `generateContent`), which also proves the key before a task spends a call. The call is injected (`ModelLister`), so `FerriteBrowser::default()` carries one that refuses and no test can reach a provider.
+4. **"Local" means this machine.** A local Ollama address must be loopback (`is_local_url`, whole-host matching). That keeps the rule that a bearer token is never sent toward anything that is not the cloud service; a remote server is `FERRITE_OLLAMA_BASE_URL` with Ollama Cloud, an explicit choice.
+5. **Saving applies at once and fails safe.** `connect` builds the provider (no network); only a provider that builds is persisted, and the three fields every run reads (`model_provider`, `model_tag_small`, `model_tag_main`) are replaced. Removing a key also disconnects the running app, because a connection holds its key in memory. With no choice saved, `connect` is the old startup logic (Ollama if a key or local server is configured, else Gemini), so no existing setup changes.
+6. **A missing model is visible.** With nothing connected the agent panel says so, with the button that fixes it; the loop still fails closed (ADR-000's invariant is untouched).
+
+**Not claimed.** That the keyring write works on every platform: it is exercised only against an in-memory vault. That Linux keys persist (they do not, T-259). That the drawer looks right on macOS or Windows (it was rendered with the software renderer on Linux).
+
+## ADR-018 — Be a compatible browser, not a disguised one; hand secrets to the person
+
+**Date:** 2026-10-01. **Status:** live; the effect on Google and GitHub sign-in is **unverified** (T-262).
+
+**Context.** Google and GitHub flagged Ferrite as an insecure or automated browser. Probing the real engine with the agent idle showed nothing Ferrite-specific in the page; the signals were the engine's own: a User-Agent naming `Servo/<version>`, and missing Web APIs (WebGL, permissions, notifications, the async clipboard, service workers, WebRTC devices). The tempting fix, to hide or fake whatever a bot-detection script measures, was considered and rejected.
+
+**Decision.**
+
+1. **Close real gaps instead of forging them.** Enable what Servo already implements and ships off (`webgl` feature, WebGL2, permissions, notifications, async clipboard) and make them required checks in `probe-web-api` so they cannot silently disappear. Leave unimplemented things (service workers, `mediaDevices`, `userAgentData`, `window.chrome`) missing.
+2. **A visible, reversible identity.** The User-Agent is a Settings choice. The default is Firefox-compatible: Servo's own string with only the engine token swapped for `Gecko`, because Servo already claims `Firefox/<n>` and naming an older, well-known engine is the convention every mainstream browser follows. A person can choose the string that names Servo instead. It applies at the next launch because the engine is built once.
+3. **No forgery, no stealth.** No spoofed hardware, canvas or renderer values, plugin lists or client hints; no pretending to be Chrome (Ferrite has none of Chrome's client hints, so a Chrome UA is a contradiction a site could see); no hiding that a page is automated; no mimicking another browser's TLS fingerprint. Such measures exist to separate a person from a program, and a browser that also drives an agent should not be working to blur that line.
+4. **A person signs in, not the agent.** The page script refuses to type into sensitive fields, and a run pauses before any model call when the active page asks for a password or other secret, resuming when the person presses Continue. This is the honest answer to what these sites check (a human, with their hands, in the session), and it is also the safer one: anything an agent types came from a model, and an injected page wants exactly that.
+
+**Not claimed.** That Google or GitHub will accept the sign-in: neither is reachable from the build environment, and what each keys on is unknown. That the compatible identity is a guarantee of anything. The next step is for someone to try it and report what the page says (T-262).
+
+## ADR-019 — Fix engine rendering gaps with verified switches and one narrow, visible script
+
+**Date:** 2026-10-01. **Status:** live; the effect on GitHub's own pages is unverified (T-264). **Amends ADR-018:** its sentence that a page "sees nothing Ferrite-specific" with the agent idle is no longer true, because one compatibility script is now injected.
+
+**Context.** After ADR-018 the owner could sign in to GitHub but its layout and icons were broken, and other sites looked wrong. Reproduced in the real engine: Servo paints an inline `<svg>` from the serialized element alone, so any colour that comes from a stylesheet or is inherited (the normal way sites colour icons) paints black, invisible on a dark theme; and two JavaScript APIs that sites call during start-up (`adoptedStyleSheets`, `document.fonts.load`) did not exist, which the owner's console log showed throwing repeatedly.
+
+**Decision.**
+
+1. **Enable a Servo switch only after measuring that the feature works.** `adoptedStyleSheets`, FontFace and `attr()` were enabled. Container queries (rules dropped), writing modes (the layout engine panics on mixed text) and multi-column layout (no effect) were tried and left off: a half-built feature is worse than a missing one, because pages detect it and skip their fallback.
+2. **One script, one job, visible.** `svg_compat.js` copies the colour styles an SVG's elements already resolve onto those same elements as inline `style`. It touches only `<svg>` subtrees and only inline style, makes no network request, adds no behaviour of its own, is injected through Servo's supported `UserContentManager` (not by patching the engine), and is documented in its own header. Its footprint on a page is a `data-svg-compat` attribute on each SVG, inline styles on SVG shapes and a `window.__ferriteSvgCompat` flag; it does not change what the agent's page script reads.
+3. **Regression-test the painted result.** The bug is only visible in pixels, so `probe-web-api` samples a painted pixel, and the check was confirmed to fail with the script disabled.
+4. **A sweep, not a guess (T-265).** On the owner's request to turn on everything necessary, every default-off boolean preference was enabled alone in the real engine and judged by what it does: seven that expose a working API that fails soft are on; WebRTC (media capture with no consent prompt), geolocation (never settles), service workers (half built) and Web Animations (no `finished`) are off, each for the measured reason recorded in T-265. Testing, internal and security-weakening switches are never candidates.
+5. **No site-specific hacks.** The script knows nothing about GitHub. Gaps that have no switch (`aspect-ratio` on block boxes, `:has()`, `@container`, `mask-image`, `backdrop-filter`, subgrid, ...) are listed in T-264 and left for the engine, or for a polyfill proven on its own, rather than papered over blind.
+
+**Not claimed.** That GitHub now renders correctly: it is unreachable from the build environment, and the gaps above will keep breaking some of its pages. That the script is free: a page with very many icons is processed in slices of 40, but its cost on a large real page was not measured. That icons recoloured after load (hover, theme switch) are updated.
+
+## ADR-020 — A blocked action in the real run asks the person; it does not just stop
+
+**Date:** 2026-10-01. **Status:** live. **Amends ADR-014:** "everything else is blocked" becomes "everything else waits for a person".
+
+**Context.** The runtime guard held the real run to the predicted fingerprint and refused anything else with a fixed sentence. The prediction comes from the request's words, so a request like "go to the docs page" predicted navigation only, and the agent's first click was refused with no way for the owner to say yes. The owner's report: clicks, navigation and form filling were blocked for nearly everything, so the agent was pointless.
+
+**Decision.** The verdict is unchanged; what happens to a *blocked* verdict changed. The run pauses and shows a card with the action and the site (never text a page wrote): *Allow once*, *Allow for this task* (approves the tool or the site for the task, the same approval the pre-run consent panel produces), *Don't allow* (the old behaviour, including the four-block stop). A person's yes is the only way a deviation runs, and every answer is audited. `js.execute` is still always a deviation and always asked.
+
+**Not changed.** The rules and the model layer that build the prediction, the comparator, and the evaluation: no reported number moves. Whether a navigation task should *predict* clicks and form fills is a separate, open choice (it would reduce prompts and change the claim).
+
+**Limits.** A person who allows everything gets no protection from this card, which is the human limit already published; a click on a link is judged at the page's own origin before the request is made (ADR-014's stated limit).

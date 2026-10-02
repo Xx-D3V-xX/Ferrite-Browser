@@ -4722,3 +4722,143 @@ the warm-up now also times fp16 on MPS and prints both; the new
 CPU-only `FERRITE_LAYA_THREADS`. **Verified:** the 26 Python server tests (fake
 agent; no torch, no MPS here). **Not verified:** whether fp16 is actually faster
 or changes answers on his machine; no Apple hardware here.
+
+## 2026-10-01 — coordinator — Web Crypto, an app icon, and CI/release on three OSes
+
+**Reported by the owner:** Speedometer 3.1 fails in Ferrite (`crypto.getRandomValues()
+not supported`, `crypto is not defined`, a Next.js client-side exception) and
+passes in Brave; asked for an icon, and for CI and release on macOS, Windows and
+Linux (CI manual; release to follow a successful CI run).
+
+**Cause (T-251):** the `servo` crate was built without its `webcrypto` feature,
+so `window.crypto` is not compiled in (ADR-016). **Done:** the feature is on
+(lockfile moved only `hybrid-array` and `typenum` besides the additions),
+`dom_intersection_observer_enabled` is on, and `web_api_probe`
+(`just probe-web-api`) checks 25 required APIs in the real engine. **Verified
+(Linux, headless, real Servo built with the feature):** all 25 pass, including
+`getRandomValues`, `randomUUID` and `subtle` digest, AES-GCM and HMAC;
+`IntersectionObserver` failed before its preference was set. Absent in this
+Servo and only reported: `requestIdleCallback`, `adoptedStyleSheets`,
+`FontFace`, `scheduler.postTask`, `OffscreenCanvas`, the Navigation API.
+
+**Icon (T-252):** `assets/icon/ferrite.svg`, rendered by `scripts/make_icons.py`
+to PNG, ICO and ICNS; embedded as the window icon, in `ferrite.exe`
+(`build.rs`, Windows only) and in `Ferrite.app` / the Linux `.desktop`
+(`scripts/package.sh`).
+
+**CI/release (T-253):** `ci.yml` is manual-only with a Linux/Windows/macOS
+matrix and packaged Servo builds; `release.yml` publishes after a successful CI
+run (`workflow_run`). T-210's macOS-only decision is superseded by the owner's
+new request.
+
+**Verified:** `cargo fmt`; clippy `--workspace --all-targets -D warnings` and
+`-p ferrite-servo --all-targets --features servo`; `cargo test --workspace` 1,101
+passed, 0 failed, 2 ignored; `cargo deny check`; `cargo machete`; the packaging
+script for all three platforms against a stand-in binary; both workflow files
+parse as YAML; the window icon decodes (unit test).
+
+**Not verified:** Speedometer 3.1 itself (no internet here); the icon in a
+macOS Dock, Windows task bar or Linux launcher; the Windows icon-embedding build
+step; anything in the workflows on a real GitHub runner (Linux and Windows
+package lists, Windows and Linux test runs, the `workflow_run` hand-off, which
+only takes effect once `release.yml` is on `main`).
+
+## 2026-10-01 — coordinator — Windows CI: golden fixtures checked out as CRLF (T-254)
+
+The first Windows run of `cargo test --workspace` failed three `schema_stability`
+tests in `ferrite-core`. Cause: no `.gitattributes`, so the runner's default
+`core.autocrlf=true` turned the LF fixtures into CRLF and the byte-for-byte wire
+format comparison failed on `\r\n`. Fix: a root `.gitattributes` forcing LF
+(binary assets excluded); `git add --renormalize .` is a no-op, so the blobs
+were already LF. The test was not loosened. **Not verified:** a Windows run
+after the change.
+
+## 2026-10-01 — coordinator — Windows CI: node payload past the command-line limit (T-255)
+
+With the fixtures fixed, the next Windows run failed two `ferrite-engine-servo`
+tests (`select_option_*`): `run_select_in_node` handed node a ~42 KB payload as
+an argument, over Windows' ~32 KB limit (os error 206). The payload is now
+piped on stdin. All 15 tests in the crate pass here with node installed.
+**Not verified:** a Windows run. Each Windows run so far has surfaced a new
+class of failure, so expect more until one is green.
+
+## 2026-10-01 — coordinator — Windows CI: closed-port refusal is slower than Laya's timeout (T-256)
+
+The third Windows run got through every earlier failure; one `ferrite-model`
+test remained (`a_server_that_is_down_is_a_connect_error_...`): it expected
+`Connect` but the client's 1.5 s timeout fired first, because Windows takes
+about 2 s to refuse a connection to a closed loopback port. Test-only fix (a
+15 s timeout in that test); the client's behavior is unchanged. Linux and macOS
+were already green. **Not verified:** a Windows run after this change.
+
+## 2026-10-01 — coordinator — In-app model settings, and the public site (T-257, T-258, T-259)
+
+**Asked by the owner:** a way for people who download the browser to connect their own agent (provider, API key, model) in the app rather than a `.env`, in the app's own theme; and a clean marketing site with a download section and documentation centered on the defense, the metrics and how they are evaluated.
+
+**Settings (T-257, ADR-017).** `ferrite_model::settings` (persisted choices, layered env, `connect`, `list_models`), `SecretVault` (writable keyring, in-memory double), `GeminiProvider::list_models`, and `ferrite-ui`'s `settings_panel` (state, transitions, drawer, agent-panel banner, gear icon). The Library's read-only Settings tab was removed and its theme and zoom controls moved into the drawer. **Verified:** 27 `ferrite-model` settings tests and 28 `ferrite-ui` settings tests, offline; `cargo clippy --workspace --all-targets -D warnings`; every drawer state (first run, models loaded, connected, error, light theme, agent banner) and the consent panel rendered from the real `view()` under software rendering and inspected. **Not verified:** a real keyring write, a real provider listing, macOS or Windows rendering.
+
+**Found on the way (T-259):** the Linux keyring backend in use is in memory and is cleared by a reboot, so a Linux user's saved key does not persist. A persistent backend needs `libdbus` and could not be verified here, so the Cargo change was tried, did not build, and was reverted; the drawer and docs now say so.
+
+**Site (T-258).** `site/` (landing page and nine docs pages, stdlib-only builder with a link and anchor check, self-hosted font) and `.github/workflows/pages.yml` (manual). Figures are from `docs/EVALUATION.md` §8, and the headline's `RejectFlagged` assumption is stated beside them. **Verified:** the build and link check; the pages viewed in Chromium at desktop and mobile widths in both themes; the download resolver against a stubbed release and a 404. **Not verified:** the deployed site, and the live GitHub API.
+
+**README:** the Status bullets that said the live app runs on the pre-rebuild path and that the corpus has 29 cases were out of date (T-224 and T-220's live-app half are closed; the corpus is 938); corrected from the ledger.
+
+## 2026-10-01 — coordinator — macOS CI: a race on the shared activity trace (T-260)
+
+The first macOS run of the Settings branch failed one `ferrite-ui` test (`opening_the_audit_panel_loads_the_trace_...`): the marker it recorded was gone when it read the global trace back. A sibling test sends `ClearTrace`, which empties that same log, so the two race. Pre-existing and unrelated to Settings; macOS scheduling exposed it. Reproduced (5/60 runs failed), fixed with a shared lock over the three tests that touch the global trace, 0/150 after. **Not verified:** a macOS run after the change.
+
+## 2026-10-01 — coordinator — Bot detection: what was fixable, what was not, and the sign-in handoff (T-262, T-263)
+
+**Asked by the owner:** make the agent hand sign-in to the person, and fix Google and GitHub flagging Ferrite "for everything, anyhow".
+
+**Found:** with the agent idle, a page sees nothing Ferrite-specific (probed in the real engine); gating the agent's tools on the panel would change nothing. The signals were the engine's: a `Servo/<version>` User-Agent and missing Web APIs.
+
+**Done:** WebGL and WebGL2 (the `servo` crate's `webgl` feature plus `dom_webgl2_enabled`), `navigator.permissions`, `Notification`, `navigator.clipboard` (preferences), all required checks in `probe-web-api` (passes; input probe also passes); a Browser identity setting, default Firefox-compatible; the page script refuses to type into sensitive fields; the sign-in handoff (card rendered and inspected). **Verified:** 1,191 workspace tests, clippy for the workspace and with the `servo` feature, fmt, `cargo deny`, `cargo machete`.
+
+**Deliberately not done, and why:** forging hardware, canvas, renderer, plugin or client-hint values, pretending to be Chrome, hiding automation, mimicking another browser's TLS. These are evasion rather than compatibility (ADR-018). **Not verified:** whether Google or GitHub now accept a sign-in; this environment cannot reach either.
+
+## 2026-10-01 — coordinator — Broken layout and icons on GitHub: reproduced and partly fixed (T-264)
+
+**Reported by the owner (with a screenshot and a console log):** Google still blocks sign-in; GitHub signs in but its CSS and layout are broken, and many sites look wrong.
+
+**Found, by reproducing in the real engine:** inline SVG icons coloured by CSS paint black (Servo paints from the element's own markup only), which is the empty icon boxes on a dark theme; and `adoptedStyleSheets` and `document.fonts.load` were missing (both in the owner's console). **Done:** an SVG compatibility script injected through `UserContentManager` (read-all-then-write, 40 per slice), `adoptedStyleSheets`, FontFace and `attr()` enabled. **Tried and rejected after measuring:** container queries, writing modes (panics), multi-column. **Verified:** a pixel check in `probe-web-api` that fails with the script off and passes with it, 12 colouring cases, 602 script-inserted icons on a dark page, the input, profile (set then get) and digest probes, 1,191 workspace tests, clippy for the workspace and with the `servo` feature, fmt, `cargo deny`, `cargo machete`. **Not fixed, no switch exists:** `aspect-ratio` on block boxes (computes to 0 height), `:has()`, `@container`, `mask-image`, `backdrop-filter`, subgrid and more (T-264 has the list). **Not verified:** GitHub itself. Google sign-in is unchanged and unverified (T-262).
+
+## 2026-10-01 — coordinator — Servo default-off preference sweep (T-265)
+
+**Asked by the owner:** turn on everything necessary, "every single thing".
+
+**Done:** enumerated Servo 0.6.0's boolean preferences (117, 89 default-off), excluded testing, internal, devtools and security-weakening switches, enabled each remaining candidate alone against a feature battery and a behaviour page in the real engine, and compared with a baseline. Seven are now on (`credentials`, wake lock, storage manager, OffscreenCanvas, Sanitizer, visual viewport, `execCommand`); `probe-web-api` gained seven required checks and passes, as does the input probe.
+
+**Deliberately left off, with the measurement (T-265):** WebRTC (`getUserMedia` resolves with no consent prompt), geolocation (never settles), service workers (half built), Web Animations (no `finished`), container queries, multi-column, variable fonts, writing modes (panic). **Not verified:** any effect on a real site; pixel comparison was by painted-pixel count because frame hashes vary with animation timing.
+
+**Follow-up, same day:** asked to do whatever else could be done from here, re-tested the rejected switches. Both web view delegates now deny every permission request Servo forwards (explicit and logged). That did not make geolocation or WebRTC safe: Servo never forwards either to the embedder, so they stay off. The Web Animations object is a stub (only `effect`), so no shim. Branch hygiene: work lives only on `feat/defense-eval-corpus-and-laya-latency`.
+
+## 2026-10-01 — coordinator — Own-site links for navigation tasks; project site renders in Ferrite (T-266)
+
+**Reported by the owner (two screenshots):** the project site renders wrongly in Ferrite, and "go to this sites docs page" was blocked at the click on the Docs link.
+
+**Found, by loading the built site in the real engine:** `background-clip: text` fills a solid box over the hero words in Servo; `1fr` grid tracks grow to their content and pushed the demo card and a list past their columns; CSS counters incremented inside `::before` render as 0. **Done:** a gradient underline instead of gradient text, `minmax(0, 1fr)` tracks, explicit step numbers; re-rendered and checked section by section. **Defense:** see T-266: a click on a link to the site the tab is already on is judged as a click or a navigation there. 9 tests in `runtime_guard`, 2 in the guard; ui tests (323), clippy clean.
+
+**Google sign-in (T-267), same day:** the identifier page loads, renders and takes typing in the real engine, but the sandbox's egress policy blocks `www.gstatic.com`, so Google's sign-in bundle never runs here and nothing past that point could be tested. Not fixed, not claimed. The app's console-error lines now shorten long URLs so the error survives the 400-character cut (2 tests).
+
+## 2026-10-01 — coordinator — The guard asks instead of dead-ending (T-268); speed measured (T-269)
+
+**Reported by the owner:** the agent is blocked from clicking, navigating and filling forms for almost everything; Ferrite scores 1.96 on Speedometer against Brave's 15.6; the site and Google sign-in still look wrong.
+
+**Done:** ADR-020 / T-268 (the run pauses on a blocked action and asks; 333 ui tests pass, clippy clean). T-269: dependency debug assertions off in the dev profile (measured ~20-30% on DOM work), `just run-fast` for the release profile. The deployed site still showed the old hero because the Pages workflow is manual: a deploy of this branch was triggered. **Not fixed:** Google sign-in (T-267): Google's first response is identical for three user agents, so the refusal is produced by its page script, which cannot load in the build environment; `history.pushState` to another origin throws exactly `The operation is insecure`, as the spec requires, and no other candidate API misbehaved in the engine probes. Servo's rAF cadence and style speed are upstream.
+
+**Owner's log triage (T-270):** `SVGAnimatedString` stub added (engine-verified). The Servo script-thread panics (`ancestorOrigins`, `can_run_script`) and CodeMirror's failure are upstream and recorded as such; WakeLock lines are benign.
+
+## 2026-10-01 — ui — A browser-grade chrome, smoother input and clearer approvals (T-272)
+
+**Asked by the owner:** "a very major UI haul, like actual real browsers, super smooth use, scrolling and stuff, very good UI, proper top bars, no extra space on top, even the agent approval section and all." His screenshots showed the macOS title text and a window-title row above the tab strip, tab titles wrapping onto two lines, a toolbar crowded with text buttons ("- 175% +", Library, Audit, JS, Agent), and a dark band under the toolbar.
+
+**Done (commits 9f04909 and 17ae2e0):** the macOS window now uses a transparent, text-less, full-size-content title bar and the tab strip holds the traffic lights; a 34 px tab strip and a 40 px toolbar replace the 36 + 46 px bars and the 4 px of spacers, with real tabs (shrinking shares, ellipsis titles, favicon, close on hover, middle-click, drag area), a pill address bar, a prominent Agent toggle and one overflow menu for everything else; a thin loading bar that does not move the page; a find bar that floats over it. Wheel/trackpad input is queued and delivered once per tick (notches eased out), pointer moves coalesced, and the engine tick slows when the page is idle. The consent panel keeps its decision pinned; the runtime-consent and sign-in cards share one frame; Escape means "no". Design tokens (`tokens.rs`) carry the spacing, type and radius scales and one set of states. New shortcuts: Ctrl/Cmd+D, [ ], Shift+[ ], Ctrl+Tab, 1-9, Shift+A, comma. Two real bugs found on the way: clicking the address bar never selected it (the text input consumed the press before `mouse_area` saw it), and Enter left the bar focused while keys went to the page.
+
+**Verified:** 400 `ferrite-ui` tests (333 before; new ones cover tab widths, title fitting, the loading band, scroll easing, the idle tick, shortcuts, menu and tab messages, Escape and the window settings) and `cargo clippy --workspace --all-targets -- -D warnings` pass. The UI was rendered with iced's tiny-skia renderer under Xvfb and read back as screenshots (dark and light themes, the menu, find bar, three approval cards, library, settings, new-tab, error page, 18 tabs), and the running window was driven with xdotool under openbox: Ctrl+T, Ctrl+Tab, Ctrl+3, Ctrl+Shift+A, click-to-select, typing, hover close, middle-click close, the menu, and a drag of the tab strip that moved the window. The throwaway harness is not committed.
+
+**Not verified, stated plainly:** the macOS title bar and traffic-light alignment (no Mac available; winit does not let the app move the lights, so they sit a few pixels above the tab text's centre); anything against a real Servo page, because this build has no engine (scroll feel, mouse coalescing and the idle-tick slowdown are reasoned and unit-tested, not measured); HiDPI; Windows. **Not done:** cursor feedback over the page (the engine reports no cursor), tab drag-reorder, reopen-closed-tab. **Left as it was:** the chat thread, most of the settings drawer and the audit table keep their older literal sizes; only new and reworked views use the tokens.
+
+## 2026-10-01 — coordinator — Answers are rendered, not dumped (T-273)
+
+**Reported by the owner (screenshot):** an answer full of literal `**` and `-` markers and a raw page-text step. **Done:** `markdown.rs` (parser + renderer, 18 tests), page-read steps summarised, links safe by construction. 418 ui tests pass, clippy clean; checked visually in the real app under a software renderer with a seeded answer (headings, nested bullets, table, quote, JSON, inline code, a phishing-style link). Not tested against real model output beyond the owner's screenshot text.

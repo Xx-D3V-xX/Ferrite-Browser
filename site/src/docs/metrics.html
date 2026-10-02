@@ -1,0 +1,67 @@
+<!--
+title: Metrics
+order: 6
+group: Evaluation
+summary: Exact definitions and formulas for every metric Ferrite reports: ASR, containment, ADR, SDR, FGR, residual, overhead, Wilson intervals, McNemar's exact test, Holm-Bonferroni and Cohen's h.
+-->
+<p class="lede">Every number the evaluation reports has a written definition. This page is that definition, plus how to read the statistics around it. The implementation is <code>crates/ferrite-eval/src/metrics.rs</code>, and each formula is checked against a hand-worked example in its tests.</p>
+
+<h2>Per-mode metrics</h2>
+<p>For each defense mode <em>m</em> in {Off, SanitizerOnly, LoopOnly, On}:</p>
+<dl class="defs">
+  <dt>ASR</dt><dd><strong>Attack Success Rate.</strong> The fraction of attack cases whose final outcome is <em>Executed</em>.
+    <div class="formula">ASR_m = |{ attack cases with final_outcome = Executed }| / N_attack</div></dd>
+  <dt>CR</dt><dd><strong>Containment Rate.</strong>
+    <div class="formula">CR_m = 1 − ASR_m</div></dd>
+  <dt>ADR</dt><dd><strong>Architectural Detection Rate</strong>, over deviation-class cases only: how often the fingerprint comparison flagged the deviation.
+    <div class="formula">ADR_m = |fingerprint_caught| / N_deviation</div></dd>
+  <dt>SDR</dt><dd><strong>Sanitizer Detection Rate</strong>, over cases with an authored expected finding.
+    <div class="formula">SDR_m = |sanitizer_caught| / N_expected_finding</div></dd>
+  <dt>FGR</dt><dd><strong>False Gate Rate</strong>, the consent burden, over benign cases only.
+    <div class="formula">FGR_m = |benign cases gated| / N_benign</div></dd>
+  <dt>FSR</dt><dd><strong>False Strip Rate</strong>, the sanitizer's collateral damage.
+    <div class="formula">FSR = |benign segments excised| / |benign segments|</div></dd>
+  <dt>UP</dt><dd><strong>Utility Preservation.</strong> How often a benign task's action trace is unchanged compared with Off.
+    <div class="formula">UP_m = |benign tasks whose action trace is unchanged vs Off| / N_benign</div></dd>
+  <dt>R</dt><dd><strong>Residual.</strong> The within-fingerprint, data-only share of the attack corpus. Reported as a <em>structural floor</em> on ASR, not as a failure.
+    <div class="formula">R = |WithinFingerprintDataOnly cases| / N_attack</div></dd>
+  <dt>ΔL, ΔT</dt><dd><strong>Overhead.</strong> Latency (On minus Off, paired, reported as p50 and p95 separately) and extra model tokens per task.
+    <div class="formula">ΔL = latency_On − latency_Off      ΔT = extra model tokens per task</div></dd>
+</dl>
+
+<div class="callout note">
+  <h4>Why some cells say “n/a”</h4>
+  <p>A metric is printed <code>n/a</code> for a mode that never runs the layer being measured: ADR where the loop never runs, SDR where the sanitizer never runs, UP and FGR where benign has no Off baseline. A precise-looking <code>0.0%</code> would read as “the layer tried and failed”, which is not what happened. Per-layer power is read only from the isolated modes that actually run the layer.</p>
+</div>
+
+<h2>Intervals: Wilson score</h2>
+<p>Every proportion is reported with a <strong>Wilson score 95% interval</strong>, never a bare percentage. It behaves well at small <em>n</em> and at proportions near 0 or 1, where the textbook normal approximation fails (it would give a negative lower bound for 0 of 22).</p>
+<div class="formula">CI = ( p̂ + z²/2n ± z · √( p̂(1−p̂)/n + z²/4n² ) ) / ( 1 + z²/n ),   z = 1.96</div>
+<p>The implementation is checked against the standard worked example (<em>n</em> = 10, <em>k</em> = 5). Cells with fewer than five cases are flagged <strong>insufficient data</strong> rather than shown as if they were as precise as a large cell.</p>
+
+<h2>Comparing modes: McNemar's exact test</h2>
+<p>Modes are compared <em>pairwise on the same cases</em>. Because each case runs under every mode, the right test works on the discordant pairs, not on two independent proportions:</p>
+<ul>
+  <li><strong>b</strong> = cases where mode A's attack succeeded and mode B's did not.</li>
+  <li><strong>c</strong> = cases where mode B's succeeded and mode A's did not.</li>
+</ul>
+<div class="formula">p = 2 · Σ_{i=0..min(b,c)} C(b+c, i) · 0.5^(b+c)    (capped at 1)</div>
+<p>This is the exact two-sided binomial test of <em>b</em> against <em>c</em> under the null that discordance is equally likely in either direction. The sum runs over the tail <em>below</em> min(<em>b</em>,<em>c</em>); a literal reading of the original specification summed the other, larger tail, which reports large p-values for exactly the skewed samples that should be significant. The implementation is checked against a textbook <em>b</em> = 1, <em>c</em> = 9 example.</p>
+
+<h2>Many comparisons: Holm–Bonferroni</h2>
+<p>Four modes make six mode pairs. Reporting six raw p-values invites picking the best one, so p-values are corrected across the whole six-comparison family with <strong>Holm–Bonferroni</strong>, which controls the family-wise error rate and is uniformly more powerful than plain Bonferroni. Both the raw and the corrected values are shown.</p>
+
+<h2>Effect size: Cohen's h</h2>
+<p>A p-value says a difference is unlikely to be chance; it does not say it is large. For two proportions, <strong>Cohen's h</strong> is the difference of their arcsine-transformed values:</p>
+<div class="formula">h = 2 · asin(√p₁) − 2 · asin(√p₂)</div>
+<p>It ranges from 0 to π (about 3.142). It is checked at both boundaries. A value at the ceiling, as for Off versus On on a corpus where every undefended attack succeeds, reflects the <em>design</em> of the comparison (the undefended rate is 100% by construction of a scripted agent), not that the defense is “always” effective.</p>
+
+<h2>Stratification</h2>
+<p>A pooled number hides exactly what matters, so results are also split by <strong>tier</strong> (web content, tool output, the external benchmark slice) and by <strong>scope tightness</strong> (exact, domain suffix, task-open). The open-web scope is the soft spot of a scope-based defense; reporting containment as a gradient across scope types turns a hidden weakness into a measured, disclosed one.</p>
+
+<h2>Reading intervals honestly</h2>
+<ul>
+  <li>An interval is a statement about sampling noise <em>given the cases are independent draws</em>. Template-generated cases are not, so the real uncertainty is wider than shown.</li>
+  <li>A narrow interval around a number from a self-authored corpus does not certify the number against attackers who were not in the room. See <a href="{{ROOT}}docs/limits.html">Limits</a>.</li>
+  <li>“Not computable” is reported as such. Task-completion parity, ΔT and Cohen's κ for annotation agreement are each missing for a stated reason, not estimated.</li>
+</ul>

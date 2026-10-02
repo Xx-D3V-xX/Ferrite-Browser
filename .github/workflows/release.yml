@@ -1,0 +1,96 @@
+name: Release
+
+# Runs by itself when a manual CI run (ci.yml) finishes, and publishes only if
+# that run succeeded: every lint/test job and all three Servo builds. There is
+# no other trigger — to release, run CI.
+#
+# A `workflow_run` workflow only fires from the default branch's copy of this
+# file, so it takes effect once this file is on `main`. It also runs with a
+# write token, so it never checks out or executes the CI run's code: it only
+# downloads the packages CI built and attaches them to the rolling "latest"
+# release.
+on:
+  workflow_run:
+    workflows: [CI]
+    types: [completed]
+
+permissions:
+  contents: write
+  actions: read
+
+jobs:
+  release:
+    name: Publish rolling release
+    runs-on: ubuntu-latest
+    if: >-
+      github.event.workflow_run.conclusion == 'success' &&
+      github.event.workflow_run.event == 'workflow_dispatch'
+
+    steps:
+      - name: Download the packages built by CI
+        uses: actions/download-artifact@v4
+        with:
+          pattern: ferrite-*
+          merge-multiple: true
+          path: dist
+          run-id: ${{ github.event.workflow_run.id }}
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: List packages
+        shell: bash
+        run: |
+          ls -l dist
+          for kind in macos-arm64.zip windows-x64.zip linux-x64.tar.gz; do
+            ls dist/*"$kind" >/dev/null || { echo "missing $kind package" >&2; exit 1; }
+          done
+
+      - name: Build release notes
+        shell: bash
+        env:
+          SHA: ${{ github.event.workflow_run.head_sha }}
+          BRANCH: ${{ github.event.workflow_run.head_branch }}
+          CI_RUN: ${{ github.event.workflow_run.html_url }}
+        run: |
+          SHORT="${SHA:0:7}"
+          DATE=$(date -u +"%Y-%m-%d %H:%M UTC")
+          cat <<EOF > release_notes.md
+          ## ferrite · latest
+
+          > Published automatically after a manual CI run succeeded on every
+          > platform. It always holds the most recent such build, which may be
+          > behind \`main\`.
+
+          | Field   | Value |
+          |---------|-------|
+          | Commit  | [\`$SHORT\`](https://github.com/${{ github.repository }}/commit/$SHA) |
+          | Branch  | \`$BRANCH\` |
+          | CI run  | $CI_RUN |
+          | Date    | $DATE |
+
+          ### Downloads
+          | Platform | File | Notes |
+          |----------|------|-------|
+          | macOS (Apple silicon) | \`ferrite-$SHORT-macos-arm64.zip\` | Unzip, drag \`Ferrite.app\` to Applications. Not notarized, so macOS blocks it once: open System Settings → Privacy & Security and click Open Anyway, or run \`xattr -dr com.apple.quarantine /Applications/Ferrite.app\`. |
+          | Windows (x64) | \`ferrite-$SHORT-windows-x64.zip\` | Unzip and run \`ferrite.exe\`. SmartScreen may ask once; choose "Run anyway". |
+          | Linux (x64) | \`ferrite-$SHORT-linux-x64.tar.gz\` | Extract, then \`./ferrite\` or \`./install.sh\`. Needs a graphical session; see \`README.txt\` inside. |
+          EOF
+
+      - name: Delete existing "latest" release (if any)
+        shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          gh release delete latest --yes --cleanup-tag --repo "${{ github.repository }}" 2>/dev/null || true
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: latest
+          target_commitish: ${{ github.event.workflow_run.head_sha }}
+          name: "ferrite · latest build"
+          body_path: release_notes.md
+          prerelease: true
+          make_latest: true
+          files: dist/*
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

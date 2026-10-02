@@ -111,6 +111,12 @@ build-servo:
 probe-input *ARGS:
     cargo run -p ferrite-servo --features servo --example input_probe -- {{ARGS}}
 
+# Checks that the Web APIs benchmark and framework bundles assume exist in the
+# real engine: window.crypto (getRandomValues, randomUUID, subtle), observers,
+# fetch, custom elements and more, served from loopback. Needs the real Servo build.
+probe-web-api:
+    cargo run -p ferrite-servo --features servo --example web_api_probe
+
 # Runs the real page script in a headless Servo session and drives a form by
 # `@ref`: digest, type, tick, select, click, scroll. Needs the real Servo build.
 probe-engine:
@@ -208,6 +214,12 @@ setup-all *ARGS:
 # Run the browser with env.local, starting the local Laya server if set up.
 run-local *ARGS:
     ./scripts/run-local.sh {{ARGS}}
+
+# The same, built with the release profile. The dev profile is for working on
+# Ferrite; this one is what to use to *use* it, or to judge its speed: the
+# engine runs several times faster optimised (T-269).
+run-fast *ARGS:
+    FERRITE_PROFILE=release ./scripts/run-local.sh --servo {{ARGS}}
 
 # Starts the Laya server (if set up), then the real-Servo browser with it.
 # Run everything: real Servo browser + local Laya server.

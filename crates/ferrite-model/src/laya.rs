@@ -1443,7 +1443,13 @@ mod tests {
             let l = TcpListener::bind("127.0.0.1:0").await.expect("bind");
             format!("http://{}", l.local_addr().expect("addr"))
         };
-        let client = LayaClient::new(LayaConfig::new(closed));
+        // Linux and macOS refuse a closed loopback port at once; Windows retries
+        // the SYN for about two seconds first (twice, as a connect error is
+        // retried once). The timeout must outlast that, or the answer is a
+        // `Timeout` and the test would be pinning the OS, not the client.
+        let mut config = LayaConfig::new(closed);
+        config.timeout = Duration::from_secs(15);
+        let client = LayaClient::new(config);
         assert!(matches!(
             client.systemone("test", &one_question_request()).await,
             Err(LayaError::Connect(_))

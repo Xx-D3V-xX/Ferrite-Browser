@@ -1,0 +1,71 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1024 1024" width="1024" height="1024">
+  <!-- Ferrite app icon. A faceted hexagonal shield (the containment boundary)
+       around a geometric F; the node at the end of the F's middle bar is the
+       agent's single, consent-checked step. Source of truth for every raster
+       size: scripts/make_icons.py renders this file. -->
+  <defs>
+    <linearGradient id="bg" x1="130" y1="60" x2="900" y2="980" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#2b2159"/>
+      <stop offset="0.55" stop-color="#17133a"/>
+      <stop offset="1" stop-color="#0b0a21"/>
+    </linearGradient>
+    <radialGradient id="glow" cx="760" cy="860" r="620" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#ff7a3d" stop-opacity="0.55"/>
+      <stop offset="0.5" stop-color="#e2447a" stop-opacity="0.18"/>
+      <stop offset="1" stop-color="#e2447a" stop-opacity="0"/>
+    </radialGradient>
+    <radialGradient id="halo" cx="380" cy="230" r="520" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#8b7cff" stop-opacity="0.35"/>
+      <stop offset="1" stop-color="#8b7cff" stop-opacity="0"/>
+    </radialGradient>
+    <linearGradient id="rim" x1="200" y1="150" x2="820" y2="880" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#ffd2a1"/>
+      <stop offset="0.45" stop-color="#ff7a3d"/>
+      <stop offset="1" stop-color="#d8366f"/>
+    </linearGradient>
+    <linearGradient id="face" x1="512" y1="170" x2="512" y2="860" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#3a2d7a" stop-opacity="0.85"/>
+      <stop offset="1" stop-color="#1b1544" stop-opacity="0.85"/>
+    </linearGradient>
+    <linearGradient id="letter" x1="380" y1="300" x2="640" y2="740" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#ffffff"/>
+      <stop offset="1" stop-color="#ffd9bf"/>
+    </linearGradient>
+    <linearGradient id="gloss" x1="0" y1="64" x2="0" y2="520" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#ffffff" stop-opacity="0.16"/>
+      <stop offset="1" stop-color="#ffffff" stop-opacity="0"/>
+    </linearGradient>
+    <clipPath id="tile"><rect x="64" y="64" width="896" height="896" rx="208"/></clipPath>
+    <filter id="soft" x="-20%" y="-20%" width="140%" height="140%">
+      <feGaussianBlur stdDeviation="14"/>
+    </filter>
+  </defs>
+
+  <!-- Tile -->
+  <g clip-path="url(#tile)">
+    <rect x="64" y="64" width="896" height="896" fill="url(#bg)"/>
+    <rect x="64" y="64" width="896" height="896" fill="url(#glow)"/>
+    <rect x="64" y="64" width="896" height="896" fill="url(#halo)"/>
+    <rect x="64" y="64" width="896" height="456" fill="url(#gloss)"/>
+  </g>
+  <rect x="65.5" y="65.5" width="893" height="893" rx="206.5" fill="none" stroke="#ffffff" stroke-opacity="0.10" stroke-width="3"/>
+
+  <!-- Hexagonal shield: pointy top and bottom -->
+  <g>
+    <path d="M512 168 L788 322 L788 626 L512 860 L236 626 L236 322 Z"
+          fill="#ff7a3d" opacity="0.35" filter="url(#soft)"/>
+    <path d="M512 168 L788 322 L788 626 L512 860 L236 626 L236 322 Z"
+          fill="url(#face)" stroke="url(#rim)" stroke-width="22" stroke-linejoin="round"/>
+    <!-- facets -->
+    <path d="M512 168 L788 322 L512 476 L236 322 Z" fill="#ffffff" opacity="0.07"/>
+    <path d="M512 476 L788 322 L788 626 Z" fill="#000000" opacity="0.10"/>
+  </g>
+
+  <!-- Letter F -->
+  <g fill="url(#letter)" transform="translate(0 26)">
+    <path d="M404 316 H650 a34 34 0 0 1 34 34 v10 a34 34 0 0 1 -34 34 H478 V470 H600 a34 34 0 0 1 34 34 v10 a34 34 0 0 1 -34 34 H478 V690 a34 34 0 0 1 -34 34 h-6 a34 34 0 0 1 -34 -34 V350 a34 34 0 0 1 34 -34 z"/>
+  </g>
+  <!-- Agent node at the end of the middle bar -->
+  <circle cx="676" cy="535" r="30" fill="#2fe3c2"/>
+  <circle cx="676" cy="535" r="30" fill="none" stroke="#2fe3c2" stroke-opacity="0.35" stroke-width="14"/>
+</svg>

@@ -1,0 +1,79 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>{{TITLE}}</title>
+<meta name="description" content="{{DESC}}">
+<meta name="theme-color" content="#5b45f0">
+<meta property="og:title" content="{{TITLE}}">
+<meta property="og:description" content="{{DESC}}">
+<meta property="og:type" content="website">
+<link rel="icon" type="image/png" href="{{ROOT}}static/img/favicon.png">
+<link rel="preload" href="{{ROOT}}static/fonts/Inter-Regular.woff2" as="font" type="font/woff2" crossorigin>
+<link rel="preload" href="{{ROOT}}static/fonts/Inter-SemiBold.woff2" as="font" type="font/woff2" crossorigin>
+<link rel="stylesheet" href="{{ROOT}}static/css/site.css">
+<script>
+  /* Applied before first paint so the page never flashes the wrong theme. */
+  (function () {
+    var d = document.documentElement;
+    d.classList.add('js');
+    try { var t = localStorage.getItem('ferrite-theme'); if (t === 'light' || t === 'dark') d.setAttribute('data-theme', t); } catch (e) {}
+  })();
+</script>
+</head>
+<body class="{{BODYCLASS}}">
+<a class="skip" href="#main-wrap">Skip to content</a>
+<header class="site-header">
+  <div class="wrap nav">
+    <a class="brand" href="{{ROOT}}index.html"><img src="{{ROOT}}static/img/favicon.png" alt="" width="30" height="30">Ferrite</a>
+    <nav class="nav-links" id="nav-links" aria-label="Main">
+      <a href="{{ROOT}}index.html#defense">Defense</a>
+      <a href="{{ROOT}}index.html#evaluation">Evaluation</a>
+      <a href="{{ROOT}}docs/"{{NAV_DOCS}}>Docs</a>
+      <a href="{{ROOT}}index.html#models">Your model</a>
+      <a href="{{REPO}}" rel="noopener">GitHub</a>
+    </nav>
+    <span class="nav-spacer"></span>
+    <button class="icon-btn" id="theme-toggle" type="button" aria-label="Switch colour theme" title="Switch colour theme">
+      <span class="theme-moon">{{icon:moon}}</span><span class="theme-sun">{{icon:sun}}</span>
+    </button>
+    <a class="btn btn-primary btn-sm nav-cta" href="{{ROOT}}index.html#download">{{icon:download}}Download</a>
+    <button class="icon-btn menu-btn" id="menu-btn" type="button" aria-label="Open menu" aria-expanded="false" aria-controls="nav-links">{{icon:menu}}</button>
+  </div>
+</header>
+<main id="main-wrap">
+{{BODY}}
+</main>
+<footer class="site-footer">
+  <div class="wrap">
+    <div class="foot">
+      <div>
+        <a class="brand" href="{{ROOT}}index.html"><img src="{{ROOT}}static/img/favicon.png" alt="" width="30" height="30">Ferrite</a>
+        <p>A browser for AI agents that contains a hijacked agent by architecture, and publishes how well that works, limits included.</p>
+      </div>
+      <div><h5>Product</h5>
+        <a href="{{ROOT}}index.html#download">Download</a>
+        <a href="{{ROOT}}index.html#models">Connect your model</a>
+        <a href="{{ROOT}}docs/getting-started.html">Getting started</a>
+      </div>
+      <div><h5>Defense</h5>
+        <a href="{{ROOT}}docs/how-it-works.html">How it works</a>
+        <a href="{{ROOT}}docs/threat-model.html">Threat model</a>
+        <a href="{{ROOT}}docs/limits.html">Limits</a>
+      </div>
+      <div><h5>Evaluation</h5>
+        <a href="{{ROOT}}docs/evaluation.html">Methodology &amp; results</a>
+        <a href="{{ROOT}}docs/metrics.html">Metrics</a>
+        <a href="{{ROOT}}docs/reproduce.html">Reproduce it</a>
+      </div>
+    </div>
+    <div class="legal">
+      <span>Ferrite is a research prototype. Read the <a href="{{ROOT}}docs/limits.html">limits</a> before relying on it.</span>
+      <span>Licensed MIT OR Apache-2.0 · Inter font under the <a href="{{ROOT}}static/fonts/OFL.txt">SIL OFL</a> · <a href="{{REPO}}" rel="noopener">Source on GitHub</a></span>
+    </div>
+  </div>
+</footer>
+<script src="{{ROOT}}static/js/site.js" defer></script>
+</body>
+</html>

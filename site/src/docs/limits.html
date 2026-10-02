@@ -1,0 +1,78 @@
+<!--
+title: Limits
+order: 9
+group: Honesty
+summary: Every known limit of Ferrite's defense, its evaluation and the product, and an explicit list of what is not claimed.
+-->
+<p class="lede">A security project that hides its weaknesses cannot be evaluated. This page gathers every known limit in one place: what the defense cannot stop, what the evaluation cannot show, and what the product cannot do yet. Where a limit is pinned by a test, the test stays in the repository, so the limit cannot quietly disappear.</p>
+
+<div class="callout warn">
+  <h4>Ferrite is a research prototype</h4>
+  <p>Do not use it to protect anything you cannot afford to lose. The numbers in the documentation describe an architecture under a particular experiment, not a guarantee.</p>
+</div>
+
+<h2>Limits of the defense</h2>
+
+<h3>The residual: attacks inside the prediction</h3>
+<p>The architecture contains every attack that needs an action outside what the task implied, and <strong>nothing else</strong>. An attack that uses the same capability at the task's own site, or that is data-only (for example, tampering with the content a legitimate action returns), is indistinguishable from the task. In the evaluation this is 122 of 809 attacks (15.1%) with the sanitizer off. It is reported as a floor and kept in every denominator.</p>
+
+<h3>Open-ended scopes</h3>
+<p>Under a <code>task_open</code> scope every origin is admitted, so nothing distinguishes the attacker's destination. An open-ended prompt that matches no rule produces an empty fingerprint, which sends everything to consent. That is safe but noisy; a follow-up like “do the same for the second one” predicts a looser fingerprint because the dry run sees no page content, and may raise more prompts. The fail-safe direction is accepted.</p>
+
+<h3>The sanitizer</h3>
+<p>It is pattern matching over de-obfuscated views. It misses, by construction and pinned by tests: paraphrase, languages outside its list, syllable hyphenation, spelled-out markup or URLs, reversed non-Latin text, and payloads split across separate elements. It also has known false positives: pages that <em>discuss</em> attacks (“attackers exfiltrate data”, “never ignore the previous warnings”) and any mention of “system prompt”. The architecture does not depend on it.</p>
+
+<h3>The runtime guard</h3>
+<ul>
+  <li>A click by CSS selector, a form <code>action</code> (submit, Enter in a field) and a server-side redirect cannot be resolved to a destination before they run. The tab's new origin is checked on the <em>next</em> action, after the request has been made.</li>
+  <li>A trailing-dot host (<code>example.com.</code>) fails closed.</li>
+  <li>Within-fingerprint abuse is indistinguishable from the task, by construction.</li>
+</ul>
+
+<h3>The human</h3>
+<p>The consent gate is a person. A user who approves everything defeats it: in the original run, approving every flagged action left 45.5% of attacks succeeding, against 0% when every flagged action is rejected. Real behavior is somewhere in between, and no human-factors study has measured where.</p>
+
+<h3>The model</h3>
+<p>Ferrite bounds what a compromised agent can <em>do</em>. It does not make a model less gullible. A model that is fooled will still try the action; the defense is that the attempt is contained, not that it is never made.</p>
+
+<h2>Limits of the evaluation</h2>
+<ul>
+  <li><strong>The agent is scripted.</strong> It re-enacts each case's authored deviation from ground truth, so the results say nothing about how often a real model takes the bait.</li>
+  <li><strong>The fingerprint is rules-only by default.</strong> The 0% false-gate rate is for a well-behaved scripted agent under that prediction. A real agent's rate depends on what it does and on the model prediction layer, which the default run does not exercise.</li>
+  <li><strong>Self-authored and generated.</strong> The corpus was written by the defense's author and expanded from shared templates, then tuned against. The intervals treat matrix-correlated cases as independent, so they understate the uncertainty.</li>
+  <li><strong>No independent slice to speak of.</strong> Only three external (AgentDojo) cases exist, which supports no claim. There is no second author, so Cohen's κ for annotation agreement is not computable and has not been faked.</li>
+  <li><strong>ADR = 100% is by construction.</strong> It measures the comparator against a scripted agent that issues exactly the declared deviation.</li>
+  <li><strong>Missing quantities.</strong> Task-completion parity for benign tasks (no benign baseline under Off) and extra token cost (no token usage in the execution record) are not computed, for stated reasons.</li>
+  <li><strong>A live-provider run is not reproducible</strong> byte for byte, so it is reported separately.</li>
+</ul>
+
+<h2>Limits of the product</h2>
+<ul>
+  <li><strong>Google and GitHub sign-in may still be refused.</strong> These sites decide from the whole session, and Ferrite uses a young engine. The identity choice, the engine's added Web APIs and the sign-in handoff are what Ferrite does about it; none is a guarantee, and it has not been verified against those sites. Still missing in the engine: service workers, <code>navigator.mediaDevices</code> (WebRTC), <code>navigator.userAgentData</code> and <code>window.chrome</code>. Ferrite deliberately does not fake any of them, nor hardware, canvas or renderer details, nor hide automation.</li>
+  <li><strong>Unsigned builds.</strong> Each platform asks you to confirm the first launch.</li>
+  <li><strong>Web compatibility is Servo's.</strong> Ferrite renders with the Servo engine, and several CSS features current sites rely on are missing or broken in it: <code>:has()</code>, container queries, <code>mask-image</code>, <code>backdrop-filter</code>, <code>text-wrap</code>, subgrid, popovers, and <code>aspect-ratio</code> on block boxes (a box with a width collapses to zero height). Pages that depend on them will look wrong. Ferrite enables the engine features that were measured to work (<code>adoptedStyleSheets</code>, FontFace, WebGL, and a further seven Web APIs found by testing every default-off engine switch one at a time) and leaves off those that were measured not to, such as WebRTC (it would hand out the microphone with no prompt), geolocation and service workers and injects one small script so that icons coloured by CSS stay visible (Servo paints them black otherwise), but it cannot add layout features the engine does not have. Google sign-in may also refuse an embedded engine.</li>
+  <li><strong>Linux keys do not persist across a restart</strong> with the kernel-keyring backend this build uses; see <a href="{{ROOT}}docs/models-and-settings.html">Models and settings</a>.</li>
+  <li><strong>Cookies are written on clean shutdown.</strong> Closing the window saves the profile; a crash, a kill or macOS <kbd>Cmd</kbd>+<kbd>Q</kbd> that bypasses the window close loses that run's new cookies.</li>
+  <li><strong>The packaged builds are new.</strong> The three-platform packaging and release pipeline was written recently; check the release page for what has actually been published.</li>
+</ul>
+
+<h2>What is explicitly not claimed</h2>
+<div class="callout bad">
+  <ul style="margin:0">
+    <li>That Ferrite makes AI browsing safe, or safe in production.</li>
+    <li>That any model is robust to prompt injection because it sits behind Ferrite.</li>
+    <li>That the evaluation generalizes to attacks, tasks or sites outside the corpus.</li>
+    <li>That users will reject unexpected actions; the headline numbers assume they do.</li>
+    <li>That the defense survives an attacker who has read it. The corpus was tuned against, and no held-out, adversarial, independently authored evaluation has been run.</li>
+    <li>That the sanitizer detects injected text in general. It detects the patterns it has.</li>
+  </ul>
+</div>
+
+<h2>What would make the claims stronger</h2>
+<ul>
+  <li>An independently authored, held-out corpus, run once, with a defense brief withheld from the authors.</li>
+  <li>A run with real models as the agent, reporting how often they take the bait and what the defense contains.</li>
+  <li>A human-factors study of how people actually answer consent prompts.</li>
+  <li>The model prediction layer measured on its own, with the sanitizer and rules off.</li>
+</ul>
+<p>If you can do any of these, or find an attack that gets through, <a href="{{REPO}}/issues" rel="noopener">open an issue</a>. A bypass is a result, and the corpus is where it belongs.</p>

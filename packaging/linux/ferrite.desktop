@@ -1,0 +1,11 @@
+[Desktop Entry]
+Type=Application
+Name=Ferrite
+GenericName=Web Browser
+Comment=An agentic browser with an architectural prompt-injection defense
+Exec=ferrite %U
+Icon=ferrite
+Terminal=false
+Categories=Network;WebBrowser;
+StartupWMClass=ferrite
+MimeType=text/html;x-scheme-handler/http;x-scheme-handler/https;

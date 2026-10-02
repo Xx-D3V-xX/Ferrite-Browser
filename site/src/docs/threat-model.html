@@ -1,0 +1,58 @@
+<!--
+title: Threat model
+order: 3
+group: Defense
+summary: What indirect prompt injection is, who the attacker is, what they can and cannot control, and what Ferrite deliberately does not try to stop.
+-->
+<p class="lede">A defense is only as meaningful as the attacker it assumes. This page states that attacker precisely, what is trusted, and what is out of scope, so the evaluation can be read against it.</p>
+
+<h2>The attack</h2>
+<p><strong>Indirect prompt injection</strong> is an attack on an agent through content it reads, as opposed to the user's own prompt. The attacker never talks to the agent directly. They plant text where the agent will look, and the agent, unable to reliably tell data from instructions, may follow it.</p>
+<p>In a browser the consequences are concrete: navigating to an attacker's site, submitting a form, downloading a file, reading cookies or clipboard contents, or running script. Each of those is an <em>action</em>, and actions are what Ferrite checks.</p>
+
+<h2>The attacker</h2>
+<h3>Can</h3>
+<ul>
+  <li>Control the content of pages the agent reads, including hidden or off-screen elements, HTML comments, <code>alt</code>, <code>title</code> and <code>meta</code> text, CSS-generated text and visible text.</li>
+  <li>Control the content of tool results the agent receives, for example fields of a JSON response, free-text blobs, error messages and metadata.</li>
+  <li>Pick any wording: paraphrase, other languages, encodings, invisible characters, social engineering, or text split across elements.</li>
+  <li>Make several requests: a delayed payload or a redirect chain that only appears on a second read.</li>
+</ul>
+<h3>Cannot</h3>
+<ul>
+  <li>Edit the user's prompt, or speak in the browser's own interface. The consent panel is drawn by the application, not by page content.</li>
+  <li>Modify Ferrite, the operating system, the model provider or the model weights.</li>
+  <li>Reach the user's real session during a dry run: it executes against synthetic data with no real network reachable.</li>
+</ul>
+
+<h2>What is trusted</h2>
+<div class="table-wrap"><table>
+<thead><tr><th>Input</th><th>Trust</th><th>Why</th></tr></thead>
+<tbody>
+<tr><td>Your typed request (and up to five earlier <em>user</em> messages)</td><td>Trusted</td><td>The only text that feeds the fingerprint, the sanitizer input and the dry-run driver.</td></tr>
+<tr><td>Page text, page digests, tab titles</td><td>Untrusted data</td><td>Delimited as data, sanitized and bounded before the agent sees it. Never reaches the prediction.</td></tr>
+<tr><td>Earlier agent answers and steps</td><td>Untrusted data</td><td>They may have quoted a poisoned page; persisting them into later prompts would let one page shape every future run in the chat.</td></tr>
+<tr><td>The model's predicted labels</td><td>Untrusted, filtered</td><td>A label that is not one of the seven closed capability names is dropped at the boundary.</td></tr>
+<tr><td>Password field values</td><td>Never read</td><td>They are not read into a page digest at all.</td></tr>
+</tbody></table></div>
+
+<h2>The vocabulary the evaluation uses</h2>
+<p>The evaluation describes every attack along closed axes, so two authors tag a case identically.</p>
+<dl class="defs">
+  <dt>Carrier vector</dt><dd>Where the payload rides. <em>Web content:</em> hidden element, off-screen text, HTML comment, alt text, meta content, CSS pseudo-element, visible text. <em>Tool output:</em> JSON field, text blob, error message, metadata.</dd>
+  <dt>Rhetorical technique</dt><dd>What the text argues: instruction override, context manipulation, social engineering, goal hijack.</dd>
+  <dt>Concealment</dt><dd>How it is hidden: plain, obfuscation, payload splitting.</dd>
+  <dt>Ground truth</dt><dd><em>Deviation</em> (a capability or origin the task did not authorize), <em>within-fingerprint origin shift</em>, <em>within-fingerprint data-only</em> (the irreducible residual), or <em>none</em> (benign).</dd>
+</dl>
+
+<h2>Out of scope, stated plainly</h2>
+<div class="callout bad">
+  <h4>Ferrite does not claim to stop these</h4>
+  <ul>
+    <li><strong>Attacks inside the prediction.</strong> The same capability, at the task's own site, with data-only abuse, looks identical to the task. This is the residual, reported as a floor and never dropped from the denominator.</li>
+    <li><strong>A model that takes the bait.</strong> Ferrite bounds what a compromised agent can <em>do</em>. It does not make the model more robust, and the evaluation says nothing about how often a real model is fooled.</li>
+    <li><strong>A user who approves everything.</strong> The consent gate is a human decision. With every flagged action approved, containment is much weaker; see the consent-policy sweep in <a href="{{ROOT}}docs/evaluation.html">Evaluation</a>.</li>
+    <li><strong>Open-ended tasks.</strong> Under a <code>task_open</code> scope every origin is admitted, so nothing distinguishes the attacker's destination.</li>
+    <li><strong>A compromised machine, provider or build.</strong> Those sit below the trust boundary this design assumes.</li>
+  </ul>
+</div>

@@ -39,15 +39,15 @@ small) corpus with no fabricated data anywhere.
 Read `docs/EVALUATION.md` §5 and §6 before drawing any conclusion from the
 eval numbers — in particular:
 
-- The live `ferrite-ui`/`ferrite-shell` app still runs on the pre-rebuild
-  agent path (`GeminiAgent`/`BrowserTool`/`ToolExecutor`), not the new
-  `ferrite-model`/`ferrite-engine`/`browser_loop` stack this rebuild built
-  and tested in isolation (`docs/TO-DO.md` T-224). The defense loop itself
-  (`ferrite-ipi`) is real and tested; what runs when you launch the app is
-  not yet wired to the new provider/engine layer.
-- The eval corpus has **29 cases**, not the ~360 the methodology's own power
-  calculation targets (`docs/TO-DO.md` T-227) — every confidence interval in
-  `docs/EVALUATION.md` is correspondingly wide.
+- The live `ferrite-ui`/`ferrite-shell` app constructs a real `ferrite-model`
+  provider at startup and drives the new `ferrite-engine`/`browser_loop`
+  stack (`docs/TO-DO.md` T-224, closed). A provider is connected from the
+  app's Settings drawer (provider, API key in the OS keyring, models), or from
+  the environment as before (`docs/DECISIONS.md` ADR-017).
+- The eval corpus is **938 cases** (`docs/EVALUATION.md` §8), up from the 29
+  the original run used. The agent in it is scripted, the cases are
+  self-authored and template-generated, and no second author exists, so the
+  intervals understate the uncertainty (`docs/TO-DO.md` T-227).
 - `ServoEngine` (the new, engine-agnostic path's Servo backend) does not yet
   complete a real page load in this environment (`docs/TO-DO.md` T-220),
   though the live app's separate, older Servo integration
@@ -59,6 +59,11 @@ commit that closed it); `docs/EVALUATION.md` is the full accounting,
 including a `docs/REBUILD_DIRECTIVE.md` §14 definition-of-done checklist
 scored item by item. Read those three for current state — not this section,
 once time has passed since it was written.
+
+## Site
+
+`site/` holds the marketing site and documentation (`python3 site/build.py`,
+see `site/README.md`).
 
 ## Workspace
 
@@ -198,7 +203,7 @@ requires.
 | `just doctor` | checklist: tools, build, env file, model tags, keys (never printed), Laya venv/checkpoint/server with a latency probe, disk. `--fix-hints` says how to fix each item |
 | `just laya-serve` | only the Laya server, in the foreground |
 | `just laya-verify` | sends one recorded browser step to the running server, prints its decision and latency |
-| `just probe-input` / `just probe-engine` / `just probe-profile` | drive a real headless Servo session against a built-in page and report what works: scrolling, clicks, typing, reload, two tabs; the page digest and `@ref` actions; cookies and storage surviving a restart (real Servo build only; on Linux run under `xvfb-run`) |
+| `just probe-input` / `just probe-engine` / `just probe-profile` / `just probe-web-api` | drive a real headless Servo session against a built-in page and report what works: scrolling, clicks, typing, reload, two tabs; the page digest and `@ref` actions; cookies and storage surviving a restart; the Web APIs benchmarks and frameworks assume, `window.crypto` first among them (real Servo build only; on Linux run under `xvfb-run`) |
 | `just crash-report` | after a crash (exit 139): prints the exception and the crashing thread's stack from the newest macOS crash report, for bug reports |
 | `just test-local` | tests for these scripts (no network; the Python ones skip unless `fastapi`, `uvicorn` and `laya` import) |
 

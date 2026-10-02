@@ -82,6 +82,7 @@ pub(crate) fn check(op: &str, selector: &str, v: &Value) -> Result<(), EngineErr
 mod tests {
     use super::*;
     use serde_json::json;
+    use std::io::Write as _;
 
     /// Every operation the Rust side can ask for must exist in the script.
     const OPS: &[&str] = &[
@@ -312,7 +313,7 @@ mod tests {
     fn run_select_in_node(options: &Value, wanted: &str) -> Option<Value> {
         const DRIVER: &str = r#"
 const vm = require('vm');
-const input = JSON.parse(process.argv[1]);
+const input = JSON.parse(require('fs').readFileSync(0, 'utf8'));
 const events = [];
 class Ev { constructor(type, init) { this.type = type; } }
 const select = {
@@ -350,18 +351,142 @@ process.stdout.write(JSON.stringify({
             "options": options,
             "script": build_script("select_option", &json!({"sel": "select", "value": wanted})),
         });
-        let out = std::process::Command::new("node")
+        // The payload carries the whole page script (~40 KB), past the ~32 KB
+        // Windows command-line limit, so it goes in on stdin, not as an argument.
+        let mut child = std::process::Command::new("node")
             .arg("-e")
             .arg(DRIVER)
-            .arg(payload.to_string())
-            .output()
+            .stdin(std::process::Stdio::piped())
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped())
+            .spawn()
             .expect("node runs");
+        child
+            .stdin
+            .take()
+            .expect("stdin is piped")
+            .write_all(payload.to_string().as_bytes())
+            .expect("payload reaches node");
+        let out = child.wait_with_output().expect("node finishes");
         assert!(
             out.status.success(),
             "node driver failed: {}",
             String::from_utf8_lossy(&out.stderr)
         );
         Some(serde_json::from_slice(&out.stdout).expect("driver prints JSON"))
+    }
+
+    /// Runs `op` against a fake `<input type=...>` in a bare node `vm` context,
+    /// and returns the script's JSON answer (and whether the value was set).
+    /// `None` when node is not installed. Same approach as
+    /// `run_select_in_node`: this pins one behavior of the page script, not DOM
+    /// behavior in general.
+    fn run_on_input_in_node(input_type: &str, op: &str, args: &Value) -> Option<Value> {
+        const DRIVER: &str = r#"
+const vm = require('vm');
+const input = JSON.parse(require('fs').readFileSync(0, 'utf8'));
+let value = '';
+const el = {
+  tagName: 'INPUT', type: input.type, disabled: false, isContentEditable: false,
+  get value() { return value; }, set value(v) { value = v; },
+  getAttribute: (n) => (n === 'type' ? input.type : null), hasAttribute: () => false,
+  closest: () => null, dispatchEvent() { return true; }, focus() {}, select() {}, scrollIntoView() {},
+  getBoundingClientRect: () => ({ top: 0, bottom: 0, left: 0, right: 0, width: 0, height: 0 }),
+};
+const doc = {
+  documentElement: { clientWidth: 0, clientHeight: 0 },
+  querySelector: () => el, querySelectorAll: () => [],
+};
+class Ev { constructor(type) { this.type = type; } }
+const sandbox = {
+  window: {
+    innerWidth: 0, innerHeight: 0, getComputedStyle: () => ({}),
+    // The page script sets values through the prototype setter (so frameworks
+    // that track the value see it); this one writes the fake element's value.
+    HTMLInputElement: { prototype: Object.defineProperty({}, 'value', { set(v) { value = v; }, get() { return value; }, configurable: true }) },
+    HTMLTextAreaElement: { prototype: {} },
+  },
+  document: doc, Event: Ev, Date, JSON, Math, Object, Array, String, parseInt,
+};
+const raw = vm.runInNewContext(input.script, sandbox);
+process.stdout.write(JSON.stringify({ result: JSON.parse(raw), value }));
+"#;
+        let node_ok = std::process::Command::new("node")
+            .arg("--version")
+            .output()
+            .map(|o| o.status.success())
+            .unwrap_or(false);
+        if !node_ok {
+            eprintln!("SKIPPED: `node` is not installed");
+            return None;
+        }
+        let payload = json!({ "type": input_type, "script": build_script(op, args) });
+        let mut child = std::process::Command::new("node")
+            .arg("-e")
+            .arg(DRIVER)
+            .stdin(std::process::Stdio::piped())
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped())
+            .spawn()
+            .expect("node runs");
+        child
+            .stdin
+            .take()
+            .expect("stdin is piped")
+            .write_all(payload.to_string().as_bytes())
+            .expect("payload reaches node");
+        let out = child.wait_with_output().expect("node finishes");
+        assert!(
+            out.status.success(),
+            "node driver failed: {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        Some(serde_json::from_slice(&out.stdout).expect("driver prints JSON"))
+    }
+
+    #[test]
+    fn typing_into_a_password_field_is_refused_and_nothing_is_typed() {
+        let Some(r) = run_on_input_in_node(
+            "password",
+            "type_text",
+            &json!({"sel": "input", "text": "hunter2"}),
+        ) else {
+            return;
+        };
+        assert_eq!(r["result"]["ok"], json!(false), "{r}");
+        assert_eq!(r["result"]["error"], json!("sensitive_field"), "{r}");
+        assert_eq!(
+            r["value"],
+            json!(""),
+            "the page must not receive the text: {r}"
+        );
+    }
+
+    #[test]
+    fn filling_a_form_with_a_password_field_in_it_is_refused_and_names_the_field() {
+        let Some(r) = run_on_input_in_node(
+            "password",
+            "fill_form",
+            &json!({"fields": [["input", "hunter2"]]}),
+        ) else {
+            return;
+        };
+        assert_eq!(r["result"]["error"], json!("sensitive_field"), "{r}");
+        assert_eq!(r["result"]["index"], json!(0), "{r}");
+        assert_eq!(r["value"], json!(""), "{r}");
+    }
+
+    #[test]
+    fn typing_into_an_ordinary_text_field_is_still_allowed() {
+        let Some(r) = run_on_input_in_node(
+            "text",
+            "type_text",
+            &json!({"sel": "input", "text": "hello"}),
+        ) else {
+            return;
+        };
+        assert_ne!(r["result"]["error"], json!("sensitive_field"), "{r}");
+        assert_eq!(r["value"], json!("hello"), "{r}");
     }
 
     #[test]

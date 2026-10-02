@@ -42,7 +42,9 @@ fn guarded(guard: Option<RuntimeGuard>) -> FerriteBrowser {
     }
 }
 
-fn step(state: &mut FerriteBrowser, action: AgentAction) {
+/// One step as the run delivers it: an action outside the prediction pauses
+/// the run on a question instead of running or blocking.
+fn step_raw(state: &mut FerriteBrowser, action: AgentAction) {
     let _ = update(
         state,
         FerriteBrowserMessage::AgentStepReady {
@@ -50,6 +52,15 @@ fn step(state: &mut FerriteBrowser, action: AgentAction) {
             action: Ok(action),
         },
     );
+}
+
+/// One step, answering *Don't allow* if the run asks: the shape every test
+/// below that is about blocking wants.
+fn step(state: &mut FerriteBrowser, action: AgentAction) {
+    step_raw(state, action);
+    if state.pending_runtime.is_some() {
+        let _ = update(state, FerriteBrowserMessage::RuntimeDeny);
+    }
 }
 
 fn last_observation(state: &FerriteBrowser) -> String {
@@ -305,4 +316,117 @@ async fn consent_approvals_reach_the_guard_and_unapproved_items_stay_blocked() {
             Some("https://news.example")
         )
         .allows());
+}
+
+// ── Asking instead of silently blocking ─────────────────────────────────────
+
+fn click_task() -> ExpectedFingerprint {
+    let scope = || OriginScope::exact([origin("https://news.example")]).expect("non-empty");
+    ExpectedFingerprint::from_capabilities(
+        ExpectedCapabilitySet::new([ExpectedCapability::new(Capability::WebNavigate, scope())])
+            .expect("distinct"),
+    )
+}
+
+#[tokio::test]
+async fn an_action_outside_the_prediction_pauses_the_run_and_nothing_runs() {
+    let mut state = guarded(Some(RuntimeGuard::new(click_task())));
+    step_raw(
+        &mut state,
+        AgentAction::Click {
+            selector: "@4".into(),
+        },
+    );
+    let pending = state.pending_runtime.as_ref().expect("the person is asked");
+    assert!(
+        pending.summary().starts_with("Click: "),
+        "{}",
+        pending.summary()
+    );
+    // Nothing ran and nothing was logged as a step: the run is waiting.
+    assert!(state.agent_log.is_empty());
+    assert_eq!(state.live_loop.as_ref().expect("loop kept").guard_blocks, 0);
+}
+
+#[tokio::test]
+async fn dont_allow_blocks_it_and_the_agent_is_told_only_the_fixed_sentence() {
+    let mut state = guarded(Some(RuntimeGuard::new(click_task())));
+    step_raw(
+        &mut state,
+        AgentAction::Click {
+            selector: "@4".into(),
+        },
+    );
+    let _ = update(&mut state, FerriteBrowserMessage::RuntimeDeny);
+    assert!(state.pending_runtime.is_none());
+    assert!(last_observation(&state).contains(BLOCKED_OBSERVATION));
+    assert!(last_step_entry(&state).0, "recorded as blocked");
+}
+
+#[tokio::test]
+async fn allow_once_runs_exactly_that_action_and_the_next_one_asks_again() {
+    let mut state = guarded(Some(RuntimeGuard::new(click_task())));
+    let click = || AgentAction::Click {
+        selector: "@4".into(),
+    };
+    step_raw(&mut state, click());
+    let _ = update(&mut state, FerriteBrowserMessage::RuntimeAllowOnce);
+    assert!(state.pending_runtime.is_none());
+    assert!(!last_step_entry(&state).0, "it was not blocked");
+    // The same kind of action again is a new question, not a standing yes.
+    step_raw(&mut state, click());
+    assert!(state.pending_runtime.is_some());
+}
+
+#[tokio::test]
+async fn allow_for_this_task_approves_that_kind_of_action_from_then_on() {
+    let mut state = guarded(Some(RuntimeGuard::new(click_task())));
+    let click = |n: u32| AgentAction::Click {
+        selector: format!("@{n}"),
+    };
+    step_raw(&mut state, click(4));
+    let _ = update(&mut state, FerriteBrowserMessage::RuntimeAllowTask);
+    assert!(!last_step_entry(&state).0);
+    step_raw(&mut state, click(5));
+    assert!(state.pending_runtime.is_none(), "no second question");
+    assert!(!last_step_entry(&state).0);
+    // What was approved is a click here; another site is still outside it.
+    step_raw(
+        &mut state,
+        AgentAction::Navigate {
+            url: "https://attacker.example/".into(),
+        },
+    );
+    assert!(state.pending_runtime.is_some(), "a new site is asked about");
+}
+
+#[tokio::test]
+async fn js_execute_is_always_put_to_the_person_never_waved_through() {
+    let open = || OriginScope::task_open("user said browse anywhere").expect("rationale");
+    let wide = ExpectedFingerprint::from_capabilities(
+        ExpectedCapabilitySet::new([ExpectedCapability::new(Capability::WebRead, open())])
+            .expect("distinct"),
+    );
+    let mut state = guarded(Some(RuntimeGuard::new(wide)));
+    step_raw(
+        &mut state,
+        AgentAction::JsExecute {
+            script: "document.title".into(),
+        },
+    );
+    assert!(state.pending_runtime.is_some());
+}
+
+#[tokio::test]
+async fn stopping_the_task_drops_the_question() {
+    let mut state = guarded(Some(RuntimeGuard::new(click_task())));
+    step_raw(
+        &mut state,
+        AgentAction::Click {
+            selector: "@4".into(),
+        },
+    );
+    let _ = update(&mut state, FerriteBrowserMessage::StopAgent);
+    assert!(state.pending_runtime.is_none());
+    assert!(state.live_loop.is_none());
 }
