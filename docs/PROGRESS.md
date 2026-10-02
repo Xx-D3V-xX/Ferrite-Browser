@@ -4862,3 +4862,7 @@ The first macOS run of the Settings branch failed one `ferrite-ui` test (`openin
 ## 2026-10-01 — coordinator — Answers are rendered, not dumped (T-273)
 
 **Reported by the owner (screenshot):** an answer full of literal `**` and `-` markers and a raw page-text step. **Done:** `markdown.rs` (parser + renderer, 18 tests), page-read steps summarised, links safe by construction. 418 ui tests pass, clippy clean; checked visually in the real app under a software renderer with a seeded answer (headings, nested bullets, table, quote, JSON, inline code, a phishing-style link). Not tested against real model output beyond the owner's screenshot text.
+
+## 2026-10-02 — coordinator — A log file, and a quit that always quits (T-274)
+
+The owner's .app crashes, hangs on quit and ignores zoom on some pages, and a Finder launch leaves no log. Added the log file (`logging.rs`), a 3 s quit watchdog and an explicit process exit, and a UI stall note (`lifecycle.rs`). The cause of the crashes is still unknown: waiting for the owner's `ferrite.log` and, for a hang, a macOS `sample`.
