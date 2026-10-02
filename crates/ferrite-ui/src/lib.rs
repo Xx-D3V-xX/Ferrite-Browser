@@ -221,6 +221,7 @@ mod agent_run;
 mod chrome;
 mod icons;
 mod identity;
+mod lifecycle;
 mod markdown;
 mod page_input;
 mod pages;
@@ -2263,6 +2264,9 @@ pub fn update(
             state.trace_expanded = (state.trace_expanded != Some(seq)).then_some(seq);
         }
         FerriteBrowserMessage::WindowCloseRequested => {
+            // If the engine is wedged, shutdown can wait on it forever; the
+            // process ends after a few seconds whatever happens.
+            lifecycle::exit_soon();
             // Every session holds a handle to the engine; Servo writes the
             // profile (cookies, HSTS, credentials) when the last one goes.
             state.servo_sessions.clear();
@@ -2733,6 +2737,7 @@ pub fn update(
         // ── Agent bridge ──────────────────────────────────────────────────────
         FerriteBrowserMessage::ServoReady => {}
         FerriteBrowserMessage::ServoFrame => {
+            lifecycle::heartbeat();
             state.progress_offset = (state.progress_offset + 0.02) % 1.0;
 
             // Forward this tick's pointer position and scroll to the engine:
@@ -6411,6 +6416,7 @@ fn window_settings() -> window::Settings {
 }
 
 pub fn launch() -> iced::Result {
+    lifecycle::start_stall_note();
     iced::application(window_title, update, view)
         .window(window_settings())
         .window_size(Size::new(1280.0, 800.0))

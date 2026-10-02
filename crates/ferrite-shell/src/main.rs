@@ -1,16 +1,32 @@
 use ferrite_servo::session::HeadlessServoSession;
 use ferrite_servo::shell::ServoShell;
 
+mod logging;
+
 fn main() {
+    // First, before anything can print or panic: a run with no terminal gets
+    // a log file (see `logging`).
+    let _log = logging::init();
     let arg = std::env::args().nth(1).unwrap_or_default();
     match arg.as_str() {
-        "ui" => ferrite_ui::launch().expect("Ferrite UI exited with error"),
+        "ui" => run_ui(),
         "window" => ServoShell::new().run(),
         "jstest" => run_js_compat_test(),
         "agent-smoke" => run_agent_smoke(),
         "smoke" => run_smoke_test(),
-        _ => ferrite_ui::launch().expect("Ferrite UI exited with error"),
+        _ => run_ui(),
     }
+}
+
+/// Runs the browser, then ends the process outright. Servo's own threads can
+/// be wedged by a page that crashed one of them, and waiting for them at exit
+/// is what turned a quit into a force quit.
+fn run_ui() {
+    let result = ferrite_ui::launch();
+    if let Err(e) = &result {
+        eprintln!("[ferrite] the UI exited with an error: {e}");
+    }
+    std::process::exit(i32::from(result.is_err()));
 }
 
 fn run_js_compat_test() {
