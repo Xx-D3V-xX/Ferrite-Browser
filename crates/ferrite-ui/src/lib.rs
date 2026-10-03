@@ -2424,6 +2424,12 @@ pub fn update(
         }
         FerriteBrowserMessage::ScaleFactorReady(factor) => {
             state.scale_factor = factor;
+            // Tell the engine, or pages lay out as if the screen were `factor`
+            // times wider than it is (see `ferrite_servo::session::set_display_scale`).
+            ferrite_servo::session::set_display_scale(factor);
+            for session in state.servo_sessions.values() {
+                session.apply_display_scale();
+            }
         }
         // ── Agent sidebar ─────────────────────────────────────────────────────
         FerriteBrowserMessage::ToggleAgentSidebar => {

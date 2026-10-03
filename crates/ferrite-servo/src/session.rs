@@ -278,6 +278,28 @@ pub fn audit_guard_decision(primitive: &str, origin: Option<&str>, allowed: bool
 #[cfg(feature = "servo")]
 const SVG_COMPAT_JS: &str = include_str!("svg_compat.js");
 
+/// The display's scale factor (physical pixels per CSS pixel at 100% zoom),
+/// as `f32` bits. Pages are laid out in CSS pixels: a Retina display must tell
+/// the engine its scale, or every page is laid out as if the screen were twice
+/// as wide as it looks (tiny text, desktop layouts at 2560 px, and Google
+/// results pinned to the left edge).
+static DISPLAY_SCALE_BITS: std::sync::atomic::AtomicU32 =
+    std::sync::atomic::AtomicU32::new(0x3f80_0000); // 1.0
+
+/// Records the display's scale; sessions apply it when created and when
+/// [`HeadlessServoSession::apply_display_scale`] is called.
+pub fn set_display_scale(scale: f32) {
+    if scale.is_finite() && scale >= 0.5 {
+        DISPLAY_SCALE_BITS.store(scale.to_bits(), std::sync::atomic::Ordering::Relaxed);
+    }
+}
+
+/// The display scale last recorded (1.0 until the UI knows it).
+#[must_use]
+pub fn display_scale() -> f32 {
+    f32::from_bits(DISPLAY_SCALE_BITS.load(std::sync::atomic::Ordering::Relaxed))
+}
+
 /// A process-wide counter for frame numbers, so two tabs never share one.
 #[cfg(feature = "servo")]
 pub(crate) fn next_frame_seq() -> u64 {
@@ -478,6 +500,63 @@ mod inner {
         SERVO_ENGINE.with(|cell| drop(cell.borrow_mut().take()));
     }
 
+    /// Which kind of context pages are rendered with.
+    #[derive(Clone, Copy, PartialEq, Eq, Debug)]
+    enum Renderer {
+        /// The GPU when it passes its self-test, else the CPU.
+        Auto,
+        Gpu,
+        Cpu,
+    }
+
+    /// `FERRITE_RENDERER=gpu|cpu|auto` (default auto). On macOS the CPU
+    /// renderer is Apple's generic software OpenGL, which is what made every
+    /// page slow; elsewhere auto keeps the CPU renderer until the GPU path has
+    /// been run on that platform.
+    fn renderer_choice() -> Renderer {
+        match std::env::var("FERRITE_RENDERER")
+            .unwrap_or_default()
+            .to_ascii_lowercase()
+            .as_str()
+        {
+            "gpu" | "hardware" => Renderer::Gpu,
+            "cpu" | "software" => Renderer::Cpu,
+            _ => Renderer::Auto,
+        }
+    }
+
+    /// Makes the rendering context for one tab, preferring the GPU where it is
+    /// trusted, and saying once, in the log, what it chose and why.
+    fn make_rendering_context(size: PhysicalSize<u32>) -> Result<Rc<dyn RenderingContext>, String> {
+        static REPORTED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+        let report = |line: String| {
+            if !REPORTED.swap(true, std::sync::atomic::Ordering::Relaxed) {
+                eprintln!("[ferrite-render] {line}");
+            }
+        };
+        let try_gpu = match renderer_choice() {
+            Renderer::Gpu => true,
+            Renderer::Cpu => false,
+            Renderer::Auto => cfg!(target_os = "macos"),
+        };
+        if try_gpu {
+            match crate::gpu_context::HardwareRenderingContext::new(size) {
+                Ok(gpu) => {
+                    report(format!("GPU rendering ({})", gpu.renderer()));
+                    return Ok(Rc::new(gpu));
+                }
+                Err(e) => report(format!(
+                    "the GPU path did not pass its self-test ({e:?}); using the CPU renderer"
+                )),
+            }
+        } else {
+            report("CPU rendering (FERRITE_RENDERER=gpu to try the GPU)".to_string());
+        }
+        SoftwareRenderingContext::new(size)
+            .map(|cpu| Rc::new(cpu) as Rc<dyn RenderingContext>)
+            .map_err(|e| format!("SoftwareRenderingContext: {e:?}"))
+    }
+
     /// The page content every tab is given: the SVG compatibility script.
     fn user_content_manager(servo: &Servo) -> Rc<servo::UserContentManager> {
         USER_CONTENT.with(|cell| {
@@ -517,6 +596,7 @@ mod inner {
                 // is a compile-time feature of the `servo` crate — see the
                 // workspace Cargo.toml — its `dom_crypto_subtle_enabled`
                 // preference is already on.)
+                let cores = std::thread::available_parallelism().map_or(4, |n| n.get());
                 let mut prefs = servo::Preferences {
                     dom_indexeddb_enabled: true,
                     dom_cookiestore_enabled: true,
@@ -559,6 +639,14 @@ mod inner {
                     dom_sanitizer_enabled: true,
                     dom_visual_viewport_enabled: true,
                     dom_exec_command_enabled: true,
+                    // Style and layout fan out over this many threads; the
+                    // engine's default is 3 whatever the machine (its own
+                    // source calls that a TODO). WebRender's raster pool and
+                    // the worker pools are capped the same way, by the cores
+                    // there are.
+                    layout_threads: cores.clamp(3, 8) as i64,
+                    thread_pool_webrender_workers_max: cores.clamp(4, 8) as u64,
+                    thread_pool_workers_max: cores.clamp(4, 8) as u64,
                     ..servo::Preferences::default()
                 };
                 // Some sites (Google's sign-in among them) decide whether a
@@ -1031,7 +1119,7 @@ mod inner {
     pub struct HeadlessServoSession {
         servo: servo::Servo,
         webview: servo::WebView,
-        rendering_context: Rc<SoftwareRenderingContext>,
+        rendering_context: Rc<dyn RenderingContext>,
         width: u32,
         height: u32,
         /// Cached last frame as raw RGBA bytes (width × height × 4).
@@ -1136,11 +1224,7 @@ mod inner {
         fn assemble(
             width: u32,
             height: u32,
-            make: impl FnOnce(
-                &Servo,
-                Rc<SoftwareRenderingContext>,
-                Rc<HeadlessDelegate>,
-            ) -> servo::WebView,
+            make: impl FnOnce(&Servo, Rc<dyn RenderingContext>, Rc<HeadlessDelegate>) -> servo::WebView,
         ) -> Result<Self, String> {
             // ── rustls crypto provider ─────────────────────────────────────
             let _ = aws_lc_rs::default_provider().install_default();
@@ -1171,10 +1255,7 @@ mod inner {
             > = Rc::default();
 
             // ── Rendering context ──────────────────────────────────────────
-            let rendering_context = Rc::new(
-                SoftwareRenderingContext::new(PhysicalSize { width, height })
-                    .map_err(|e| format!("SoftwareRenderingContext: {:?}", e))?,
-            );
+            let rendering_context = make_rendering_context(PhysicalSize { width, height })?;
             rendering_context
                 .make_current()
                 .map_err(|e| format!("make_current: {:?}", e))?;
@@ -1203,6 +1284,7 @@ mod inner {
             });
             let webview = make(&servo, rendering_context.clone(), delegate);
 
+            webview.set_hidpi_scale_factor(euclid::Scale::new(super::display_scale()));
             webview.resize(PhysicalSize { width, height });
             servo.spin_event_loop();
 
@@ -1476,6 +1558,12 @@ mod inner {
         /// Every console message (any level) since the last call, oldest first.
         pub fn take_console_entries(&mut self) -> Vec<crate::diag::ConsoleEntry> {
             self.shared_console_log.borrow_mut().drain(..).collect()
+        }
+
+        /// Tells the engine the display's current scale (see [`set_display_scale`]).
+        pub fn apply_display_scale(&self) {
+            self.webview
+                .set_hidpi_scale_factor(euclid::Scale::new(super::display_scale()));
         }
 
         /// What the page is waiting on a person for, if anything.
@@ -1977,6 +2065,8 @@ impl HeadlessServoSession {
     pub fn take_net_events(&mut self) -> Vec<crate::diag::NetEvent> {
         Vec::new()
     }
+
+    pub fn apply_display_scale(&self) {}
 
     pub fn page_control(&self) -> Option<crate::diag::PageControl> {
         None

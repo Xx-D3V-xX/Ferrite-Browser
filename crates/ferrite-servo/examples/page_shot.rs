@@ -20,6 +20,10 @@ fn main() {
     let out = args.next().unwrap_or_else(|| "page_shot.png".into());
     let width: u32 = args.next().and_then(|s| s.parse().ok()).unwrap_or(1280);
     let height: u32 = args.next().and_then(|s| s.parse().ok()).unwrap_or(800);
+    // The display scale: 2 renders as a Retina screen would (a 1280-pixel
+    // frame is then a 640 CSS-pixel viewport).
+    let scale: f32 = args.next().and_then(|s| s.parse().ok()).unwrap_or(1.0);
+    ferrite_servo::session::set_display_scale(scale);
 
     let mut session = HeadlessServoSession::new(width, height).expect("engine starts");
     session.set_active(true);
@@ -38,6 +42,10 @@ fn main() {
 
     println!("URL     {}", session.current_url());
     println!("TITLE   {:?}", session.page_title());
+    println!(
+        "VIEWPORT {:?}",
+        session.execute_js("innerWidth + 'x' + innerHeight + ' @' + devicePixelRatio")
+    );
     match complete_at {
         Some(t) => println!("LOADED  {} ms (load event)", t.as_millis()),
         None => println!("LOADED  never within {wait_ms} ms"),
@@ -68,4 +76,8 @@ fn main() {
         }
         None => println!("FRAME   none rendered"),
     }
+    // Close cleanly so the engine writes its profile (cookies, HTTP cache).
+    #[allow(clippy::drop_non_drop)]
+    drop(session);
+    ferrite_servo::session::shutdown_engine();
 }

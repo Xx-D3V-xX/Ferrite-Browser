@@ -9,7 +9,7 @@ publish = false
 # Enable Servo engine integration:
 #   cargo build -p ferrite-servo --features servo
 #   cargo build -p ferrite-shell --features ferrite-servo/servo
-servo = ["dep:servo"]
+servo = ["dep:servo", "dep:euclid", "dep:surfman", "dep:gleam", "dep:glow"]
 
 [dependencies]
 ferrite-audit-log = { workspace = true }
@@ -26,13 +26,20 @@ url = { workspace = true }
 # Optional — only resolved when the `servo` feature is enabled.
 # The crates.io package `servo`; Rust imports use `use servo::...`.
 servo = { workspace = true, optional = true }
+# The unit-typed `Scale` the engine's HiDPI API takes (same version the engine uses).
+euclid = { version = "0.22", optional = true }
+# The GPU rendering context (`src/gpu_context.rs`) talks to the same GL stack
+# the engine does; versions match the engine's (see Cargo.lock).
+surfman = { version = "0.13", features = ["chains"], optional = true }
+gleam = { version = "0.15", optional = true }
+glow = { version = "0.17", optional = true }
 
 # cargo-machete can't see the `use servo::...` imports inside
 # #[cfg(feature = "servo")] blocks without building with that feature
 # enabled (it does static analysis without --with-metadata by default) —
 # false-positive "unused dependency" without this.
 [package.metadata.cargo-machete]
-ignored = ["servo"]
+ignored = ["servo", "euclid", "surfman", "gleam", "glow"]
 
 [dev-dependencies]
 # `examples/page_shot.rs` writes a PNG of what the engine rendered. Already in
