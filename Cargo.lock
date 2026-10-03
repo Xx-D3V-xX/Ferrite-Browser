@@ -2597,6 +2597,7 @@ version = "0.1.0"
 dependencies = [
  "ferrite-audit-log",
  "log",
+ "png 0.17.16",
  "raw-window-handle",
  "rustls",
  "servo",

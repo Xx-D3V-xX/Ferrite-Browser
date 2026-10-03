@@ -151,7 +151,10 @@ fn a_bare_local_address_gets_http_and_a_bare_site_gets_https() {
     assert_eq!(resolve_url("localhost"), "http://localhost");
     assert_eq!(resolve_url("example.org/a"), "https://example.org/a");
     assert_eq!(resolve_url("https://example.org"), "https://example.org");
-    assert!(resolve_url("rust async").contains("duckduckgo"));
+    assert_eq!(
+        resolve_url("rust async"),
+        "https://www.google.com/search?q=rust%20async"
+    );
 }
 
 #[test]

@@ -640,6 +640,148 @@ mod inner {
     /// Latest favicon (width, height, RGBA8) shared between Servo's delegate and the session.
     type SharedFavicon = Rc<std::cell::RefCell<Option<(u32, u32, Vec<u8>)>>>;
 
+    /// What the engine is waiting on a person for, with a plain-data view of
+    /// it for the UI.
+    type SharedControl =
+        Rc<std::cell::RefCell<Option<(crate::diag::PageControl, servo::EmbedderControl)>>>;
+
+    /// `#rrggbb` of an engine colour.
+    fn hex_of(c: servo::RgbColor) -> String {
+        format!("#{:02x}{:02x}{:02x}", c.red, c.green, c.blue)
+    }
+
+    fn rect_of(r: servo::DeviceIntRect) -> crate::diag::DeviceRect {
+        crate::diag::DeviceRect {
+            x: r.min.x as f32,
+            y: r.min.y as f32,
+            width: r.width() as f32,
+            height: r.height() as f32,
+        }
+    }
+
+    /// The UI-facing description of an engine control, or `None` for one that
+    /// needs no UI (an input-method request).
+    fn describe_control(control: &servo::EmbedderControl) -> Option<crate::diag::PageControl> {
+        use crate::diag::{DialogKind, MenuItemView, PageControl, SelectOptionView};
+        Some(match control {
+            servo::EmbedderControl::SelectElement(select) => {
+                let chosen = select.selected_options();
+                let mut options = Vec::new();
+                for entry in select.options() {
+                    match entry {
+                        servo::SelectElementOptionOrOptgroup::Option(o) => {
+                            options.push(SelectOptionView {
+                                index: o.id,
+                                label: o.label.clone(),
+                                disabled: o.is_disabled,
+                                selected: chosen.contains(&o.id),
+                                group: None,
+                            });
+                        }
+                        servo::SelectElementOptionOrOptgroup::Optgroup {
+                            label,
+                            options: group,
+                        } => {
+                            for o in group {
+                                options.push(SelectOptionView {
+                                    index: o.id,
+                                    label: o.label.clone(),
+                                    disabled: o.is_disabled,
+                                    selected: chosen.contains(&o.id),
+                                    group: Some(label.clone()),
+                                });
+                            }
+                        }
+                    }
+                }
+                PageControl::Select {
+                    options,
+                    multiple: select.allow_select_multiple(),
+                    anchor: rect_of(select.position()),
+                }
+            }
+            servo::EmbedderControl::SimpleDialog(dialog) => match dialog {
+                servo::SimpleDialog::Alert(a) => PageControl::Dialog {
+                    kind: DialogKind::Alert,
+                    message: a.message().to_string(),
+                    default: String::new(),
+                },
+                servo::SimpleDialog::Confirm(c) => PageControl::Dialog {
+                    kind: DialogKind::Confirm,
+                    message: c.message().to_string(),
+                    default: String::new(),
+                },
+                servo::SimpleDialog::Prompt(p) => PageControl::Dialog {
+                    kind: DialogKind::Prompt,
+                    message: p.message().to_string(),
+                    default: p.current_value().to_string(),
+                },
+            },
+            servo::EmbedderControl::FilePicker(f) => PageControl::File {
+                multiple: f.allow_select_multiple(),
+                accept: f.filter_patterns().iter().map(|p| p.0.clone()).collect(),
+            },
+            servo::EmbedderControl::ColorPicker(c) => PageControl::Color {
+                current: c
+                    .current_color()
+                    .map_or_else(|| "#000000".to_string(), hex_of),
+                anchor: rect_of(c.position()),
+            },
+            servo::EmbedderControl::ContextMenu(m) => {
+                let mut next = 0usize;
+                let items = m
+                    .items()
+                    .iter()
+                    .map(|item| match item {
+                        servo::ContextMenuItem::Item { label, enabled, .. } => {
+                            let index = next;
+                            next += 1;
+                            MenuItemView {
+                                index: Some(index),
+                                label: label.clone(),
+                                enabled: *enabled,
+                            }
+                        }
+                        servo::ContextMenuItem::Separator => MenuItemView {
+                            index: None,
+                            label: String::new(),
+                            enabled: false,
+                        },
+                    })
+                    .collect();
+                PageControl::Menu {
+                    items,
+                    anchor: rect_of(m.position()),
+                }
+            }
+            servo::EmbedderControl::InputMethod(_) => return None,
+        })
+    }
+
+    fn cursor_of(cursor: servo::Cursor) -> crate::diag::PageCursor {
+        use crate::diag::PageCursor as C;
+        use servo::Cursor as S;
+        match cursor {
+            S::None => C::Hidden,
+            S::Pointer | S::Alias => C::Pointer,
+            S::Text | S::VerticalText => C::Text,
+            S::Crosshair | S::Cell => C::Crosshair,
+            S::Grab => C::Grab,
+            S::Grabbing => C::Grabbing,
+            S::Move | S::AllScroll => C::Move,
+            S::NotAllowed | S::NoDrop => C::NotAllowed,
+            S::Wait | S::Progress => C::Wait,
+            S::Help => C::Help,
+            S::ZoomIn => C::ZoomIn,
+            S::ZoomOut => C::ZoomOut,
+            S::EResize | S::WResize | S::EwResize | S::ColResize => C::ResizeHorizontal,
+            S::NResize | S::SResize | S::NsResize | S::RowResize => C::ResizeVertical,
+            S::NeResize | S::SwResize | S::NeswResize => C::ResizeDiagonalUp,
+            S::NwResize | S::SeResize | S::NwseResize => C::ResizeDiagonalDown,
+            S::Default | S::ContextMenu | S::Copy => C::Default,
+        }
+    }
+
     struct HeadlessServoDelegate;
     impl ServoDelegate for HeadlessServoDelegate {}
 
@@ -675,6 +817,16 @@ mod inner {
         /// converted from whatever `servo::PixelFormat` the page's icon
         /// decoded to.
         favicon: SharedFavicon,
+        /// Every console message, any level (the DevTools-style console).
+        console_log: Rc<std::cell::RefCell<std::collections::VecDeque<crate::diag::ConsoleEntry>>>,
+        /// Every request the engine announced for this tab.
+        net_log: Rc<std::cell::RefCell<std::collections::VecDeque<crate::diag::NetEvent>>>,
+        /// The one thing the page is waiting on a person for.
+        control: SharedControl,
+        /// The pointer the page asked for.
+        cursor: Rc<std::cell::Cell<crate::diag::PageCursor>>,
+        /// Set when the page's script thread or process died.
+        crash: Rc<std::cell::RefCell<Option<crate::diag::CrashNote>>>,
         /// Set when the engine says it has a new frame; cleared when the
         /// session has read that frame back. Reading pixels is by far the most
         /// expensive thing a tick does, so an unchanged page costs nothing.
@@ -693,6 +845,46 @@ mod inner {
                 request.feature()
             );
             request.deny();
+        }
+
+        /// A `<select>`, an `alert()`/`confirm()`/`prompt()`, a file or colour
+        /// picker or a context menu: kept for the UI to show. A newer one
+        /// replaces (and so dismisses) an older one.
+        fn show_embedder_control(&self, _webview: servo::WebView, control: servo::EmbedderControl) {
+            match describe_control(&control) {
+                Some(view) => *self.control.borrow_mut() = Some((view, control)),
+                None => drop(control),
+            }
+        }
+
+        fn hide_embedder_control(&self, _webview: servo::WebView, id: servo::EmbedderControlId) {
+            let mut slot = self.control.borrow_mut();
+            if slot.as_ref().is_some_and(|(_, c)| c.id() == id) {
+                *slot = None;
+            }
+        }
+
+        fn notify_cursor_changed(&self, _webview: servo::WebView, cursor: servo::Cursor) {
+            self.cursor.set(cursor_of(cursor));
+        }
+
+        /// A page's script thread panicked. The page stops answering; say so
+        /// instead of leaving it looking merely slow.
+        fn notify_crashed(
+            &self,
+            _webview: servo::WebView,
+            reason: String,
+            backtrace: Option<String>,
+        ) {
+            eprintln!("[ferrite-engine] a page crashed: {reason}");
+            if let Some(bt) = &backtrace {
+                eprintln!("{bt}");
+            }
+            *self.crash.borrow_mut() = Some(crate::diag::CrashNote {
+                at_ms: crate::diag::now_ms(),
+                reason,
+                backtrace,
+            });
         }
 
         fn notify_new_frame_ready(&self, webview: servo::WebView) {
@@ -754,11 +946,29 @@ mod inner {
             level: servo::ConsoleLogLevel,
             message: String,
         ) {
-            // Only capture error-level messages to keep the list focused on
-            // actionable JS failures.
-            if matches!(level, servo::ConsoleLogLevel::Error) {
-                self.console_errors.borrow_mut().push(message);
+            use crate::diag::{push_bounded, ConsoleEntry, ConsoleLevel};
+            let mapped = match level {
+                servo::ConsoleLogLevel::Debug | servo::ConsoleLogLevel::Trace => {
+                    ConsoleLevel::Debug
+                }
+                servo::ConsoleLogLevel::Log | servo::ConsoleLogLevel::Dir => ConsoleLevel::Log,
+                servo::ConsoleLogLevel::Info => ConsoleLevel::Info,
+                servo::ConsoleLogLevel::Warn => ConsoleLevel::Warn,
+                servo::ConsoleLogLevel::Error => ConsoleLevel::Error,
+            };
+            // The error list the app has always printed stays errors only.
+            if mapped == ConsoleLevel::Error {
+                self.console_errors.borrow_mut().push(message.clone());
             }
+            push_bounded(
+                &mut self.console_log.borrow_mut(),
+                ConsoleEntry {
+                    at_ms: crate::diag::now_ms(),
+                    level: mapped,
+                    source: crate::diag::source_of(&message),
+                    message,
+                },
+            );
         }
 
         /// A page asked for a new WebView (`window.open`, `target="_blank"`,
@@ -784,6 +994,16 @@ mod inner {
 
         fn load_web_resource(&self, _webview: servo::WebView, load: servo::WebResourceLoad) {
             let url = load.request().url.to_string();
+            crate::diag::push_bounded(
+                &mut self.net_log.borrow_mut(),
+                crate::diag::NetEvent {
+                    at_ms: crate::diag::now_ms(),
+                    method: load.request().method.to_string(),
+                    url: url.chars().take(2000).collect(),
+                    kind: format!("{:?}", load.request().destination),
+                    is_main_frame: load.request().is_for_main_frame,
+                },
+            );
             if let Err(e) = self.audit_log.borrow_mut().append(
                 AuditEventKind::CapabilityGranted,
                 uuid::Uuid::new_v4(),
@@ -845,6 +1065,14 @@ mod inner {
         shared_console_errors: Rc<std::cell::RefCell<Vec<String>>>,
         /// Shared favicon cell — written by `HeadlessDelegate`, read in `sync_and_read()`.
         shared_favicon: SharedFavicon,
+        shared_control: SharedControl,
+        shared_cursor: Rc<std::cell::Cell<crate::diag::PageCursor>>,
+        shared_crash: Rc<std::cell::RefCell<Option<crate::diag::CrashNote>>>,
+        /// Console messages of every level, drained by `take_console_entries`.
+        shared_console_log:
+            Rc<std::cell::RefCell<std::collections::VecDeque<crate::diag::ConsoleEntry>>>,
+        /// Requests made, drained by `take_net_events`.
+        shared_net_log: Rc<std::cell::RefCell<std::collections::VecDeque<crate::diag::NetEvent>>>,
         /// Most recently synced favicon (updated in `sync_and_read()`).
         last_favicon: Option<(u32, u32, Vec<u8>)>,
     }
@@ -931,6 +1159,16 @@ mod inner {
                 Rc::new(std::cell::RefCell::new(Vec::new()));
             let shared_favicon: SharedFavicon = Rc::new(std::cell::RefCell::new(None));
             let frame_ready = Rc::new(std::cell::Cell::new(true));
+            let shared_control: SharedControl = Rc::default();
+            let shared_cursor: Rc<std::cell::Cell<crate::diag::PageCursor>> = Rc::default();
+            let shared_crash: Rc<std::cell::RefCell<Option<crate::diag::CrashNote>>> =
+                Rc::default();
+            let shared_console_log: Rc<
+                std::cell::RefCell<std::collections::VecDeque<crate::diag::ConsoleEntry>>,
+            > = Rc::default();
+            let shared_net_log: Rc<
+                std::cell::RefCell<std::collections::VecDeque<crate::diag::NetEvent>>,
+            > = Rc::default();
 
             // ── Rendering context ──────────────────────────────────────────
             let rendering_context = Rc::new(
@@ -956,6 +1194,11 @@ mod inner {
                 page_title: shared_page_title.clone(),
                 console_errors: shared_console_errors.clone(),
                 favicon: shared_favicon.clone(),
+                control: shared_control.clone(),
+                cursor: shared_cursor.clone(),
+                crash: shared_crash.clone(),
+                console_log: shared_console_log.clone(),
+                net_log: shared_net_log.clone(),
                 frame_ready: frame_ready.clone(),
             });
             let webview = make(&servo, rendering_context.clone(), delegate);
@@ -982,6 +1225,11 @@ mod inner {
                 last_page_title: None,
                 shared_console_errors,
                 shared_favicon,
+                shared_control,
+                shared_cursor,
+                shared_crash,
+                shared_console_log,
+                shared_net_log,
                 last_favicon: None,
             })
         }
@@ -1223,6 +1471,106 @@ mod inner {
         /// Drains and returns all JS console errors collected since the last call.
         pub fn take_console_errors(&mut self) -> Vec<String> {
             std::mem::take(&mut *self.shared_console_errors.borrow_mut())
+        }
+
+        /// Every console message (any level) since the last call, oldest first.
+        pub fn take_console_entries(&mut self) -> Vec<crate::diag::ConsoleEntry> {
+            self.shared_console_log.borrow_mut().drain(..).collect()
+        }
+
+        /// What the page is waiting on a person for, if anything.
+        pub fn page_control(&self) -> Option<crate::diag::PageControl> {
+            self.shared_control
+                .borrow()
+                .as_ref()
+                .map(|(v, _)| v.clone())
+        }
+
+        /// Answers (or dismisses) the page's pending control.
+        pub fn answer_control(&mut self, answer: crate::diag::ControlAnswer) {
+            use crate::diag::ControlAnswer as A;
+            let Some((_, control)) = self.shared_control.borrow_mut().take() else {
+                return;
+            };
+            match (control, answer) {
+                (servo::EmbedderControl::SelectElement(mut select), A::Select(chosen)) => {
+                    select.select(chosen);
+                    select.submit();
+                }
+                (servo::EmbedderControl::SimpleDialog(servo::SimpleDialog::Alert(a)), _) => {
+                    a.confirm();
+                }
+                (
+                    servo::EmbedderControl::SimpleDialog(servo::SimpleDialog::Confirm(c)),
+                    A::Accept(_),
+                ) => {
+                    c.confirm();
+                }
+                (servo::EmbedderControl::SimpleDialog(servo::SimpleDialog::Confirm(c)), _) => {
+                    c.dismiss();
+                }
+                (
+                    servo::EmbedderControl::SimpleDialog(servo::SimpleDialog::Prompt(mut p)),
+                    A::Accept(text),
+                ) => {
+                    if let Some(text) = text {
+                        p.set_current_value(&text);
+                    }
+                    p.confirm();
+                }
+                (servo::EmbedderControl::SimpleDialog(servo::SimpleDialog::Prompt(p)), _) => {
+                    p.dismiss();
+                }
+                (servo::EmbedderControl::FilePicker(mut f), A::Files(paths)) => {
+                    f.select(&paths);
+                    f.submit();
+                }
+                (servo::EmbedderControl::FilePicker(f), _) => f.dismiss(),
+                (servo::EmbedderControl::ColorPicker(mut c), A::Color(text)) => {
+                    if let Some((red, green, blue)) = crate::diag::parse_hex_color(&text) {
+                        c.select(Some(servo::RgbColor { red, green, blue }));
+                    }
+                    c.submit();
+                }
+                (servo::EmbedderControl::ContextMenu(menu), A::Menu(index)) => {
+                    let action = menu
+                        .items()
+                        .iter()
+                        .filter_map(|item| match item {
+                            servo::ContextMenuItem::Item {
+                                action,
+                                enabled: true,
+                                ..
+                            } => Some(*action),
+                            servo::ContextMenuItem::Item { .. } => None,
+                            servo::ContextMenuItem::Separator => None,
+                        })
+                        .nth(index);
+                    match action {
+                        Some(action) => menu.select(action),
+                        None => menu.dismiss(),
+                    }
+                }
+                (servo::EmbedderControl::ContextMenu(menu), _) => menu.dismiss(),
+                // Anything else (a mismatched answer, a colour picker closed,
+                // a select closed): dropping it tells the engine "no change".
+                (other, _) => drop(other),
+            }
+        }
+
+        /// The pointer the page currently asks for.
+        pub fn cursor(&self) -> crate::diag::PageCursor {
+            self.shared_cursor.get()
+        }
+
+        /// Takes the crash note, if the page died since the last call.
+        pub fn take_crash(&mut self) -> Option<crate::diag::CrashNote> {
+            self.shared_crash.borrow_mut().take()
+        }
+
+        /// Every request announced since the last call, oldest first.
+        pub fn take_net_events(&mut self) -> Vec<crate::diag::NetEvent> {
+            self.shared_net_log.borrow_mut().drain(..).collect()
         }
 
         /// Navigate to `url`, drive the event loop for up to `timeout_secs`, and
@@ -1620,6 +1968,28 @@ impl HeadlessServoSession {
 
     pub fn take_console_errors(&mut self) -> Vec<String> {
         vec![]
+    }
+
+    pub fn take_console_entries(&mut self) -> Vec<crate::diag::ConsoleEntry> {
+        Vec::new()
+    }
+
+    pub fn take_net_events(&mut self) -> Vec<crate::diag::NetEvent> {
+        Vec::new()
+    }
+
+    pub fn page_control(&self) -> Option<crate::diag::PageControl> {
+        None
+    }
+
+    pub fn answer_control(&mut self, _answer: crate::diag::ControlAnswer) {}
+
+    pub fn cursor(&self) -> crate::diag::PageCursor {
+        crate::diag::PageCursor::Default
+    }
+
+    pub fn take_crash(&mut self) -> Option<crate::diag::CrashNote> {
+        None
     }
 
     pub fn test_js_compat(&mut self, url: &str) -> JSCompatResult {

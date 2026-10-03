@@ -33,3 +33,8 @@ servo = { workspace = true, optional = true }
 # false-positive "unused dependency" without this.
 [package.metadata.cargo-machete]
 ignored = ["servo"]
+
+[dev-dependencies]
+# `examples/page_shot.rs` writes a PNG of what the engine rendered. Already in
+# the lockfile (the engine itself decodes PNGs with it).
+png = "0.17"

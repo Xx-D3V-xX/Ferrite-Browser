@@ -357,8 +357,8 @@ struct QuickAccessTile {
 /// per-tile here.
 const QUICK_ACCESS_TILES: [QuickAccessTile; 6] = [
     QuickAccessTile {
-        label: "DuckDuckGo",
-        url: "https://lite.duckduckgo.com",
+        label: "Google",
+        url: "https://www.google.com",
     },
     QuickAccessTile {
         label: "Rust Docs",
@@ -4545,9 +4545,9 @@ fn resolve_url(input: &str) -> String {
         return format!("http://{trimmed}");
     }
 
-    // Everything else → DuckDuckGo Lite search.
+    // Everything else → a Google search.
     let encoded = urlencoding::encode(trimmed);
-    format!("https://lite.duckduckgo.com/lite/?q={}", encoded)
+    format!("https://www.google.com/search?q={encoded}")
 }
 
 // ---------------------------------------------------------------------------
