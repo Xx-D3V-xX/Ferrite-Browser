@@ -892,6 +892,98 @@ pub async fn run_agent_loop<E: BrowserEngine>(
     task_prompt: &str,
     budget: LoopBudget,
 ) -> AgentLoopResult {
+    run_loop(
+        provider,
+        engine,
+        clock,
+        model_tag,
+        tier,
+        task_prompt,
+        budget,
+        None::<&mut NoGate>,
+    )
+    .await
+}
+
+/// What a gate is shown about the page the agent is on, when it vets an action.
+#[derive(Debug, Clone, PartialEq)]
+pub struct GateContext {
+    /// The active tab's URL (empty if the engine could not say).
+    pub active_url: String,
+    /// The engine's own observation of the page, for resolving an `@ref`.
+    pub digest: Option<PageDigest>,
+}
+
+/// A gate's verdict on one proposed action.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum GateDecision {
+    /// Execute it.
+    Run,
+    /// Do not execute it; show the model this observation instead.
+    Refuse(String),
+}
+
+type NoGate = fn(&AgentAction, &GateContext) -> GateDecision;
+
+/// [`run_agent_loop`] with a gate consulted **before every action executes**
+/// (not for [`AgentAction::Finish`]/[`AgentAction::AskUser`], which never reach
+/// an engine). This is how a prediction is enforced on a real run
+/// (`docs/DECISIONS.md` ADR-014): the gate classifies the action and, if it is
+/// outside what the task was expected to need, refuses it.
+///
+/// A refused action is **not executed and not in `actions_taken`**; the model is
+/// shown the gate's observation as the action's result and the loop carries on,
+/// so it can adapt (finish without it, try something else). A refusal still
+/// costs a step of `budget.max_steps`, so a model that keeps probing runs out of
+/// steps rather than looping forever. Every proposal, allowed or refused, is the
+/// gate's to record; the loop only reports what ran.
+///
+/// The engine is asked for its own observation ([`BrowserEngine::observe_page`],
+/// which an engine that records the agent's actions must not record) once per
+/// gated action, to tell the gate where the agent is.
+#[allow(clippy::too_many_arguments)]
+pub async fn run_agent_loop_gated<E, G>(
+    provider: &dyn ModelProvider,
+    engine: &mut E,
+    clock: &dyn Clock,
+    model_tag: &str,
+    tier: ModelTier,
+    task_prompt: &str,
+    budget: LoopBudget,
+    gate: &mut G,
+) -> AgentLoopResult
+where
+    E: BrowserEngine,
+    G: FnMut(&AgentAction, &GateContext) -> GateDecision,
+{
+    run_loop(
+        provider,
+        engine,
+        clock,
+        model_tag,
+        tier,
+        task_prompt,
+        budget,
+        Some(gate),
+    )
+    .await
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn run_loop<E, G>(
+    provider: &dyn ModelProvider,
+    engine: &mut E,
+    clock: &dyn Clock,
+    model_tag: &str,
+    tier: ModelTier,
+    task_prompt: &str,
+    budget: LoopBudget,
+    mut gate: Option<&mut G>,
+) -> AgentLoopResult
+where
+    E: BrowserEngine,
+    G: FnMut(&AgentAction, &GateContext) -> GateDecision,
+{
     let start = clock.now();
     let mut actions_taken: Vec<AgentAction> = Vec::new();
     let mut observations: Vec<String> = Vec::new();
@@ -1006,6 +1098,31 @@ pub async fn run_agent_loop<E: BrowserEngine>(
                     actions_taken,
                     observations,
                 };
+            }
+        }
+
+        if let Some(gate) = gate.as_deref_mut() {
+            let context = match engine.observe_page() {
+                Ok((digest, _)) => GateContext {
+                    active_url: digest.url.clone(),
+                    digest: Some(digest),
+                },
+                Err(_) => GateContext {
+                    active_url: String::new(),
+                    digest: None,
+                },
+            };
+            if let GateDecision::Refuse(observation) = gate(&action, &context) {
+                messages.push(Message::assistant(
+                    serde_json::to_string(&action).unwrap_or_default(),
+                ));
+                messages.push(Message::user(format!(
+                    "Observation: {}",
+                    compact_observation(&observation)
+                )));
+                trim_message_history(&mut messages);
+                steps_taken += 1;
+                continue;
             }
         }
 
@@ -2357,5 +2474,146 @@ mod tests {
             "{}",
             result.observations[0]
         );
+    }
+
+    // ── the gate (ADR-014 enforcement on a real run) ────────────────────────
+
+    #[tokio::test]
+    async fn a_refused_action_never_reaches_the_engine_and_the_model_sees_why() {
+        let provider = MockProvider::new()
+            .push_content(navigate_json("https://evil.example/steal"))
+            .push_content(finish_json("done without it"));
+        let mut engine = MockEngine::new();
+        let clock = ferrite_core::SystemClock;
+        let mut proposed: Vec<AgentAction> = Vec::new();
+        let mut gate = |action: &AgentAction, _: &GateContext| {
+            proposed.push(action.clone());
+            GateDecision::Refuse("blocked: not expected".to_string())
+        };
+
+        let result = run_agent_loop_gated(
+            &provider,
+            &mut engine,
+            &clock,
+            "tag",
+            ModelTier::Main,
+            "read the page",
+            LoopBudget::default(),
+            &mut gate,
+        )
+        .await;
+
+        assert_eq!(
+            result.stop_reason,
+            LoopStopReason::Finished("done without it".to_string())
+        );
+        assert!(
+            result.actions_taken.is_empty(),
+            "a refused action is not an action taken"
+        );
+        assert!(engine.calls().is_empty(), "nothing reached the engine");
+        assert_eq!(
+            proposed.len(),
+            1,
+            "the gate saw the proposal, not the finish"
+        );
+        let second_request = &provider.calls()[1];
+        let last = second_request.messages.last().expect("observation");
+        assert_eq!(last.content, "Observation: blocked: not expected");
+    }
+
+    #[tokio::test]
+    async fn an_allowed_action_runs_and_the_gate_is_told_where_the_agent_is() {
+        let provider = MockProvider::new()
+            .push_content(navigate_json("https://a.example/"))
+            .push_content(finish_json("ok"));
+        let mut engine = MockEngine::new();
+        let clock = ferrite_core::SystemClock;
+        let mut seen_urls: Vec<String> = Vec::new();
+        let mut gate = |_: &AgentAction, ctx: &GateContext| {
+            seen_urls.push(ctx.active_url.clone());
+            GateDecision::Run
+        };
+
+        let result = run_agent_loop_gated(
+            &provider,
+            &mut engine,
+            &clock,
+            "tag",
+            ModelTier::Main,
+            "go",
+            LoopBudget::default(),
+            &mut gate,
+        )
+        .await;
+
+        assert_eq!(result.actions_taken.len(), 1);
+        assert_eq!(engine.calls().len(), 1);
+        assert_eq!(seen_urls, vec![ferrite_engine::MOCK_HOME.to_string()]);
+    }
+
+    #[tokio::test]
+    async fn refusals_cost_steps_so_a_model_that_keeps_probing_runs_out_of_them() {
+        // Always a different URL: not caught by repeat detection, and refused
+        // every time. Only the step budget can end this.
+        let provider = MockProvider::new().always(|req| {
+            ferrite_model::MockStep::Content(navigate_json(&format!(
+                "https://probe-{}.example/",
+                req.messages.len()
+            )))
+        });
+        let mut engine = MockEngine::new();
+        let clock = ferrite_core::SystemClock;
+        let mut refused = 0;
+        let mut gate = |_: &AgentAction, _: &GateContext| {
+            refused += 1;
+            GateDecision::Refuse("blocked".to_string())
+        };
+        let budget = LoopBudget {
+            max_steps: 4,
+            ..LoopBudget::default()
+        };
+
+        let result = run_agent_loop_gated(
+            &provider,
+            &mut engine,
+            &clock,
+            "tag",
+            ModelTier::Main,
+            "probe",
+            budget,
+            &mut gate,
+        )
+        .await;
+
+        assert_eq!(result.stop_reason, LoopStopReason::StepBudgetExhausted);
+        assert_eq!(refused, 4);
+        assert!(engine.calls().is_empty());
+    }
+
+    #[tokio::test]
+    async fn the_ungated_loop_does_not_ask_the_engine_for_an_observation_it_does_not_need() {
+        // Behaviour of `run_agent_loop` is unchanged by the gate: same actions,
+        // same stop reason as before the gate existed.
+        let provider = MockProvider::new()
+            .push_content(navigate_json("https://a.example/"))
+            .push_content(finish_json("done"));
+        let mut engine = MockEngine::new();
+        let clock = ferrite_core::SystemClock;
+        let result = run_agent_loop(
+            &provider,
+            &mut engine,
+            &clock,
+            "tag",
+            ModelTier::Main,
+            "go",
+            LoopBudget::default(),
+        )
+        .await;
+        assert_eq!(
+            result.stop_reason,
+            LoopStopReason::Finished("done".to_string())
+        );
+        assert_eq!(result.actions_taken.len(), 1);
     }
 }
