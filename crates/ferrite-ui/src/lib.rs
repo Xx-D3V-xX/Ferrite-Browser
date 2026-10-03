@@ -219,8 +219,13 @@ mod activity_panel;
 mod agent_panel;
 mod agent_run;
 mod chrome;
+mod controls;
+mod crash;
+mod devtools;
+mod devtools_panel;
 mod icons;
 mod identity;
+mod layout;
 mod lifecycle;
 mod markdown;
 mod page_input;
@@ -229,6 +234,7 @@ mod runtime_guard;
 mod scroll;
 mod settings_panel;
 mod signin;
+mod tab_diag;
 mod tokens;
 mod widgets;
 use activity_panel::AuditTab;
@@ -743,8 +749,6 @@ const ADDRESS_BAR_ID: &str = "ferrite_address_bar";
 const JS_INPUT_ID: &str = "ferrite_js_input";
 const FIND_INPUT_ID: &str = "ferrite_find_input";
 
-/// Width of the Library drawer on the right of the page.
-const SIDE_PANEL_WIDTH: f32 = 380.0;
 const BORDER_RADIUS: f32 = tokens::RADIUS_MD;
 const PANEL_PADDING: u16 = 12;
 
@@ -777,6 +781,15 @@ const IDLE_TICK: std::time::Duration = std::time::Duration::from_millis(50);
 /// Ticks without a new picture before the page counts as idle (about half a
 /// second at the active rate).
 const BUSY_TICKS: u8 = 30;
+/// While the page is active the tick follows the display's frames; this slower
+/// timer runs it anyway if no frame has come for this long (a minimised or
+/// covered window is not redrawn, and the engine still has to be pumped).
+const WATCHDOG_AFTER: std::time::Duration = std::time::Duration::from_millis(80);
+/// The longest step animation takes for one tick, so a stall does not make the
+/// loading bar jump.
+const MAX_TICK_STEP: std::time::Duration = std::time::Duration::from_millis(100);
+/// How far the loading-bar phase moves per second (it was 0.02 per 16 ms tick).
+const PROGRESS_PER_SECOND: f32 = 1.2;
 
 /// Advance per `ConsentPanelTick` for `FerriteBrowser::consent_panel_anim` —
 /// ticks fire every 16ms (the same cadence `ServoFrame` already uses, see
@@ -835,6 +848,12 @@ pub struct Palette {
     pub text_dim: Color,
     pub accent: Color,
     pub accent_bright: Color,
+    /// The fill of a solid primary button and its hover state. On the dark
+    /// theme these are deeper than `accent`/`accent_bright` (which are tuned to
+    /// read as text and icons on a dark surface), so a white label on them
+    /// clears 4.5:1; on the light theme they are the accent itself.
+    pub accent_fill: Color,
+    pub accent_fill_hover: Color,
     pub input: Color,
     pub safe: Color,
     pub warn: Color,
@@ -881,10 +900,12 @@ const DARK_PALETTE: Palette = Palette {
         b: 0.96,
         a: 1.0,
     },
+    // Secondary text: 5.0:1 on `raised` and 6.1:1 on `surface` (it was 3.6:1
+    // and 4.4:1, under the 4.5:1 AA floor for the small captions it is used for).
     text_dim: Color {
-        r: 0.50,
-        g: 0.50,
-        b: 0.58,
+        r: 0.60,
+        g: 0.60,
+        b: 0.68,
         a: 1.0,
     },
     accent: Color {
@@ -897,6 +918,18 @@ const DARK_PALETTE: Palette = Palette {
         r: 0.56,
         g: 0.50,
         b: 1.0,
+        a: 1.0,
+    },
+    accent_fill: Color {
+        r: 0.352,
+        g: 0.304,
+        b: 0.80,
+        a: 1.0,
+    },
+    accent_fill_hover: Color {
+        r: 0.448,
+        g: 0.40,
+        b: 0.80,
         a: 1.0,
     },
     input: Color {
@@ -999,6 +1032,18 @@ const LIGHT_PALETTE: Palette = Palette {
         a: 1.0,
     },
     accent_bright: Color {
+        r: 0.420,
+        g: 0.322,
+        b: 0.980,
+        a: 1.0,
+    },
+    accent_fill: Color {
+        r: 0.349,
+        g: 0.259,
+        b: 0.922,
+        a: 1.0,
+    },
+    accent_fill_hover: Color {
         r: 0.420,
         g: 0.322,
         b: 0.980,
@@ -1322,8 +1367,26 @@ pub struct FerriteBrowser {
     /// the page title (see that handler).
     pub tab_favicons: Vec<Option<ImageHandle>>,
     pub new_tab_search_input: String,
-    pub js_input: String,
-    pub js_output: Vec<(String, String)>,
+    // ── DevTools, page controls and panel sizes ──────────────────────────────
+    /// One entry per tab (same indexing as `tab_urls`): its console and network
+    /// log, the control its page is waiting on, and a crash notice.
+    pub(crate) tab_diag: Vec<tab_diag::TabDiag>,
+    /// The DevTools panel's view and filters (the logs are per tab, above).
+    pub(crate) devtools: devtools::DevToolsUi,
+    /// Engine panics and page crashes this session.
+    pub(crate) engine_log: devtools::EngineLog,
+    /// How wide the side drawers and how tall the bottom panels are, and the
+    /// drag in progress (`layout`).
+    pub(crate) panels: layout::Panels,
+    /// The window's size in logical points, kept current by resize events;
+    /// panel sizes are clamped against it so the page always has room.
+    pub window_size: Size,
+    /// When the engine tick last ran, so animation advances by elapsed time
+    /// rather than by tick count (a display frame is not always 16 ms).
+    last_tick: Option<std::time::Instant>,
+    /// A fingerprint of each tab's last favicon, so a handle is rebuilt (and
+    /// the icon re-uploaded) only when the engine reports a different one.
+    favicon_keys: Vec<Option<u64>>,
     /// Most recent cursor position over the Servo content area, in logical
     /// points (the same space `mouse_area::on_move` reports and `view()`
     /// lays widgets out in) — never physical/device pixels. Scaled by
@@ -1742,8 +1805,13 @@ impl Default for FerriteBrowser {
             tab_titles: vec!["New Tab".to_string()],
             tab_favicons: vec![None],
             new_tab_search_input: String::new(),
-            js_input: String::new(),
-            js_output: Vec::new(),
+            tab_diag: vec![tab_diag::TabDiag::default()],
+            devtools: devtools::DevToolsUi::default(),
+            engine_log: devtools::EngineLog::default(),
+            panels: layout::Panels::default(),
+            window_size: layout::ASSUMED_WINDOW,
+            last_tick: None,
+            favicon_keys: vec![None],
             cursor_pos: (0.0, 0.0),
             scale_factor: 1.0,
             content_area_size: Cell::new(Size::new(1280.0, 700.0)),
@@ -1859,9 +1927,22 @@ pub enum FerriteBrowserMessage {
     CloseActiveTab,
     EscapePressed,
     NewTabSearchChanged(String),
+    /// The DevTools prompt's text changed.
     JsInputChanged(String),
+    /// Enter (or Run) at the DevTools prompt.
     JsExecuteRequested,
+    /// The Console's Clear button (kept for the prompt's own shortcut).
     JsConsoleClear,
+    /// Everything else the DevTools panel does (see `devtools`).
+    DevTools(devtools::Msg),
+    /// A reply to the control a page is waiting on (see `controls`).
+    Control(controls::Msg),
+    /// The page-crash banner's buttons (see `crash`).
+    Crash(crash::Msg),
+    /// A press, move or release on a panel splitter (see `layout`).
+    Panels(layout::Msg),
+    /// The window changed size (logical points).
+    WindowResized(Size),
     // Mouse/scroll events forwarded to Servo
     /// Mouse moved over the content area — position is relative to content area origin.
     ServoMouseMove {
@@ -1877,6 +1958,11 @@ pub enum FerriteBrowserMessage {
     PageKey(ferrite_servo::session::PageKeyEvent),
     /// Mouse button released (position taken from last ServoMouseMove).
     ServoMouseRelease,
+    /// Secondary button pressed over the page (a context menu, usually).
+    ServoRightPress,
+    /// A slow timer that runs the engine tick if the frame-synchronised one
+    /// has gone quiet (a minimised or covered window gets no redraws).
+    ServoWatchdog,
     /// Scroll wheel / trackpad event; queued and delivered per tick.
     ServoScroll(scroll::Wheel),
     /// The window's real scale factor (physical px per logical point),
@@ -2151,6 +2237,8 @@ pub fn update(
         }
         FerriteBrowserMessage::NavigateRequested(raw) => {
             let url = resolve_url(&raw);
+            // The page is about to be replaced: whatever it was asking is moot.
+            controls::dismiss_tab(state, state.active_tab);
             state.address_bar_edited = false;
             state.address_bar_input = url.clone();
             state.tab_urls[state.active_tab] = url.clone();
@@ -2167,18 +2255,21 @@ pub fn update(
             return widgets::unfocus();
         }
         FerriteBrowserMessage::GoBack => {
+            controls::dismiss_tab(state, state.active_tab);
             if let Some(session) = state.servo_sessions.get(&state.active_tab) {
                 session.go_back();
             }
             state.is_loading = true;
         }
         FerriteBrowserMessage::GoForward => {
+            controls::dismiss_tab(state, state.active_tab);
             if let Some(session) = state.servo_sessions.get(&state.active_tab) {
                 session.go_forward();
             }
             state.is_loading = true;
         }
         FerriteBrowserMessage::Reload => {
+            controls::dismiss_tab(state, state.active_tab);
             if let Some(session) = state.servo_sessions.get(&state.active_tab) {
                 session.reload();
             }
@@ -2232,6 +2323,11 @@ pub fn update(
                     }
                 }
                 if tab < state.tab_urls.len() && !url.is_empty() {
+                    if state.tab_urls[tab] != url {
+                        // The page moved on by itself (a link, a redirect): a
+                        // control it had open went with it.
+                        controls::dismiss_tab(state, tab);
+                    }
                     state.tab_urls[tab] = url;
                 }
             }
@@ -2251,6 +2347,14 @@ pub fn update(
                 state.show_audit_panel = false;
                 state.show_library_panel = false;
                 state.show_settings_panel = false;
+                // The prompt takes the keyboard when the Console is showing.
+                if state.devtools.tab == devtools::DevTab::Console {
+                    state.address_bar_focused = false;
+                    state.devtools.input_focused = true;
+                    return text_input::focus(text_input::Id::new(JS_INPUT_ID));
+                }
+            } else {
+                state.devtools.input_focused = false;
             }
         }
         FerriteBrowserMessage::SetAuditTab(tab) => {
@@ -2316,7 +2420,11 @@ pub fn update(
             // that function's own doc comment), so both cases route through
             // this one `EscapePressed` message and are told apart here,
             // where `state` is actually available.
-            if state.show_menu {
+            if controls::active_control(state).is_some() {
+                // A control the page is waiting on is the topmost thing there
+                // is; Escape is "dismiss" (cancel, for a dialog).
+                return controls::update(state, controls::Msg::Dismiss);
+            } else if state.show_menu {
                 state.show_menu = false;
             } else if state.show_find_bar {
                 // Applied directly (not via `Task::done(CloseFindBar)`) so
@@ -2345,33 +2453,24 @@ pub fn update(
             }
         }
         FerriteBrowserMessage::JsInputChanged(s) => {
-            state.js_input = s;
+            state.devtools.input = s;
         }
         FerriteBrowserMessage::JsConsoleClear => {
-            state.js_output.clear();
+            return devtools::update(state, devtools::Msg::Clear);
         }
         FerriteBrowserMessage::JsExecuteRequested => {
-            let script = state.js_input.trim().to_string();
-            if script.is_empty() {
-                return Task::none();
-            }
-            state.js_input.clear();
-
-            let result = if let Some(session) = state.servo_sessions.get_mut(&state.active_tab) {
-                match session.execute_js(&script) {
-                    Ok(v) => v,
-                    Err(e) => format!("Error: {}", e),
-                }
-            } else {
-                "Error: no active Servo session".to_string()
-            };
-
-            let snippet = if script.len() > 60 {
-                format!("{}...", &script[..59])
-            } else {
-                script
-            };
-            state.js_output.push((snippet, result));
+            devtools::run_prompt(state);
+            return scrollable::snap_to(
+                devtools::console_scroll_id(),
+                scrollable::RelativeOffset::END,
+            );
+        }
+        FerriteBrowserMessage::DevTools(msg) => return devtools::update(state, msg),
+        FerriteBrowserMessage::Control(msg) => return controls::update(state, msg),
+        FerriteBrowserMessage::Crash(msg) => return crash::update(state, msg),
+        FerriteBrowserMessage::Panels(msg) => layout::update(state, msg),
+        FerriteBrowserMessage::WindowResized(size) => {
+            state.window_size = size;
         }
         // ── Servo mouse/scroll events ──────────────────────────────────────
         FerriteBrowserMessage::ServoMouseMove { x, y } => {
@@ -2379,10 +2478,30 @@ pub fn update(
             // it. A mouse reports far more moves than there are frames, and
             // each one used to be an engine call of its own.
             state.cursor_pos = (x, y);
+            if page_input_blocked(state) {
+                return Task::none();
+            }
             state.pointer_moved = true;
             wake(state);
         }
+        FerriteBrowserMessage::ServoRightPress => {
+            if page_input_blocked(state) {
+                return Task::none();
+            }
+            state.address_bar_focused = false;
+            wake(state);
+            let (x, y) = state.cursor_pos;
+            let scale = state.scale_factor;
+            if let Some(session) = state.servo_sessions.get(&state.active_tab) {
+                session.send_mouse_move(x * scale, y * scale);
+                session.send_right_click(x * scale, y * scale);
+            }
+        }
         FerriteBrowserMessage::ServoMousePress => {
+            if page_input_blocked(state) {
+                return Task::none();
+            }
+            state.devtools.input_focused = false;
             // A click on the page takes keyboard focus from the address bar
             // (the bar's own widget unfocuses itself, but this flag is what
             // `PageKey` consults).
@@ -2399,12 +2518,36 @@ pub fn update(
             }
         }
         FerriteBrowserMessage::PageKey(event) => {
+            // A control the page is waiting on takes the keyboard; the page
+            // gets none of it until the control is answered.
+            if controls::active_control(state).is_some() {
+                return controls::on_page_key(state, &event);
+            }
+            // Up and down at the DevTools prompt walk its history (the text
+            // input leaves those keys unhandled, so they land here).
+            if state.devtools.input_focused && state.show_js_console {
+                if event.down {
+                    match &event.key {
+                        ferrite_servo::session::PageKey::Named(
+                            ferrite_servo::session::PageNamedKey::ArrowUp,
+                        ) => devtools::recall(state, true),
+                        ferrite_servo::session::PageKey::Named(
+                            ferrite_servo::session::PageNamedKey::ArrowDown,
+                        ) => devtools::recall(state, false),
+                        _ => {}
+                    }
+                }
+                return Task::none();
+            }
             if let Some(session) = page_key_target(state) {
                 session.send_key(&event);
                 wake(state);
             }
         }
         FerriteBrowserMessage::ServoMouseRelease => {
+            if page_input_blocked(state) {
+                return Task::none();
+            }
             wake(state);
             let (x, y) = state.cursor_pos;
             let scale = state.scale_factor;
@@ -2417,6 +2560,9 @@ pub fn update(
             }
         }
         FerriteBrowserMessage::ServoScroll(wheel) => {
+            if page_input_blocked(state) {
+                return Task::none();
+            }
             // Queued, not sent: pixel deltas are summed and notches eased out
             // over the next frames by the `ServoFrame` tick (see `scroll`).
             state.scroll_queue.push(wheel, state.scale_factor);
@@ -2742,40 +2888,63 @@ pub fn update(
         }
         // ── Agent bridge ──────────────────────────────────────────────────────
         FerriteBrowserMessage::ServoReady => {}
+        FerriteBrowserMessage::ServoWatchdog => {
+            // The frame-synchronised tick normally runs this; it only has to
+            // when no display frame has come for a while.
+            let quiet = state
+                .last_tick
+                .is_none_or(|at| at.elapsed() >= WATCHDOG_AFTER);
+            if quiet {
+                return update(state, FerriteBrowserMessage::ServoFrame);
+            }
+        }
         FerriteBrowserMessage::ServoFrame => {
             lifecycle::heartbeat();
-            state.progress_offset = (state.progress_offset + 0.02) % 1.0;
+            let now = std::time::Instant::now();
+            // Animation advances by elapsed time, so a 120 Hz display does not
+            // run the loading bar twice as fast as a 60 Hz one.
+            let elapsed = state
+                .last_tick
+                .map_or(ACTIVE_TICK, |at| now.duration_since(at))
+                .min(MAX_TICK_STEP);
+            state.last_tick = Some(now);
+            state.progress_offset =
+                (state.progress_offset + elapsed.as_secs_f32() * PROGRESS_PER_SECOND) % 1.0;
+            let mut tasks: Vec<Task<FerriteBrowserMessage>> = Vec::new();
 
             // Forward this tick's pointer position and scroll to the engine:
             // at most one move and one wheel event per frame, whatever the
             // input device's own rate. Positions are logical points; the
-            // engine counts physical pixels (see `scale_factor`).
+            // engine counts physical pixels (see `scale_factor`). While a
+            // control the page is waiting on (or a panel drag) has the pointer,
+            // the page gets none of it.
             {
                 let (x, y) = state.cursor_pos;
                 let scale = state.scale_factor;
                 let moved = std::mem::take(&mut state.pointer_moved);
                 let wheel = state.scroll_queue.next_frame();
-                if let Some(session) = state.servo_sessions.get(&state.active_tab) {
-                    if moved {
-                        session.send_mouse_move(x * scale, y * scale);
-                    }
-                    if let Some((dx, dy)) = wheel {
-                        session.send_scroll(x * scale, y * scale, f64::from(dx), f64::from(dy));
+                if !page_input_blocked(state) {
+                    if let Some(session) = state.servo_sessions.get(&state.active_tab) {
+                        if moved {
+                            session.send_mouse_move(x * scale, y * scale);
+                        }
+                        if let Some((dx, dy)) = wheel {
+                            session.send_scroll(x * scale, y * scale, f64::from(dx), f64::from(dy));
+                        }
                     }
                 }
             }
 
             // Keep the active tab's Servo render buffer matched to the real
             // content-area size (see `content_area_size`'s doc comment).
-            // Runs every tick (16ms) rather than off a dedicated resize
-            // event, so it also picks up a size change caused by toggling
-            // the agent sidebar or the audit/JS panel, not only a window
-            // resize — those never fire a window-level resize event at
-            // all. Skipped entirely while a previous resize is still
-            // settling (`resize_settle_ticks > 0`) — see that field's doc
-            // comment for the real crash this avoids; `resize()` is never
-            // called again until the settle window from the last one has
-            // fully elapsed.
+            // Runs every tick rather than off a dedicated resize event, so it
+            // also picks up a size change caused by toggling or dragging a
+            // panel, not only a window resize — those never fire a
+            // window-level resize event at all. Skipped entirely while a
+            // previous resize is still settling (`resize_settle_ticks > 0`) —
+            // see that field's doc comment for the real crash this avoids;
+            // `resize()` is never called again until the settle window from
+            // the last one has fully elapsed.
             if state.resize_settle_ticks == 0 {
                 let logical = state.content_area_size.get();
                 let scale = state.scale_factor;
@@ -2821,16 +2990,12 @@ pub fn update(
                         // A background tab's pixels are never shown.
                         session.sync_state();
                     }
-                    // Script errors a page logs are the first clue when a site
-                    // misbehaves; surface them instead of dropping them.
-                    for message in session.take_console_errors().into_iter().take(20) {
-                        eprintln!(
-                            "[page console error] tab {index}: {}",
-                            truncate(&shorten_urls(&message), 400)
-                        );
-                    }
                 }
             }
+            // Console messages, requests, crashes and page controls: emptied
+            // from every session into the tabs' logs (and warnings and errors
+            // to the log file, where the first clue to a misbehaving site is).
+            tasks.push(tab_diag::drain_all(state));
             if refresh_frame_cache(state) {
                 state.busy_ticks = BUSY_TICKS;
             } else {
@@ -2846,8 +3011,16 @@ pub fn update(
                     }
                 }
                 if let Some((w, h, bytes)) = session.get_favicon() {
-                    if active < state.tab_favicons.len() {
+                    // Only a different icon needs a new handle (and a new
+                    // upload); the engine reports the same one every tick.
+                    let key = favicon_key(w, h, &bytes);
+                    if active < state.tab_favicons.len()
+                        && state.favicon_keys.get(active).copied().flatten() != Some(key)
+                    {
                         state.tab_favicons[active] = Some(ImageHandle::from_rgba(w, h, bytes));
+                        if let Some(slot) = state.favicon_keys.get_mut(active) {
+                            *slot = Some(key);
+                        }
                     }
                 }
                 let is_now_loading = matches!(session.load_status(), LoadStatus::Loading);
@@ -2863,13 +3036,14 @@ pub fn update(
                         "complete"
                     }
                     .to_string();
-                    return Task::done(FerriteBrowserMessage::LoadStatusChanged {
+                    tasks.push(Task::done(FerriteBrowserMessage::LoadStatusChanged {
                         tab: active,
                         status,
                         url: new_url,
-                    });
+                    }));
                 }
             }
+            return Task::batch(tasks);
         }
         // ── C1 design-system messages ────────────────────────────────────────
         FerriteBrowserMessage::TabHoverEnter(i) => {
@@ -3942,7 +4116,9 @@ fn push_tab_state(state: &mut FerriteBrowser) -> usize {
     state.tab_error.push(None);
     state.tab_titles.push("New Tab".to_string());
     state.tab_favicons.push(None);
+    state.favicon_keys.push(None);
     state.tab_zoom.push(state.default_zoom);
+    state.tab_diag.push(tab_diag::TabDiag::default());
     let new_idx = state.tabs.len() - 1;
     state.active_tab = new_idx;
     state.address_bar_input = String::new();
@@ -4028,6 +4204,11 @@ fn select_tab_at(state: &mut FerriteBrowser, i: usize) -> bool {
     if i >= state.tabs.len() || i >= state.tab_urls.len() {
         return false;
     }
+    if i != state.active_tab {
+        // A control the page was waiting on is dismissed when the person
+        // leaves it: it is not shown over a tab they are not looking at.
+        controls::dismiss_tab(state, state.active_tab);
+    }
     state.active_tab = i;
     state.address_bar_input = address_bar_text(&state.tab_urls[i]);
     state.address_bar_edited = false;
@@ -4062,6 +4243,12 @@ fn close_tab_at(state: &mut FerriteBrowser, i: usize) -> bool {
         }
         if i < state.tab_favicons.len() {
             state.tab_favicons.remove(i);
+        }
+        if i < state.favicon_keys.len() {
+            state.favicon_keys.remove(i);
+        }
+        if i < state.tab_diag.len() {
+            state.tab_diag.remove(i);
         }
         if i < state.tab_zoom.len() {
             state.tab_zoom.remove(i);
@@ -5633,7 +5820,7 @@ fn library_panel(state: &FerriteBrowser) -> Element<'_, FerriteBrowserMessage> {
         header,
         scrollable(column(rows).spacing(0).padding([SP_XS, 0.0])).height(Length::Fill)
     ])
-    .width(Length::Fixed(SIDE_PANEL_WIDTH))
+    .width(Length::Fixed(state.panels.side_width(state.window_size)))
     .height(Length::Fill)
     .style(tokens::side_panel_style)
     .into()
@@ -5655,6 +5842,8 @@ pub fn view(state: &FerriteBrowser) -> Element<'_, FerriteBrowserMessage> {
         .width(Length::Fill)
         .height(Length::Fixed(1.0))
         .style(separator_style);
+    // The panels' user-chosen sizes, kept inside the window (`layout`).
+    let bottom_height = state.panels.bottom_height(state.window_size);
 
     // ── Audit panel ────────────────────────────────────────────────────────
     let audit_panel: Option<Element<FerriteBrowserMessage>> = if state.show_audit_panel {
@@ -5733,20 +5922,16 @@ pub fn view(state: &FerriteBrowser) -> Element<'_, FerriteBrowserMessage> {
                 .collect()
         };
 
-        let (body, height): (Element<FerriteBrowserMessage>, f32) = match state.audit_tab {
-            AuditTab::Models => (
-                activity_panel::models_body(state, palette),
-                activity_panel::MODELS_PANEL_HEIGHT,
-            ),
-            AuditTab::Security => (
-                column![col_hdr, scrollable(column(rows)).height(Length::Fill)].into(),
-                220.0,
-            ),
+        let body: Element<FerriteBrowserMessage> = match state.audit_tab {
+            AuditTab::Models => activity_panel::models_body(state, palette),
+            AuditTab::Security => {
+                column![col_hdr, scrollable(column(rows)).height(Length::Fill)].into()
+            }
         };
         Some(
             container(column![hdr, body])
                 .width(Length::Fill)
-                .height(height)
+                .height(Length::Fixed(bottom_height))
                 .style(bottom_panel_style)
                 .into(),
         )
@@ -5754,133 +5939,14 @@ pub fn view(state: &FerriteBrowser) -> Element<'_, FerriteBrowserMessage> {
         None
     };
 
-    // ── JS console panel ───────────────────────────────────────────────────
-    let js_panel: Option<Element<FerriteBrowserMessage>> = if state.show_js_console {
-        let hdr = container(
-            row![
-                text("JS console")
-                    .size(TEXT_BODY)
-                    .font(font_weight(iced::font::Weight::Semibold))
-                    .color(palette.text),
-                text(format!("{MOD_LABEL}+J"))
-                    .size(TEXT_CAPTION)
-                    .color(palette.text_dim)
-                    .width(Length::Fill),
-                button(text("Clear").size(TEXT_CAPTION))
-                    .padding([2.0, SP_SM])
-                    .style(panel_btn_inactive)
-                    .on_press(FerriteBrowserMessage::JsConsoleClear),
-                tip(
-                    button(icon(Icon::Close, 10.0, palette.text_dim))
-                        .padding(5)
-                        .style(close_btn_style)
-                        .on_press(FerriteBrowserMessage::ToggleJsConsole),
-                    "Close",
-                    palette,
-                ),
-            ]
-            .spacing(SP_SM)
-            .align_y(iced::Alignment::Center)
-            .padding([SP_XS + 2.0, PANEL_PADDING as f32]),
-        )
-        .width(Length::Fill)
-        .style(tokens::raised_bar_style);
-
-        let out_rows: Vec<Element<FerriteBrowserMessage>> = if state.js_output.is_empty() {
-            vec![container(
-                text("Type an expression and press Enter")
-                    .size(12)
-                    .color(palette.text_dim),
-            )
-            .padding([10, PANEL_PADDING])
-            .into()]
-        } else {
-            state
-                .js_output
-                .iter()
-                .flat_map(|(snip, res)| {
-                    let err = res.starts_with("Error")
-                        || res.starts_with("BLOCKED")
-                        || res.starts_with("ERROR");
-                    [
-                        container(text(format!("> {}", snip)).size(12).color(palette.accent))
-                            .padding([2, PANEL_PADDING])
-                            .width(Length::Fill)
-                            .into(),
-                        container(text(format!("  {}", res)).size(12).color(if err {
-                            palette.danger
-                        } else {
-                            palette.safe
-                        }))
-                        .padding([1, PANEL_PADDING])
-                        .width(Length::Fill)
-                        .into(),
-                    ]
-                })
-                .collect()
-        };
-
-        let run_btn = button(text("Run").size(12))
-            .padding([6, 12])
-            .style(accent_btn_style)
-            .on_press(FerriteBrowserMessage::JsExecuteRequested);
-
-        let js_field = text_input("JavaScript expression...", &state.js_input)
-            .id(text_input::Id::new(JS_INPUT_ID))
+    // ── DevTools panel (Console / Network / Engine) ────────────────────────
+    let js_panel: Option<Element<FerriteBrowserMessage>> = state.show_js_console.then(|| {
+        container(devtools_panel::view(state))
             .width(Length::Fill)
-            .padding([6, 8])
-            .size(13)
-            .style(|_: &Theme, status| {
-                let focused = matches!(status, text_input::Status::Focused);
-                text_input::Style {
-                    background: Background::Color(palette.input),
-                    border: Border {
-                        radius: iced::border::Radius::new(6.0),
-                        width: if focused { 1.5 } else { 1.0 },
-                        color: if focused {
-                            palette.accent
-                        } else {
-                            palette.divider
-                        },
-                    },
-                    icon: palette.text_dim,
-                    placeholder: palette.text_dim,
-                    value: palette.text,
-                    selection: Color {
-                        a: 0.30,
-                        ..palette.accent
-                    },
-                }
-            })
-            .on_input(FerriteBrowserMessage::JsInputChanged)
-            .on_submit(FerriteBrowserMessage::JsExecuteRequested);
-
-        let input_row = container(
-            row![text(">").size(13).color(palette.accent), js_field, run_btn]
-                .spacing(6)
-                .align_y(iced::Alignment::Center)
-                .padding([5, PANEL_PADDING]),
-        )
-        .width(Length::Fill)
-        .style(|_: &Theme| container::Style {
-            background: Some(Background::Color(palette.base)),
-            ..container::Style::default()
-        });
-
-        Some(
-            container(column![
-                hdr,
-                scrollable(column(out_rows).spacing(0).width(Length::Fill)).height(Length::Fill),
-                input_row,
-            ])
-            .width(Length::Fill)
-            .height(260)
+            .height(Length::Fixed(bottom_height))
             .style(bottom_panel_style)
-            .into(),
-        )
-    } else {
-        None
-    };
+            .into()
+    });
 
     // ── Find bar ──────────────────────────────────────────────────────────
     // A floating card in the page's top-right corner (like every desktop
@@ -5971,7 +6037,7 @@ pub fn view(state: &FerriteBrowser) -> Element<'_, FerriteBrowserMessage> {
     // pixel size matched to it.
     let content: Element<FerriteBrowserMessage> = responsive(move |size: Size| {
         state.content_area_size.set(size);
-        if let Some(err_msg) = state.tab_error.get(active).and_then(|e| e.as_ref()) {
+        let page = if let Some(err_msg) = state.tab_error.get(active).and_then(|e| e.as_ref()) {
             let failed_url = state.tab_urls.get(active).map(String::as_str).unwrap_or("");
             pages::error_page(palette, failed_url, err_msg)
         } else if state
@@ -5994,8 +6060,10 @@ pub fn view(state: &FerriteBrowser) -> Element<'_, FerriteBrowserMessage> {
                 .height(Length::Fill);
 
             mouse_area(container(img).width(Length::Fill).height(Length::Fill))
+                .interaction(page_interaction(state))
                 .on_move(|pos| FerriteBrowserMessage::ServoMouseMove { x: pos.x, y: pos.y })
                 .on_press(FerriteBrowserMessage::ServoMousePress)
+                .on_right_press(FerriteBrowserMessage::ServoRightPress)
                 .on_release(FerriteBrowserMessage::ServoMouseRelease)
                 .on_scroll(|delta| {
                     use iced::mouse::ScrollDelta;
@@ -6008,6 +6076,16 @@ pub fn view(state: &FerriteBrowser) -> Element<'_, FerriteBrowserMessage> {
         } else {
             // Loading placeholder (no frame yet for a non-blank URL)
             pages::loading_page(palette, state.progress_offset)
+        };
+        // What the page is waiting on a person for, and a crash notice, float
+        // over it inside this same area, so a popup's anchor needs no offset.
+        let mut layers = vec![page];
+        layers.extend(controls::overlay(state, size));
+        layers.extend(crash::banner(state));
+        if layers.len() == 1 {
+            layers.remove(0)
+        } else {
+            stack(layers).into()
         }
     })
     .into();
@@ -6038,27 +6116,31 @@ pub fn view(state: &FerriteBrowser) -> Element<'_, FerriteBrowserMessage> {
         None => content,
     };
 
-    // Wrap browser viewport + optional agent sidebar in a horizontal row.
-    let main_content: Element<FerriteBrowserMessage> = if let Some(library) = library_panel {
-        iced::widget::row![content, library]
-            .width(Length::Fill)
-            .height(Length::Fill)
-            .into()
+    // The page and, to its right, at most one drawer (library, settings or the
+    // agent) with a splitter between them to resize it.
+    let drawer: Option<Element<FerriteBrowserMessage>> = if let Some(library) = library_panel {
+        Some(library)
     } else if state.show_settings_panel {
-        iced::widget::row![content, settings_panel::view(state)]
-            .width(Length::Fill)
-            .height(Length::Fill)
-            .into()
+        Some(settings_panel::view(state))
     } else if state.show_agent_sidebar {
-        iced::widget::row![content, agent_panel::view_agent_sidebar(state)]
-            .width(Length::Fill)
-            .height(Length::Fill)
-            .into()
+        Some(agent_panel::view_agent_sidebar(state))
     } else {
-        content
+        None
+    };
+    let main_content: Element<FerriteBrowserMessage> = match drawer {
+        Some(drawer) => iced::widget::row![
+            content,
+            layout::splitter(state, palette, layout::Handle::Side),
+            drawer
+        ]
+        .width(Length::Fill)
+        .height(Length::Fill)
+        .into(),
+        None => content,
     };
     layout.push(main_content);
     if let Some(p) = bottom_panel {
+        layout.push(layout::splitter(state, palette, layout::Handle::Bottom));
         layout.push(p);
     }
 
@@ -6175,7 +6257,10 @@ fn handle_key_press(
 /// new-tab page (which has its own search box, a widget that consumes typed
 /// keys itself).
 fn page_key_target(state: &FerriteBrowser) -> Option<&HeadlessServoSession> {
-    if state.address_bar_focused || state.show_find_bar {
+    if state.address_bar_focused || state.show_find_bar || state.devtools.input_focused {
+        return None;
+    }
+    if controls::active_control(state).is_some() {
         return None;
     }
     let showing_page = state
@@ -6244,6 +6329,45 @@ fn page_key_from_event(
     page_input::page_key_from_iced(&key_event).map(FerriteBrowserMessage::PageKey)
 }
 
+/// The pointer the page wants, as a toolkit cursor. Iced has no hidden cursor,
+/// so `cursor: none` shows the ordinary arrow.
+fn cursor_interaction(cursor: ferrite_servo::diag::PageCursor) -> iced::mouse::Interaction {
+    use ferrite_servo::diag::PageCursor as C;
+    use iced::mouse::Interaction as I;
+    match cursor {
+        C::Default | C::Hidden => I::Idle,
+        C::Pointer => I::Pointer,
+        C::Text => I::Text,
+        C::Crosshair => I::Crosshair,
+        C::Grab => I::Grab,
+        C::Grabbing => I::Grabbing,
+        C::Move => I::Move,
+        C::NotAllowed => I::NotAllowed,
+        C::Wait => I::Working,
+        C::Help => I::Help,
+        C::ZoomIn => I::ZoomIn,
+        C::ZoomOut => I::ZoomOut,
+        C::ResizeHorizontal => I::ResizingHorizontally,
+        C::ResizeVertical => I::ResizingVertically,
+        C::ResizeDiagonalUp => I::ResizingDiagonallyUp,
+        C::ResizeDiagonalDown => I::ResizingDiagonallyDown,
+    }
+}
+
+/// The cursor over the page area: what the page asked for, except while a
+/// control or a panel drag has the pointer (the plain arrow then).
+fn page_interaction(state: &FerriteBrowser) -> iced::mouse::Interaction {
+    if page_input_blocked(state) {
+        return iced::mouse::Interaction::Idle;
+    }
+    state
+        .servo_sessions
+        .get(&state.active_tab)
+        .map_or(iced::mouse::Interaction::Idle, |session| {
+            cursor_interaction(session.cursor())
+        })
+}
+
 /// How long the engine tick sleeps. Every tick rebuilds the view, so a page
 /// that is sitting still should not pay 60 rebuilds a second: after
 /// `BUSY_TICKS` ticks with no new picture, no load, no input, no queued scroll
@@ -6275,18 +6399,69 @@ fn page_is_active(state: &FerriteBrowser) -> bool {
 
 /// Marks the page busy now: input just arrived, so the next frames matter.
 fn wake(state: &mut FerriteBrowser) {
-    state.busy_ticks = BUSY_TICKS;
+    wake_flag(&mut state.busy_ticks);
+}
+
+/// [`wake`] for a caller that holds only the counter (it is borrowing other
+/// parts of the state).
+fn wake_flag(busy_ticks: &mut u8) {
+    *busy_ticks = BUSY_TICKS;
+}
+
+/// Whether the page must not be sent pointer, wheel or key input right now: a
+/// control it is waiting on is showing, or a panel is being dragged (the pointer
+/// belongs to the splitter, and a release over the page must not click it).
+fn page_input_blocked(state: &FerriteBrowser) -> bool {
+    state.panels.drag.is_some() || controls::active_control(state).is_some()
+}
+
+/// A cheap fingerprint of a favicon, to tell a new icon from the same one
+/// reported again.
+fn favicon_key(width: u32, height: u32, rgba: &[u8]) -> u64 {
+    use std::hash::{Hash, Hasher};
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    width.hash(&mut hasher);
+    height.hash(&mut hasher);
+    rgba.hash(&mut hasher);
+    hasher.finish()
 }
 
 pub fn subscription(state: &FerriteBrowser) -> Subscription<FerriteBrowserMessage> {
     let keyboard_sub = keyboard::on_key_press(handle_key_press);
     let page_keys = iced::event::listen_with(page_key_from_event);
 
-    let servo_tick = if !state.servo_sessions.is_empty() {
-        time::every(tick_interval(state)).map(|_| FerriteBrowserMessage::ServoFrame)
+    // The engine tick. A page that is busy follows the display: one tick per
+    // frame the window draws (`window::frames`), so pumping the engine, reading
+    // its picture back and drawing it line up with the monitor's refresh and
+    // never beat against a separate 16 ms timer. A page sitting still falls back
+    // to a slow timer. Every message makes iced draw again, so the frame
+    // subscription feeds itself while it is on and stops the moment the page
+    // goes idle; the watchdog covers a window that is not being drawn at all.
+    let servo_tick = if state.servo_sessions.is_empty() {
+        Subscription::none()
+    } else {
+        let cadence = tick_interval(state);
+        if cadence <= ACTIVE_TICK {
+            Subscription::batch([
+                window::frames().map(|_| FerriteBrowserMessage::ServoFrame),
+                time::every(WATCHDOG_AFTER).map(|_| FerriteBrowserMessage::ServoWatchdog),
+            ])
+        } else {
+            time::every(cadence).map(|_| FerriteBrowserMessage::ServoFrame)
+        }
+    };
+
+    // While a splitter is being dragged, follow the pointer and the release.
+    // Nothing is subscribed otherwise, so ordinary mouse moves cost nothing here.
+    let panel_drag = if state.panels.drag.is_some() {
+        iced::event::listen_with(layout::drag_events)
     } else {
         Subscription::none()
     };
+
+    // The window's size, so panel sizes can be kept inside it.
+    let window_size =
+        window::resize_events().map(|(_, size)| FerriteBrowserMessage::WindowResized(size));
 
     // Consent-panel entrance animation (C1) — same 16ms tick shape as
     // `servo_tick` above, gated so it only ever runs while the panel is
@@ -6357,6 +6532,8 @@ pub fn subscription(state: &FerriteBrowser) -> Subscription<FerriteBrowserMessag
         trace_tick,
         close_requests,
         servo_tick,
+        panel_drag,
+        window_size,
         agent_event_sub,
         consent_anim_tick,
         menu_anim_tick,
@@ -6458,6 +6635,7 @@ pub fn launch() -> iced::Result {
                 Some(id) => Task::batch([
                     window::maximize(id, true),
                     window::get_scale_factor(id).map(FerriteBrowserMessage::ScaleFactorReady),
+                    window::get_size(id).map(FerriteBrowserMessage::WindowResized),
                 ]),
                 None => Task::none(),
             });
@@ -6477,6 +6655,12 @@ pub fn launch() -> iced::Result {
                 ..FerriteBrowser::default()
             };
             settings_panel::connect_saved(&mut state);
+            // The panel sizes the person last chose, if any. A missing or
+            // unreadable file is the default sizes, never an error.
+            if let Some(path) = layout::default_layout_path() {
+                state.panels.layout = layout::PanelLayout::load_from(&path);
+                state.panels.path = Some(path);
+            }
             // C3d: bookmarks/downloads real-path resolution and the one-time
             // bookmarks load — both only ever happen here, at real app
             // startup, never inside `FerriteBrowser::default()` (same

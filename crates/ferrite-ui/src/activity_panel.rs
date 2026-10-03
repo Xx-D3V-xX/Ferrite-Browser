@@ -13,8 +13,6 @@ use iced::{Element, Font, Length};
 use super::*;
 use crate::activity::{format_ms, laya_effect_summary};
 
-/// Height of the panel while the model-call view is showing.
-pub(crate) const MODELS_PANEL_HEIGHT: f32 = 300.0;
 /// Newest events rendered (older ones stay in the file).
 const MAX_ROWS: usize = 150;
 

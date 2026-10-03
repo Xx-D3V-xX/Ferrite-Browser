@@ -21,8 +21,8 @@
 // Every colour comes from the active [`Palette`]; nothing here hardcodes a
 // theme.
 
-use iced::widget::{button, container, text_input, tooltip};
-use iced::{Background, Border, Color, Element, Shadow, Theme, Vector};
+use iced::widget::{button, container, row, text_input, tooltip, Space};
+use iced::{Background, Border, Color, Element, Length, Shadow, Theme, Vector};
 
 use crate::{palette_for_theme, FerriteBrowserMessage, Palette};
 
@@ -61,6 +61,38 @@ pub(crate) fn mix(a: Color, b: Color, t: f32) -> Color {
         g: a.g + (b.g - a.g) * t,
         b: a.b + (b.b - a.b) * t,
         a: 1.0,
+    }
+}
+
+/// WCAG relative luminance of an opaque colour.
+fn luminance(c: Color) -> f32 {
+    let lin = |v: f32| {
+        if v <= 0.03928 {
+            v / 12.92
+        } else {
+            ((v + 0.055) / 1.055).powf(2.4)
+        }
+    };
+    0.2126 * lin(c.r) + 0.7152 * lin(c.g) + 0.0722 * lin(c.b)
+}
+
+/// WCAG contrast ratio between two opaque colours, `1.0..=21.0`.
+pub(crate) fn contrast_ratio(a: Color, b: Color) -> f32 {
+    let (la, lb) = (luminance(a), luminance(b));
+    let (hi, lo) = if la >= lb { (la, lb) } else { (lb, la) };
+    (hi + 0.05) / (lo + 0.05)
+}
+
+/// The label colour for text on a solid `fill`: white or near-black, whichever
+/// reads better. The dark theme's bright mint and coral fills take the dark
+/// label (white on them is 1.9:1 and 3.1:1); the light theme's deep ones, white.
+pub(crate) fn on_fill(fill: Color) -> Color {
+    let white = Color::WHITE;
+    let ink = Color::from_rgb(0.05, 0.05, 0.07);
+    if contrast_ratio(white, fill) >= contrast_ratio(ink, fill) {
+        white
+    } else {
+        ink
     }
 }
 
@@ -207,25 +239,48 @@ pub(crate) fn card_style(theme: &Theme) -> container::Style {
     }
 }
 
-/// A card that wants a decision: `tone` (warn / danger) tints the fill and the
-/// hairline, with a stronger left edge than a plain card so it cannot be
-/// scrolled past unnoticed.
-pub(crate) fn alert_card_style(tone: Color) -> impl Fn(&Theme) -> container::Style {
-    move |theme: &Theme| {
-        let palette = palette_for_theme(theme);
-        container::Style {
-            // Opaque: a translucent fill would show the card's own shadow
-            // through it.
-            background: Some(Background::Color(mix(palette.raised, tone, 0.10))),
+/// Width of the coloured rule on a [`rule_card`].
+const RULE_WIDTH: f32 = 4.0;
+
+/// A card that wants a decision: a neutral raised surface with a hairline
+/// border, and the only colour a thin `tone` rule down its left edge (warn for
+/// "the agent needs you", danger for "something looks wrong"). The tone says
+/// what kind of decision it is; it never tints the surface, so the text on it
+/// keeps its full contrast and the card does not read as a coloured banner.
+pub(crate) fn rule_card<'a>(
+    palette: &'static Palette,
+    tone: Color,
+    content: Element<'a, FerriteBrowserMessage>,
+) -> Element<'a, FerriteBrowserMessage> {
+    let rule =
+        container(Space::new(Length::Fixed(RULE_WIDTH), Length::Fill)).style(move |_: &Theme| {
+            container::Style {
+                background: Some(Background::Color(tone)),
+                border: Border {
+                    radius: iced::border::Radius {
+                        top_left: RADIUS_MD,
+                        bottom_left: RADIUS_MD,
+                        top_right: 0.0,
+                        bottom_right: 0.0,
+                    },
+                    ..Border::default()
+                },
+                ..container::Style::default()
+            }
+        });
+    container(row![rule, container(content).padding(SP_MD).width(Length::Fill)].width(Length::Fill))
+        .width(Length::Fill)
+        .style(move |_: &Theme| container::Style {
+            background: Some(Background::Color(palette.raised)),
             border: Border {
-                color: tint(tone, 0.55),
+                color: palette.divider,
                 width: 1.0,
-                radius: radius(RADIUS_LG),
+                radius: radius(RADIUS_MD),
             },
             shadow: shadow_card(),
             text_color: Some(palette.text),
-        }
-    }
+        })
+        .into()
 }
 
 /// A floating popover (the overflow menu).
@@ -341,10 +396,10 @@ pub(crate) fn panel_btn_active(theme: &Theme, status: button::Status) -> button:
     let palette = palette_for_theme(theme);
     button::Style {
         background: Some(Background::Color(match status {
-            button::Status::Hovered | button::Status::Pressed => palette.accent_bright,
-            _ => palette.accent,
+            button::Status::Hovered | button::Status::Pressed => palette.accent_fill_hover,
+            _ => palette.accent_fill,
         })),
-        text_color: Color::WHITE,
+        text_color: on_fill(palette.accent_fill),
         border: Border {
             radius: radius(RADIUS_MD),
             ..Border::default()
@@ -393,21 +448,17 @@ pub(crate) fn outline_btn_style(theme: &Theme, status: button::Status) -> button
 /// Primary button: solid accent. Dimmed (not hidden) when disabled.
 pub(crate) fn accent_btn_style(theme: &Theme, status: button::Status) -> button::Style {
     let palette = palette_for_theme(theme);
+    let fill = match status {
+        button::Status::Hovered => palette.accent_fill_hover,
+        button::Status::Pressed => darken(palette.accent_fill, 0.88),
+        button::Status::Disabled => tint(palette.accent_fill, 0.35),
+        button::Status::Active => palette.accent_fill,
+    };
     button::Style {
-        background: Some(Background::Color(match status {
-            button::Status::Hovered => palette.accent_bright,
-            button::Status::Pressed => Color {
-                r: palette.accent.r * 0.88,
-                g: palette.accent.g * 0.88,
-                b: palette.accent.b * 0.88,
-                a: 1.0,
-            },
-            button::Status::Disabled => tint(palette.accent, 0.35),
-            button::Status::Active => palette.accent,
-        })),
+        background: Some(Background::Color(fill)),
         text_color: match status {
-            button::Status::Disabled => tint(Color::WHITE, 0.7),
-            _ => Color::WHITE,
+            button::Status::Disabled => tint(on_fill(palette.accent_fill), 0.7),
+            _ => on_fill(palette.accent_fill),
         },
         border: Border {
             radius: radius(RADIUS_MD),
@@ -417,22 +468,27 @@ pub(crate) fn accent_btn_style(theme: &Theme, status: button::Status) -> button:
     }
 }
 
+/// `color` with each channel scaled by `factor`.
+fn darken(color: Color, factor: f32) -> Color {
+    Color {
+        r: color.r * factor,
+        g: color.g * factor,
+        b: color.b * factor,
+        a: 1.0,
+    }
+}
+
 /// Destructive button: solid danger.
 pub(crate) fn danger_btn_style(theme: &Theme, status: button::Status) -> button::Style {
     let palette = palette_for_theme(theme);
     button::Style {
         background: Some(Background::Color(match status {
             button::Status::Hovered => tint(palette.danger, 0.88),
-            button::Status::Pressed => Color {
-                r: palette.danger.r * 0.85,
-                g: palette.danger.g * 0.85,
-                b: palette.danger.b * 0.85,
-                a: 1.0,
-            },
+            button::Status::Pressed => darken(palette.danger, 0.85),
             button::Status::Disabled => tint(palette.danger, 0.35),
             button::Status::Active => palette.danger,
         })),
-        text_color: Color::WHITE,
+        text_color: on_fill(palette.danger),
         border: Border {
             radius: radius(RADIUS_MD),
             ..Border::default()
@@ -447,16 +503,11 @@ pub(crate) fn safe_btn_style(theme: &Theme, status: button::Status) -> button::S
     button::Style {
         background: Some(Background::Color(match status {
             button::Status::Hovered => tint(palette.safe, 0.88),
-            button::Status::Pressed => Color {
-                r: palette.safe.r * 0.85,
-                g: palette.safe.g * 0.85,
-                b: palette.safe.b * 0.85,
-                a: 1.0,
-            },
+            button::Status::Pressed => darken(palette.safe, 0.85),
             button::Status::Disabled => tint(palette.safe, 0.35),
             button::Status::Active => palette.safe,
         })),
-        text_color: Color::WHITE,
+        text_color: on_fill(palette.safe),
         border: Border {
             radius: radius(RADIUS_MD),
             ..Border::default()
