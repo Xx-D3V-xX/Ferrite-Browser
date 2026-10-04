@@ -2,112 +2,139 @@
 title: Limits
 order: 13
 group: Honesty
-summary: Every known limit of Ferrite's defense, its evaluation and the product, and an explicit list of what is not claimed.
+summary: Every known limit of Ferrite's defense, its evaluation (including the one live run with a real model) and the product, and an explicit list of what is not claimed.
 -->
-<p class="lede">A security project that hides its weaknesses cannot be evaluated. This page gathers every known limit in one place: what the defense cannot stop, what the evaluation cannot show, and what the product cannot do yet. Where a limit is pinned by a test, the test stays in the repository, so the limit cannot quietly disappear.</p>
+<p class="lede">A security project that hides its weaknesses cannot be judged. This page puts every known limit in one place. It says what the defense cannot stop. It says what the evaluation cannot show. It says what the product cannot do yet. Some limits are pinned by a test. That test stays in the repository, so the limit cannot quietly disappear. Some words here are new. <a href="{{ROOT}}docs/glossary.html">Words we use</a> explains them.</p>
 
 <div class="callout warn">
   <h4>Ferrite is a research prototype</h4>
-  <p>Do not use it to protect anything you cannot afford to lose. The numbers in the documentation describe an architecture under a particular experiment, not a guarantee.</p>
+  <p>Do not use it to protect anything you cannot afford to lose. The numbers in the documentation describe an architecture in one experiment. They are not a guarantee.</p>
 </div>
 
 <h2>Limits of the defense</h2>
 
 <h3>The residual: attacks inside the prediction</h3>
-<p>The architecture contains every attack that needs an action outside what the task implied, and <strong>nothing else</strong>. An attack that uses the same capability at the task's own site, or that is data-only (for example, tampering with the content a legitimate action returns), is indistinguishable from the task. In the evaluation this is 122 of 809 attacks (15.1%) with the sanitizer off. It is reported as a floor and kept in every denominator.</p>
+<p>Ferrite predicts a fingerprint for each task. The fingerprint is the list of tools and websites the task is expected to need. The defense contains every attack that needs an action outside that list, and <strong>nothing else</strong>. A residual is an attack that looks exactly like the normal task. One kind uses the same capability at the task's own site. Another kind is data-only. For example, it changes the content that a legitimate action returns. Ferrite cannot tell these attacks from the task. In the evaluation, the residual is 122 of 809 attacks (15.1%) with the sanitizer off. Ferrite reports this number as a floor. It keeps these attacks in every denominator.</p>
 
 <h3>Open-ended scopes</h3>
-<p>Under a <code>task_open</code> scope every origin is admitted, so nothing distinguishes the attacker's destination. An open-ended prompt that matches no rule produces an empty fingerprint, which sends everything to consent. That is safe but noisy; a follow-up like “do the same for the second one” predicts a looser fingerprint because the dry run sees no page content, and may raise more prompts. The fail-safe direction is accepted.</p>
+<p>A scope says which websites a task may use. Under a <code>task_open</code> scope, every origin is allowed. An origin is a website address. So nothing sets the attacker's destination apart. Sometimes an open-ended request matches no rule. Then the fingerprint is empty, and every action goes to consent. That is safe, but it can be noisy. Take a follow-up such as “do the same for the second one”. The dry run sees no page content. So the fingerprint is looser, and you may get more prompts. A dry run is a practice run that does nothing real. Ferrite accepts the safe direction here.</p>
 
 <h3>The sanitizer</h3>
-<p>It is pattern matching over de-obfuscated views. It misses, by construction and pinned by tests: paraphrase, languages outside its list, syllable hyphenation, spelled-out markup or URLs, reversed non-Latin text, and payloads split across separate elements. It also has known false positives: pages that <em>discuss</em> attacks (“attackers exfiltrate data”, “never ignore the previous warnings”) and any mention of “system prompt”. The architecture does not depend on it.</p>
+<p>The sanitizer is a filter. It matches known attack patterns in page text, after it undoes common disguises. By design, it misses these things. Tests pin each miss.</p>
+<ul>
+  <li>Paraphrase (the same attack in other words).</li>
+  <li>Languages that are not on its list.</li>
+  <li>Words broken into syllables with hyphens.</li>
+  <li>Markup or URLs that are spelled out in words.</li>
+  <li>Reversed text in non-Latin scripts.</li>
+  <li>Attack text split across separate elements.</li>
+</ul>
+<p>It also flags some safe pages by mistake. Pages that <em>discuss</em> attacks trigger it, for example “attackers exfiltrate data” and “never ignore the previous warnings”. Any mention of “system prompt” triggers it too. The architecture does not depend on the sanitizer.</p>
 
 <h3>The runtime guard</h3>
+<p>The runtime guard checks every real action. It is the check that stops an action outside the predicted list.</p>
 <ul>
-  <li>A click by CSS selector, a form <code>action</code> (submit, Enter in a field) and a server-side redirect cannot be resolved to a destination before they run. The tab's new origin is checked on the <em>next</em> action, after the request has been made.</li>
-  <li>A trailing-dot host (<code>example.com.</code>) fails closed.</li>
-  <li>Within-fingerprint abuse is indistinguishable from the task, by construction.</li>
+  <li>Some actions cannot be traced to a destination before they run. These are a click by CSS selector, a form <code>action</code> (a submit, or Enter in a field), and a server-side redirect. Ferrite checks the tab's new origin on the <em>next</em> action. By then the request has already been made.</li>
+  <li>A host with a trailing dot (<code>example.com.</code>) fails closed. That means it is refused.</li>
+  <li>Within-fingerprint abuse looks the same as the task, by construction.</li>
 </ul>
 
 <h3>The human</h3>
-<p>The consent gate is a person. A user who approves everything defeats it: in the original run, approving every flagged action left 45.5% of attacks succeeding, against 0% when every flagged action is rejected. Real behavior is somewhere in between, and no human-factors study has measured where.</p>
+<p>The consent gate is a question to a person. The person decides. A user who approves everything defeats it. In the original run, 45.5% of attacks succeeded when every flagged action was approved. When every flagged action was rejected, 0% succeeded. Real people are somewhere in between. No human-factors study has measured where.</p>
 
 <h3>The model</h3>
-<p>Ferrite bounds what a compromised agent can <em>do</em>. It does not make a model less gullible. A model that is fooled will still try the action; the defense is that the attempt is contained, not that it is never made.</p>
+<p>Ferrite limits what a fooled agent can <em>do</em>. It does not make a model less easy to fool. A fooled model still tries the action. The defense contains the attempt. It does not stop the attempt from happening.</p>
 
 <h2>Limits of the evaluation</h2>
 <ul>
-  <li><strong>The agent is scripted.</strong> It re-enacts each case's authored deviation from ground truth, so the results say nothing about how often a real model takes the bait.</li>
-  <li><strong>The fingerprint is rules-only by default.</strong> The 0% false-gate rate is for a well-behaved scripted agent under that prediction. A real agent's rate depends on what it does and on the model prediction layer, which the default run does not exercise.</li>
-  <li><strong>Self-authored and generated.</strong> The corpus was written by the defense's author and expanded from shared templates, then tuned against. The intervals treat matrix-correlated cases as independent, so they understate the uncertainty.</li>
-  <li><strong>No independent slice to speak of.</strong> Only three of the 938 cases are external (AgentDojo), which supports no claim. There is no second author, so Cohen's κ for annotation agreement is not computable and has not been faked.</li>
-  <li><strong>The 1,046-case AgentDojo import has no results.</strong> It is checked in and validated offline, but it is the default corpus of the live runner, which has never been run against a real model. Its labels come from AgentDojo's ground-truth calls mapped onto Ferrite's primitives (some from the goal text alone), with one attack template and a synthetic environment, so even its future numbers will not be comparable to published AgentDojo scores.</li>
-  <li><strong>No real model has been the agent.</strong> A live runner exists for Gemini and Ollama; no run has produced a result. OpenAI-compatible and Anthropic endpoints cannot be selected, because the model layer has no backend for them.</li>
-  <li><strong>ADR = 100% is by construction.</strong> It measures the comparator against a scripted agent that issues exactly the declared deviation.</li>
-  <li><strong>Missing quantities.</strong> Task-completion parity for benign tasks (no benign baseline under Off) and extra token cost (no token usage in the execution record) are not computed, for stated reasons.</li>
-  <li><strong>A live-provider run is not reproducible</strong> byte for byte, so it is reported separately.</li>
+  <li><strong>The main evaluation uses a scripted agent.</strong> The agent re-enacts each case's authored deviation from ground truth. Ground truth is the answer key: what the attack really tries to do. So the main results say nothing about how often a real model takes the bait. One live run did use a real model. Its limits are in the next section.</li>
+  <li><strong>The fingerprint is rules-only by default.</strong> The 0% false-gate rate is for a well-behaved scripted agent with that prediction. A false gate is a question asked to the user for a normal task. A real agent's rate depends on what it does. It also depends on the model prediction layer, which the default run does not use. The live run did use the model prediction layer. Its false-positive rate was 38.1%. See the next section.</li>
+  <li><strong>The corpus is self-written and generated.</strong> The defense's author wrote the cases. Shared templates then expanded them. The author also tuned the defense against them. The intervals treat related cases as independent. So they understate the real uncertainty.</li>
+  <li><strong>There is almost no independent slice.</strong> Only three of the 938 cases come from outside (AgentDojo). Three cases support no claim. There is no second author. So Cohen's κ, the score for how much two people agree when they label cases, cannot be computed. Ferrite has not faked it.</li>
+  <li><strong>The 1,046-case AgentDojo import is not in the headline numbers.</strong> It is checked in and checked offline. It has results only from the one live run with one model. Its labels come from AgentDojo's ground-truth calls. Ferrite mapped those calls onto its own primitives. Some labels come from the goal text alone. It uses one attack template and a synthetic environment. So its numbers cannot be compared with published AgentDojo scores.</li>
+  <li><strong>Only one real model has been the agent.</strong> That model is ollama gemma4:31b, in the live run below. The live runner can use Gemini and Ollama. You cannot select OpenAI-compatible or Anthropic endpoints, because the model layer has no backend for them.</li>
+  <li><strong>ADR = 100% is true by construction.</strong> ADR is the share of deviations that the comparison flagged. It measures the comparator against a scripted agent that does exactly the declared deviation.</li>
+  <li><strong>Some quantities are missing.</strong> Ferrite does not compute task-completion parity for normal tasks. There is no normal-task baseline under Off. It also does not compute the extra token cost. The execution record has no token usage. Both gaps have stated reasons.</li>
+  <li><strong>A live-provider run cannot be reproduced byte for byte.</strong> So Ferrite reports it separately.</li>
+</ul>
+
+<h2>Limits of the live run with a real model</h2>
+<p>The owner ran all 1,984 cases (the 938 cases plus the 1,046 AgentDojo import) with <strong>ollama gemma4:31b</strong>. The model played both roles: it predicted the fingerprint, and it was the agent. Each case ran twice, once with the guard off and once with the guard on. That makes 3,968 runs. None failed for infrastructure reasons. The numbers are in <a href="{{ROOT}}docs/evaluation.html#live-results">Live results</a> on the Evaluation page. The full report is <code>docs/results/live-eval-ollama-gemma4-31b.md</code>. These limits apply to that run.</p>
+<ul>
+  <li><strong>Only one model was tested.</strong> The results say nothing about any other model.</li>
+  <li><strong>The model rarely fell for the attack.</strong> With the guard off, it carried out 31 of 1,542 measurable attack runs (2.0%). So the guard had few attacks to stop. With the guard on, 6 attack runs got through (0.4%). In 25 cases, an attack ran with the guard off and did not run with the guard on. The reverse never happened. These counts are small. Read them with their wide intervals.</li>
+  <li><strong>The guard stopped none of the 5 AgentRedirection attacks.</strong> All 5 ran in both modes (5 of 62 runs, 8.1%). AgentRedirection is an attack that sends the agent to the attacker's content. Only 62 runs are in this category, so this is a small sample.</li>
+  <li><strong>The guard refused an action in 38.1% of normal tasks.</strong> That is 86 of 226 normal runs. This is a false positive: a refusal in a task that was not under attack. The likely cause is that the predictor is weak. Only the 1,046 AgentDojo cases state what a task needs, so Ferrite scored the predictor on those. It found 70.1% of the capabilities a task needs (1,196 of 1,706). Only 52.2% of the capabilities it predicted were needed (1,196 of 2,293). It predicted the whole needed set for 56.2% of the tasks (588 of 1,046). In real use, a refusal like this would be a question to you.</li>
+  <li><strong>Some attacks cannot be stopped by a fingerprint.</strong> In 27.1% of the measurable attack runs (418 of 1,542), the attack looks exactly like the normal task. These are residual cases. Among the 393 AgentDojo attack cases that name an extra capability, the prediction already allowed it in 98 (24.9%). The guard could not stop those. 432 attack runs could not be recognized in the agent's actions. They are residual cases with no attacker string. Ferrite leaves them out of the attack rates.</li>
+  <li><strong>Ferrite used one attack template and tried each case once.</strong> A model that resists one wording may not resist another. One try for each case says nothing about how much results vary.</li>
+  <li><strong>The practice engine does nothing real.</strong> The agent acts in a dry-run engine. The engine records what it is asked to do, and it runs nothing. Ferrite cannot see whether a task really succeeded. It treats a final answer from the agent as a stand-in for success.</li>
+  <li><strong>The simulated user refuses everything.</strong> The guard refuses every deviation. This is the best case for containment. A real person who approves prompts moves these numbers toward the guard-off numbers.</li>
+  <li><strong>Judging an attack uses a specification, not a perfect test.</strong> An action counts as the attack in two cases. In the first, it uses a primitive or an origin that the case's ground truth names. In the second, it contains a string the attacker chose. Both signals are imperfect. A model that wanders into an extra primitive on its own is counted as a hit.</li>
+  <li><strong>These are Ferrite's own numbers.</strong> They are not AgentDojo's utility or security scores. Do not compare them with published AgentDojo numbers.</li>
+  <li><strong>Some rows have few cases.</strong> For example, ScopeEscalation has 1 run, and the hand-written AgentDojo cases have 3. Do not quote small rows as findings.</li>
+  <li><strong>The owner ran it on their own machine.</strong> The report in the repository is a copy. The raw per-run file is not in the repository.</li>
 </ul>
 
 <h2>Limits of the product</h2>
 
 <div class="callout warn">
   <h4>Most of the newest work has only run on Linux</h4>
-  <p>The DevTools panel, resizable panels, page-control overlays, crash banner, calmer approval cards, GPU renderer and display-scale fix were checked on Linux, rendered under a virtual display at normal pixel density, and, for the engine parts, run in the headless engine. <strong>None of it has run on a Mac</strong>, on a Retina screen or on a real GPU. The build on the releases page (commit <code>f4ed744</code>, 2026-10-02) predates most of it.</p>
+  <p>These features were checked on Linux. They are the DevTools panel, resizable panels, page-control overlays, the crash banner, calmer approval cards, the GPU renderer and the display-scale fix. The checks used a virtual display at normal pixel density. The engine parts also ran in the headless engine. <strong>None of it has run on a Mac</strong>, on a Retina screen or on a real GPU. The build on the releases page (commit <code>f4ed744</code>, 2026-10-02) is older than most of it.</p>
 </div>
 
 <h3>Websites that do not work yet</h3>
 <ul>
-  <li><strong>GitHub does not open in the owner's build, and the cause is unknown.</strong> The first log was empty. A script-thread panic was found and fixed in a vendored engine patch, but it was never reproduced, so it is not proven to be the cause. What would settle it is the log or the <code>collect-logs</code> zip from a build that has the new console and request logging, captured right after loading GitHub (see <a href="{{ROOT}}docs/debugging.html">Debugging and logs</a>).</li>
-  <li><strong>The Google results page was pinned to the left edge.</strong> That is attributed to the engine never being told the display scale (a Retina page was laid out twice as wide as it looks), which is now fixed, but nobody has seen it directly, and Google could not be loaded where this was investigated. It needs a screenshot from a new build.</li>
-  <li><strong>Google and GitHub sign-in may still be refused.</strong> These sites decide from the whole session, and Ferrite uses a young engine. The identity choice, the engine's added Web APIs and the sign-in handoff are what Ferrite does about it; none is a guarantee, and it has not been verified against those sites. Google sign-in in particular is still an open report. Still missing in the engine: service workers, <code>navigator.mediaDevices</code> (WebRTC), <code>navigator.userAgentData</code> and <code>window.chrome</code>. Ferrite deliberately does not fake any of them, nor hardware, canvas or renderer details, nor hide automation.</li>
-  <li><strong>Web compatibility is Servo's.</strong> Ferrite renders with the Servo engine, and several CSS features current sites rely on are missing or broken in it: <code>:has()</code>, container queries, <code>mask-image</code>, <code>backdrop-filter</code>, <code>text-wrap</code>, subgrid, popovers, and <code>aspect-ratio</code> on block boxes (a box with a width collapses to zero height). Pages that depend on them will look wrong. Ferrite enables the engine features that were measured to work (<code>adoptedStyleSheets</code>, FontFace, WebGL, and a further seven Web APIs found by testing every default-off engine switch one at a time) and leaves off those that were measured not to, such as WebRTC (it would hand out the microphone with no prompt), geolocation and service workers, and injects one small script so that icons coloured by CSS stay visible (Servo paints them black otherwise), but it cannot add layout features the engine does not have.</li>
-  <li><strong>Zooming and interaction fail on some pages, unexplained.</strong> The page crash banner and the Engine tab now surface script-thread panics, and dropdowns and dialogs now work, which were the two candidates. Whether they account for what was seen is not known.</li>
+  <li><strong>GitHub does not open in the owner's build, and the cause is not known.</strong> The first log was empty. Ferrite found a script-thread panic and fixed it in a vendored engine patch. A vendored patch is a changed copy of the engine kept in the repository. Nobody could make the panic happen again, so it is not proven to be the cause. What would settle it is the log, or the <code>collect-logs</code> zip, from a build that has the new console and request logging. Capture it right after loading GitHub. The owner needs to send this. See <a href="{{ROOT}}docs/debugging.html">Debugging and logs</a>.</li>
+  <li><strong>The Google results page was pinned to the left edge.</strong> The likely cause is that the engine was never told the display scale. A Retina page was laid out twice as wide as it looks. This is now fixed. But nobody has seen the fix work, and Google could not be loaded where this was studied. It needs a screenshot from a new build.</li>
+  <li><strong>Google and GitHub sign-in may still be refused.</strong> These sites decide from the whole session. Ferrite uses a young engine. Ferrite does three things about it: the identity choice, the Web APIs it added to the engine, and the sign-in handoff. None of these is a guarantee. Nobody has checked them against those sites. Google sign-in is still an open report. The engine still lacks service workers, <code>navigator.mediaDevices</code> (WebRTC), <code>navigator.userAgentData</code> and <code>window.chrome</code>. Ferrite does not fake any of them. It also does not fake hardware, canvas or renderer details, and it does not hide automation.</li>
+  <li><strong>Web compatibility is Servo's.</strong> Servo is the web engine Ferrite uses to draw pages. Several CSS features that current sites use are missing or broken in Servo. They are <code>:has()</code>, container queries, <code>mask-image</code>, <code>backdrop-filter</code>, <code>text-wrap</code>, subgrid, popovers, and <code>aspect-ratio</code> on block boxes (a box with a width collapses to zero height). Pages that need them will look wrong. Ferrite turns on the engine features that were measured to work: <code>adoptedStyleSheets</code>, FontFace, WebGL, and seven more Web APIs. It found those seven by testing every engine switch that is off by default, one at a time. Ferrite leaves off the features that were measured not to work. These are WebRTC (it would hand out the microphone with no prompt), geolocation and service workers. Ferrite also adds one small script. The script keeps icons coloured by CSS visible, because Servo paints them black otherwise. Ferrite cannot add layout features that the engine does not have.</li>
+  <li><strong>Zooming and interaction fail on some pages, and nobody knows why.</strong> The page crash banner and the Engine tab now show script-thread panics. Dropdowns and dialogs now work. These were the two possible causes. Nobody knows whether they explain what was seen.</li>
 </ul>
 
 <h3>The browser</h3>
 <ul>
-  <li><strong>The DevTools Network tab has no status, size or timing.</strong> A request is listed as it starts, with its method, type and URL; the engine's response callback is not wired up, so there is no status code, duration or waterfall. <code>fetch()</code> and XHR are listed as <em>Other</em>.</li>
-  <li><strong>The file picker is a typed-path card.</strong> There is no native file dialog. The request reaches the browser and an answer path exists, but it has not been exercised against a real upload.</li>
-  <li><strong>HTTP basic-auth prompts and input-method (IME) composition are not handled.</strong> A page behind basic auth gets no prompt, and composed text (Chinese, Japanese, Korean and similar input) is not forwarded. Non-US keyboard layouts, dead keys and key repeat have not been observed.</li>
+  <li><strong>The DevTools Network tab has no status, size or timing.</strong> A request is listed when it starts, with its method, type and URL. The engine's response callback is not wired up. So there is no status code, no duration and no waterfall. <code>fetch()</code> and XHR are listed as <em>Other</em>.</li>
+  <li><strong>The file picker is a card where you type a path.</strong> There is no native file dialog. The request reaches the browser, and an answer path exists. Nobody has tried it with a real upload.</li>
+  <li><strong>HTTP basic-auth prompts and input-method (IME) composition are not handled.</strong> A page behind basic auth gets no prompt. Composed text is not passed on. Chinese, Japanese and Korean input are examples. Nobody has tested non-US keyboard layouts, dead keys or key repeat.</li>
   <li><strong><kbd>F12</kbd> opens the Audit panel, not DevTools.</strong> DevTools is <kbd>Cmd</kbd>+<kbd>Opt</kbd>+<kbd>I</kbd> or <kbd>Ctrl</kbd>+<kbd>Shift</kbd>+<kbd>I</kbd>, or <kbd>Cmd/Ctrl</kbd>+<kbd>J</kbd>. Whether <kbd>F12</kbd> should change is an open decision.</li>
-  <li><strong>Address-bar search is Google; the agent's search is not.</strong> Typing a query in the address bar goes to Google. The agent's own prompt still tells it to search with DuckDuckGo Lite and not to use google.com, because Google's pages stayed blank in this engine when that was written. Whether Google's results page now renders properly has not been confirmed.</li>
-  <li><strong>Cookies are written on clean shutdown.</strong> Closing the window saves the profile; a crash, a kill or macOS <kbd>Cmd</kbd>+<kbd>Q</kbd> that bypasses the window close loses that run's new cookies. A 3-second quit watchdog ends the process after a window close, but whether it also covers <kbd>Cmd</kbd>+<kbd>Q</kbd> is unknown.</li>
-  <li><strong>Linux keys do not persist across a restart</strong> with the kernel-keyring backend this build uses; see <a href="{{ROOT}}docs/models-and-settings.html">Models and settings</a>.</li>
+  <li><strong>The address bar searches with Google. The agent does not.</strong> A query typed in the address bar goes to Google. The agent's own prompt still tells it to search with DuckDuckGo Lite and not to use google.com. This is because Google's pages stayed blank in this engine when that was written. Nobody has confirmed whether Google's results page now draws properly.</li>
+  <li><strong>Cookies are saved on a clean shutdown.</strong> Closing the window saves the profile. A crash, a kill, or macOS <kbd>Cmd</kbd>+<kbd>Q</kbd> that skips the window close loses the new cookies of that run. After a window close, a 3-second quit watchdog ends the process. Nobody knows whether it also covers <kbd>Cmd</kbd>+<kbd>Q</kbd>.</li>
+  <li><strong>Linux keys do not survive a restart</strong> with the kernel-keyring backend this build uses. See <a href="{{ROOT}}docs/models-and-settings.html">Models and settings</a>.</li>
 </ul>
 
 <h3>Speed and the renderer</h3>
 <ul>
-  <li><strong>Speed on real hardware is unmeasured.</strong> Measured, in the headless engine on Linux: the fix that stopped the shell copying and re-uploading the whole page every tick. Not measured anywhere: the GPU rendering path, the thread pools sized to the core count, and the release profile as <code>just run-fast</code> builds it. An on-disk HTTP cache was tried and removed, because the engine's disk cache stores only entries evicted from memory and did nothing across restarts.</li>
-  <li><strong>The GPU renderer has never run on a real GPU or on a Mac.</strong> It is pixel-identical to the CPU path on Mesa's software OpenGL, which is all it was tested on. It is chosen automatically on macOS only and falls back to the CPU renderer if its self-test fails; <code>FERRITE_RENDERER=gpu|cpu|auto</code> overrides it.</li>
+  <li><strong>Speed on real hardware has not been measured.</strong> One thing was measured, in the headless engine on Linux. It is the fix that stopped the shell from copying and re-uploading the whole page on every tick. Three things were not measured anywhere. They are the GPU rendering path, the thread pools sized to the core count, and the release profile as <code>just run-fast</code> builds it. An on-disk HTTP cache was tried and then removed. The engine's disk cache stores only entries pushed out of memory, and it did nothing across restarts.</li>
+  <li><strong>The GPU renderer has never run on a real GPU or on a Mac.</strong> It gives the same pixels as the CPU path on Mesa's software OpenGL. That is the only place it was tested. Ferrite chooses it automatically on macOS only. It falls back to the CPU renderer if its self-test fails. <code>FERRITE_RENDERER=gpu|cpu|auto</code> overrides the choice.</li>
 </ul>
 
 <h3>Logs and builds</h3>
 <ul>
-  <li><strong>No log file on Windows.</strong> Redirecting standard error to a file is Unix-only in the current code, so a Windows run prints to its terminal or nowhere. <code>collect-logs</code> is a bash script: macOS and Linux only, with the stack sample macOS only, and bundled in the macOS app only.</li>
-  <li><strong>Unsigned builds.</strong> Each platform asks you to confirm the first launch, and on macOS the app is ad-hoc signed but not notarized.</li>
-  <li><strong>Builds lag the source.</strong> Builds are made by a manual CI run, and the release page names the commit it came from.</li>
-  <li><strong>The macOS app has crashed for the owner.</strong> It was reported to crash repeatedly, to need a force-quit, and to fail on some pages. A log file, a quit watchdog, crash reporting and the DevTools Engine tab were added to make that diagnosable, and none of them has been run on that Mac yet. How the packaged Windows and Linux builds behave on real machines has not been checked by the project.</li>
-  <li><strong>A build without Servo cannot render pages.</strong> It is for the interface, the defense and the evaluation.</li>
-  <li><strong>No LICENSE file yet.</strong> The crate manifests declare <code>MIT OR Apache-2.0</code>, carried over from an earlier file's stated intent, and the choice has not been confirmed by the project owner.</li>
+  <li><strong>No log file on Windows.</strong> In the current code, sending standard error to a file works on Unix only. A Windows run prints to its terminal or nowhere. <code>collect-logs</code> is a bash script. It works on macOS and Linux only. The stack sample works on macOS only. The script is bundled in the macOS app only.</li>
+  <li><strong>Unsigned builds.</strong> Each platform asks you to confirm the first launch. On macOS, the app has an ad-hoc signature but is not notarized.</li>
+  <li><strong>Builds are older than the source.</strong> A manual CI run makes the builds. The release page names the commit that a build came from.</li>
+  <li><strong>The macOS app has crashed for the owner.</strong> It was reported to crash again and again, to need a force-quit, and to fail on some pages. Ferrite added a log file, a quit watchdog, crash reporting and the DevTools Engine tab so that this can be diagnosed. None of them has run on that Mac yet. The project has not checked how the packaged Windows and Linux builds behave on real machines.</li>
+  <li><strong>A build without Servo cannot draw pages.</strong> It is for the interface, the defense and the evaluation.</li>
+  <li><strong>No LICENSE file yet.</strong> The crate manifests say <code>MIT OR Apache-2.0</code>. That choice was carried over from an earlier file's stated intent. The project owner has not confirmed it.</li>
 </ul>
 
 <h2>What is explicitly not claimed</h2>
 <div class="callout bad">
   <ul style="margin:0">
     <li>That Ferrite makes AI browsing safe, or safe in production.</li>
-    <li>That any model is robust to prompt injection because it sits behind Ferrite.</li>
-    <li>That the evaluation generalizes to attacks, tasks or sites outside the corpus.</li>
-    <li>That users will reject unexpected actions; the headline numbers assume they do.</li>
-    <li>That the defense survives an attacker who has read it. The corpus was tuned against, and no held-out, adversarial, independently authored evaluation has been run.</li>
-    <li>That the sanitizer detects injected text in general. It detects the patterns it has.</li>
+    <li>That any model resists prompt injection because it sits behind Ferrite.</li>
+    <li>That the evaluation holds for attacks, tasks or sites outside the corpus.</li>
+    <li>That users will reject unexpected actions. The headline numbers assume they do.</li>
+    <li>That the defense survives an attacker who has read it. The corpus was tuned against. Nobody has run a held-out, adversarial evaluation written by other people.</li>
+    <li>That the sanitizer finds injected text in general. It finds only the patterns it has.</li>
   </ul>
 </div>
 
 <h2>What would make the claims stronger</h2>
 <ul>
-  <li>An independently authored, held-out corpus, run once, with a defense brief withheld from the authors.</li>
-  <li>A run with real models as the agent, reporting how often they take the bait and what the defense contains.</li>
-  <li>A human-factors study of how people actually answer consent prompts.</li>
-  <li>The model prediction layer measured on its own, with the sanitizer and rules off.</li>
+  <li>A corpus written by other people and held back, run once. The authors would not see the defense brief.</li>
+  <li>More real models as the agent, with each result reported. The live run so far covers one model. It shows how often that model takes the bait and what the defense contains.</li>
+  <li>A study of how real people answer consent prompts.</li>
+  <li>The model prediction layer measured on its own, with the sanitizer and the rules off.</li>
 </ul>
-<p>If you can do any of these, or find an attack that gets through, <a href="{{REPO}}/issues" rel="noopener">open an issue</a>. A bypass is a result, and the corpus is where it belongs.</p>
+<p>If you can do any of these, or you find an attack that gets through, <a href="{{REPO}}/issues" rel="noopener">open an issue</a>. A bypass is a result. The corpus is the place for it.</p>

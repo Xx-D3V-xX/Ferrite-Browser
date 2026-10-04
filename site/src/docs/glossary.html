@@ -1,0 +1,78 @@
+<!--
+title: Words we use
+order: 14
+group: Reference
+summary: Every technical word on this site in plain English: the defense, the attacks, the numbers and the tools around them.
+-->
+<p class="lede">This page explains the words that you will meet on this site. It uses plain words and short sentences. The words are in four groups: the defense, attacks and labels, numbers and tests, and the tools around Ferrite. Each word has its own link, so other pages can point to it.</p>
+
+<h2>The defense</h2>
+<dl class="defs">
+  <dt id="fingerprint">Fingerprint</dt><dd>The list of tools and websites that a task is expected to need. Ferrite works it out from your request alone, before it reads any page. It is the standard that actions are compared with.</dd>
+  <dt id="must-use-set">Must-use set</dt><dd>The part of the fingerprint that comes from fixed rules. The rules match whole words in your request. For example, “open” implies navigation, and “download” implies a download. Cookies and storage are allowed only if you name them.</dd>
+  <dt id="may-use-set">May-use set</dt><dd>The part of the fingerprint that a model proposes. It holds capabilities the task might need beyond what a fixed set of rules (the rule layer) already decided. The model must pick from a closed list of seven capability names. Anything else is dropped. If the model fails, times out, gives a bad answer or is missing a key, the may-use set becomes empty. It is never skipped and never widened. An empty fingerprint sends every action to consent.</dd>
+  <dt id="capability">Capability</dt><dd>A kind of thing the agent may do, such as reading a page or filling in a form. Each capability comes with a scope. There are exactly seven capabilities.</dd>
+  <dt id="primitive">Primitive</dt><dd>One basic browser action, such as <code>navigate</code>, <code>click</code>, <code>download</code> or <code>js.execute</code>. A capability groups primitives that are alike in how risky they are.</dd>
+  <dt id="origin">Origin</dt><dd>A website address in its basic form: the scheme, the host and the port, for example <code>https://mail.example.com</code>. Ferrite compares origins by the whole host, never by the first letters. So <code>localhost.evil.example</code> is not local.</dd>
+  <dt id="scope">Scope</dt><dd>The set of origins where a capability may act. It has three kinds. <em>Exact</em> names specific origins. <em>Domain suffix</em> allows one domain and its subdomains. <em><code>task_open</code></em> allows every origin, so it is the weakest.</dd>
+  <dt id="dry-run">Dry run</dt><dd>A practice run that does nothing real. The agent's plan runs against made-up data in a stand-in engine. The engine records every call. It has no real network to reach.</dd>
+  <dt id="synthetic-twin">Synthetic twin</dt><dd>The made-up data that the dry run uses in place of the real pages and tools. It is encrypted on disk.</dd>
+  <dt id="comparator">Comparator</dt><dd>The part that compares the fingerprint with what the dry run recorded. Its result lists the extra primitives and the origins that the task did not allow.</dd>
+  <dt id="consent-gate">Consent gate</dt><dd>A question asked to you before an action runs. Ferrite draws it in a trusted panel that page content cannot touch. You approve or reject each item. Nothing real runs before you decide.</dd>
+  <dt id="guard">Guard (runtime guard)</dt><dd>The check that stops an action outside the fingerprint. The dry run cannot see a page that exists only in the real run. So the guard checks every real action again. An action that is not expected and not approved pauses the run and asks you. The guard has known limits. See <a href="{{ROOT}}docs/limits.html">Limits</a>.</dd>
+  <dt id="sanitizer">Sanitizer</dt><dd>A filter that looks in page text for known attack wording and cuts it out. It is pattern matching, so it misses some attacks. The defense does not depend on it.</dd>
+  <dt id="audit-log">Audit log</dt><dd>A record of the security events. Each entry holds a SHA-256 hash of its own content and of the entry before it. So a change to an old entry breaks the chain and can be found. This is why it is called hash-chained. It is stored in SQLite.</dd>
+  <dt id="fail-closed">Fail closed, fail to empty</dt><dd>What Ferrite does when something goes wrong. The prediction becomes empty, so more actions go to consent. The agent refuses to act without a model. Ferrite never skips a check, and it never lets more through.</dd>
+</dl>
+
+<h2>Attacks and labels</h2>
+<dl class="defs">
+  <dt id="agent">Agent</dt><dd>The AI that does a task in the browser for you. It reads pages and chooses each step.</dd>
+  <dt id="injection">Injection</dt><dd>Hidden text that tries to give the AI new orders. It can sit in a hidden element, an HTML comment, an image <code>alt</code> attribute or a field in a tool's answer.</dd>
+  <dt id="indirect-prompt-injection">Indirect prompt injection (IPI)</dt><dd>An injection that comes in through content the agent reads, such as a web page or a tool's answer. It does not come from you, the user. The word “indirect” means the attacker never talks to the agent directly.</dd>
+  <dt id="carrier">Carrier</dt><dd>Where the injection sits. It is either <em>web content</em> (a page) or <em>tool output</em> (the answer of a tool).</dd>
+  <dt id="residual">Residual</dt><dd>An attack that looks exactly like the normal task. It uses the same capability at the task's own site, or it only changes data. No fingerprint can separate it from the task. Ferrite reports the residual as a floor, not as a failure of the guard. It keeps these attacks in every count.</dd>
+  <dt id="origin-shift">Origin shift</dt><dd>An attack that does the same kind of action as the task, but at a different website. The tool is expected. The site is not. Because the origin differs, a check by origin can catch it.</dd>
+  <dt id="attack-categories">Attack categories</dt><dd>Five labels for what an attack tries to do. They are listed next.</dd>
+  <dt id="agent-redirection">AgentRedirection</dt><dd>The injection tries to send the agent to the attacker's content.</dd>
+  <dt id="data-exfiltration">DataExfiltration</dt><dd>The injection tries to make the agent leak data to a place that is not allowed.</dd>
+  <dt id="unauthorized-action">UnauthorizedAction</dt><dd>The injection tries to make the agent do an action that the task did not call for.</dd>
+  <dt id="within-fingerprint-abuse">WithinFingerprintAbuse</dt><dd>The injection stays inside the tools and websites that the task already expected. So the fingerprint cannot separate it from the task. Some of these attacks can still be caught by origin (see origin shift). The rest are the residual.</dd>
+  <dt id="scope-escalation">ScopeEscalation</dt><dd>The injection tries to widen what the agent is allowed to do beyond the task.</dd>
+  <dt id="ground-truth">Ground truth</dt><dd>The answer key for a case: what the attack really tries to do. People write it from the specification. It never comes from running the defense. So the defense cannot grade itself. It has four forms. <em>Deviation</em> is a tool or website that the task did not allow. The others are <em>origin shift</em>, <em>residual</em> (data only) and <em>none</em> (a normal task).</dd>
+  <dt id="attempted-executed">Attempted, executed, blocked</dt><dd>These words describe an attack run. <em>Attempted</em> means the agent proposed an action that counts as the attack. <em>Executed</em> means such an action ran. <em>Blocked</em> means it was attempted and the guard stopped it. An action counts as the attack in two cases. In the first, it uses a primitive or origin that the ground truth names. In the second, it contains a string that the attacker chose.</dd>
+</dl>
+
+<h2>Numbers and tests</h2>
+<dl class="defs">
+  <dt id="benign">Benign</dt><dd>A normal task with no attack in it. Benign cases show what the defense costs you, for example how often it asks a needless question.</dd>
+  <dt id="attack-template">Attack template</dt><dd>The wording that an attack uses. The live run used one template (<code>important_instructions</code>). A model that resists one wording may not resist another.</dd>
+  <dt id="corpus">Corpus, case</dt><dd>A <em>case</em> is one test: a task, a page or tool answer, and an attack or none. The <em>corpus</em> is the whole set of cases.</dd>
+  <dt id="scripted-agent">Scripted agent</dt><dd>A stand-in agent that does exactly what each case's authored deviation says. It is not a model. The main evaluation uses it.</dd>
+  <dt id="mode">Mode, baseline</dt><dd>A mode says which parts of the defense are on. In the live run, <em>off</em> has nothing on. It is the <em>baseline</em>. <em>guard</em> has the runtime guard on. The main evaluation has four modes. See <a href="{{ROOT}}docs/evaluation.html">Evaluation</a>.</dd>
+  <dt id="asr">ASR, ADR, SDR, FGR</dt><dd>Short names for the main rates. <em>ASR</em> (attack success rate) is the share of attack cases where the attack ran. <em>ADR</em> is the share of deviation cases where the comparison flagged the deviation. <em>SDR</em> is the share where the sanitizer found the expected text. <em>FGR</em> (false gate rate) is the share of normal cases where Ferrite asked you a question. <a href="{{ROOT}}docs/metrics.html">Metrics</a> has the exact formulas.</dd>
+  <dt id="interval">95% interval</dt><dd>A range around a rate. It shows how far the rate could move if you had more cases. A wide range means few cases. Ferrite uses the Wilson method. For example, <code>2.0% [1.4-2.8]</code> means 2.0%, with a range from 1.4% to 2.8%. In the main corpus the cases are not fully independent, so the real range is wider than the one shown.</dd>
+  <dt id="mcnemar">McNemar test</dt><dd>A test that compares two modes on the same cases. It looks only at the cases where the two modes disagree. Say <em>b</em> is the number of cases where only the baseline had the attack run. Say <em>c</em> is the number where only the defended mode did. A small p-value means a split this uneven is unlikely if the two modes were the same. Ferrite uses the exact version of the test.</dd>
+  <dt id="cohens-h">Cohen's h</dt><dd>A number for how big the gap between two rates is. A p-value says a gap is probably not chance. It does not say how big the gap is. Cohen's h does.</dd>
+  <dt id="false-positive">False positive</dt><dd>In the live report, a normal task where the guard refused an action. The task was not under attack, so the refusal was not needed. The main evaluation has a similar rate, the false gate rate: a normal task that gets a question.</dd>
+  <dt id="precision">Precision</dt><dd>Of the capabilities that the predictor named, the share that the task really needs. A low value means it names too many.</dd>
+  <dt id="recall">Recall</dt><dd>Of the capabilities that the task really needs, the share that the predictor named. A low value means it misses some. A missed capability makes the guard refuse a needed action.</dd>
+  <dt id="temperature">Temperature 0</dt><dd>A model setting. At temperature 0, the model has no random choice in how it picks words. So the same input should give the same answer. The live run uses it, with one try for each case.</dd>
+</dl>
+
+<h2>The tools around Ferrite</h2>
+<dl class="defs">
+  <dt id="servo">Servo</dt><dd>The web engine Ferrite uses to draw pages. A build without Servo has the interface but cannot draw pages.</dd>
+  <dt id="agentdojo">AgentDojo</dt><dd>An open set of tasks and attacks for testing AI agents. Ferrite imports its tasks as 1,046 cases. Ferrite reads the task files and never runs AgentDojo's code. Ferrite maps AgentDojo's tool calls to its own primitives to make the labels. So Ferrite's numbers are not AgentDojo's scores and cannot be compared with them.</dd>
+  <dt id="laya">Laya</dt><dd>An optional small local model. It picks routine browsing steps, which saves calls to the main model. It is never part of the security boundary. Every step it picks still goes through the guard and consent. See <a href="{{ROOT}}docs/models-and-settings.html#laya-an-optional-fast-lane">Models and settings</a>.</dd>
+  <dt id="provider">Provider, API key</dt><dd>A <em>provider</em> is the service that runs the AI model, such as Ollama or Gemini. An <em>API key</em> is a secret code that lets the app use that service.</dd>
+  <dt id="model-tag">Model tag</dt><dd>The exact name of a model on a provider, for example <code>gemma4:31b</code>. Ferrite has no default tag, because providers retire names. Pass it with <code>--model</code> in the live runner.</dd>
+  <dt id="fast-model">Fast model, agent model</dt><dd>The two jobs a model can do. The <em>fast model</em> predicts the fingerprint, once for each task. The <em>agent model</em> reads pages and chooses each step. One model can do both.</dd>
+  <dt id="cache">Cache</dt><dd>A store of earlier model answers. If the same question comes again, Ferrite uses the stored answer. In the live runner, a re-run of an unchanged case is free and does not count against <code>--max-calls</code>. <code>--no-cache</code> turns it off.</dd>
+  <dt id="rate-limit">Rate limit</dt><dd>A cap that a provider sets on how many requests it accepts in a period of time. When the cap is hit, the live runner waits and tries again, up to 5 tries for each call by default. It stops with exit code 4 after 3 failed calls in a row. <code>--pause-ms</code> spaces out the calls.</dd>
+  <dt id="batch">Batch</dt><dd>A group of cases that one command runs. <code>--batch-size</code> counts cases. <code>--max-calls</code> counts model calls, and its default is 100. See <a href="{{ROOT}}docs/run-it.html#run-the-live-evaluation-with-a-real-model">Run it from source</a>.</dd>
+  <dt id="resume">Resume</dt><dd>Continue where a run stopped. The live runner saves each result before it starts the next case. Run the same command again and it skips the stored results. A crash or Ctrl-C loses at most the case that was running. Stored results are reused only if the settings that change behaviour are the same.</dd>
+  <dt id="devtools">DevTools, backtrace</dt><dd><em>DevTools</em> is the panel for developers. It shows a page's console messages and requests, and engine crashes. A <em>backtrace</em> is a list of the code steps that led to a crash. See <a href="{{ROOT}}docs/debugging.html">Debugging and logs</a>.</dd>
+  <dt id="vendored-patch">Vendored patch</dt><dd>A changed copy of the engine that is kept inside the repository.</dd>
+  <dt id="notarized">Notarized</dt><dd>Checked by Apple and approved. The macOS builds of Ferrite are not notarized, so macOS blocks the first launch.</dd>
+</dl>

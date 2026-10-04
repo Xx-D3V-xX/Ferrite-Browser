@@ -4,7 +4,17 @@ order: 8
 group: Defense
 summary: The capability model and each stage of Ferrite's defense: prediction, sanitizer, dry run, comparison, consent, the runtime guard and the hash-chained audit log.
 -->
-<p class="lede">Ferrite's guarantee is not “this text is safe”. It is “this action was inside what your task needed, or you approved it”. This page walks through how that is decided, stage by stage, and which invariants hold it together.</p>
+<p class="lede">Ferrite's guarantee is not “this text is safe”. It is “this action was inside what your task needed, or you approved it”. This page walks through how that is decided, stage by stage. It also lists the invariants (rules that always hold) that keep it together.</p>
+
+<p>Some words on this page need a short explanation. The full list is on <a href="{{ROOT}}docs/glossary.html">Words we use</a>.</p>
+<dl class="defs">
+  <dt>Fingerprint</dt><dd>The list of tools and websites a task is expected to need.</dd>
+  <dt>Guard</dt><dd>The check that stops an action outside that list.</dd>
+  <dt>Dry run</dt><dd>A practice run that does nothing real.</dd>
+  <dt>Consent gate</dt><dd>A question asked to the user before the action runs.</dd>
+  <dt>Sanitizer</dt><dd>The text filter that cuts out text that looks like orders to the AI.</dd>
+  <dt>Origin</dt><dd>The address of a website: its scheme, host and port.</dd>
+</dl>
 
 <div class="diagram">
 <svg viewBox="0 0 880 250" role="img" aria-label="Flow: your request feeds Predict, which yields a fingerprint. The agent plan runs in the Dry run, producing a record. Compare checks record against fingerprint; a deviation goes to Consent. The runtime guard checks every real action.">
@@ -50,100 +60,101 @@ summary: The capability model and each stage of Ferrite's defense: prediction, s
 </div>
 
 <h2>The capability model</h2>
-<p>A capability is not an invented domain tool such as “email.read”. It is an <strong>action class</strong>, a group of primitives that share a security character, paired with an <strong>origin scope</strong>, the places it may act. “Email” is a property of the scope, authored per task, never a tool the model can conjure.</p>
+<p>A capability is not an invented tool such as “email.read”. It is an <strong>action class</strong>. This is a group of primitives (basic actions) that share a security character. Each capability is paired with an <strong>origin scope</strong>, which says where it may act. “Email” is a property of the scope. The task's author sets it. It is never a tool the model can make up.</p>
 <div class="table-wrap"><table>
 <thead><tr><th>Capability</th><th>Allows</th></tr></thead>
 <tbody>
 <tr><td><code>web.read</code></td><td>Reading page content.</td></tr>
-<tr><td><code>web.navigate</code></td><td>Navigating to a page.</td></tr>
+<tr><td><code>web.navigate</code></td><td>Going to a page.</td></tr>
 <tr><td><code>web.interact</code></td><td>Clicking, typing, filling and submitting.</td></tr>
 <tr><td><code>web.download</code></td><td>Downloading files.</td></tr>
 <tr><td><code>scoped.read</code></td><td>Cookies and web storage, only when named.</td></tr>
 <tr><td><code>clipboard.read</code>, <code>clipboard.write</code></td><td>Clipboard access.</td></tr>
 </tbody></table></div>
-<p>The vocabulary is <strong>closed</strong>: there are exactly seven capabilities, and a model's output is filtered against that list. A scope is one of three typed kinds, ordered from tightest to loosest:</p>
+<p>The vocabulary is <strong>closed</strong>. There are exactly seven capabilities. We filter a model's output against that list. A scope is one of three typed kinds. They run from tightest to loosest:</p>
 <dl class="defs">
-  <dt>exact</dt><dd>Specific known origins. The tightest scope.</dd>
-  <dt>domain_suffix</dt><dd>A bounded family, such as <code>*.wikipedia.org</code>.</dd>
-  <dt>task_open</dt><dd>Genuinely open browsing. Requires a written rationale and is reported as a weak scope, because under it every origin parses as admitted.</dd>
+  <dt>exact</dt><dd>Specific known origins. This is the tightest scope.</dd>
+  <dt>domain_suffix</dt><dd>A limited family, such as <code>*.wikipedia.org</code>.</dd>
+  <dt>task_open</dt><dd>Open browsing. It needs a written reason. It is reported as a weak scope, because under it every origin is admitted.</dd>
 </dl>
-<p>Each capability carries its <em>own</em> scope, so a task can combine a narrow cookie read on one site with a wide page read for search results without either widening the other. Origins are compared after normalization, whole-host, never by prefix: <code>localhost.evil.example</code> is not local.</p>
+<p>Each capability has <em>its own</em> scope. So a task can combine a narrow cookie read on one site with a wide page read for search results. Neither widens the other. We compare origins after normalizing them. We compare the whole host, never a prefix. <code>localhost.evil.example</code> is not local.</p>
 
 <div class="callout good">
   <h4>Invariant: <code>js.execute</code> is unconditionally unscopable</h4>
-  <p>Running arbitrary JavaScript can synthesize any other primitive past the tool boundary, so no capability's expected realization may include it, at any scope. It is always a deviation and always consent-gated. This is enforced in the type system: there is no capability variant that could authorize it, so a prediction cannot even express it.</p>
+  <p>Running any JavaScript can create any other primitive past the tool boundary. So no capability may ever expect it, at any scope. It is always a deviation, and it always needs consent. The type system enforces this. No capability variant could authorize it. So a prediction cannot even express it.</p>
 </div>
 
 <h2>1 · Predict</h2>
-<p>Before any page is fetched or any tool runs, Ferrite turns <em>your request alone</em> into an expected fingerprint with two layers:</p>
+<p>Before any page is fetched or any tool runs, Ferrite turns <em>your request alone</em> into an expected fingerprint. It has two layers:</p>
 <ul>
-  <li><strong>The rule layer (<code>must_use</code>)</strong> is deterministic, offline and pure. It matches whole words in your request: “open” or “go to” imply navigation; “summarize”, “list”, “search” and other everyday read verbs imply a page read; “download” implies a download; “fill”, “submit” or “send email” imply interaction; and cookies or storage are granted <em>only</em> when you mention them. It does not match substrings, so “information” does not grant form filling. An open-ended prompt that matches nothing yields an empty fingerprint, which routes everything through consent.</li>
-  <li><strong>The model layer (<code>may_use</code>)</strong> asks the configured fast model what the task might plausibly need beyond the rules. The answer is untrusted text: each label must be exactly one of the seven capability names or it is dropped at the boundary.</li>
+  <li><strong>The rule layer (<code>must_use</code>)</strong> is fixed, offline and pure. It matches whole words in your request. “open” or “go to” means navigation. “summarize”, “list”, “search” and other everyday read verbs mean a page read. “download” means a download. “fill”, “submit” or “send email” mean interaction. Cookies or storage are granted <em>only</em> when you mention them. It does not match parts of words. So “information” does not grant form filling. An open-ended prompt that matches nothing gives an empty fingerprint. An empty fingerprint sends everything through consent.</li>
+  <li><strong>The model layer (<code>may_use</code>)</strong> asks the fast model you set up what the task might need beyond the rules. The answer is untrusted text. Each label must be exactly one of the seven capability names. Any other label is dropped at the boundary.</li>
 </ul>
-<p><strong>Fail to empty, never to a bypass.</strong> A provider error, timeout, rate limit, malformed or empty body, or a missing key degrades the model layer to the empty set. It never skips fingerprinting and never widens what is admitted. An empty prediction routes everything through consent. The cost of an outage is more prompts, not less safety.</p>
+<p><strong>Fail to empty, never to a bypass.</strong> The model layer becomes the empty set after a provider error, a timeout, a rate limit, a malformed or empty body, or a missing key. It never skips fingerprinting. It never widens what is admitted. An empty prediction sends everything through consent. An outage costs you more prompts, not less safety.</p>
 
 <h2>2 · Sanitize</h2>
-<p>Before content reaches the agent, a sanitizer looks for instruction-like text and cuts it out. It is a risk reducer, not the foundation: the architecture still holds with it switched off, which is how the evaluation measures the two separately.</p>
+<p>Before content reaches the agent, a sanitizer looks for text that looks like orders to the AI, and cuts it out. It lowers risk. It is not the foundation. The architecture still holds with the sanitizer switched off. That is how the evaluation measures the two apart.</p>
 <ul>
-  <li><strong>Matching on meaning, not spelling.</strong> Text is matched in de-obfuscated <em>views</em>: zero-width characters removed, look-alike and full-width letters folded, escapes (HTML, URL, <code>\u</code>) decoded, leetspeak, ROT13, reversed text, base64 and hex, and invisible Unicode tag characters. Each byte maps back to the original span, so detection reports the original snippet and excision cuts the original sentence.</li>
-  <li><strong>Pattern set v2</strong> covers instruction override, agent-addressing, concealment, exfiltration, chat-template and action-mimicry patterns, markdown-image exfiltration and prompt extraction, in eight languages, plus a hidden-Unicode check.</li>
-  <li><strong>Everywhere a digest shows text.</strong> Attribute values (<code>alt</code>, <code>title</code>, <code>placeholder</code>, <code>aria-label</code>, <code>href</code>), CSS-generated text and the raw page text are scanned, not only the visible body.</li>
-  <li><strong>Linear time.</strong> Excision is linear in input size; a 1 MB page with no sentence terminators is handled without a hang.</li>
+  <li><strong>Matching on meaning, not spelling.</strong> The sanitizer matches text in cleaned-up <em>views</em>. In these views, zero-width characters are removed. Look-alike and full-width letters are folded. Escapes (HTML, URL, <code>\u</code>) are decoded. Leetspeak, ROT13, reversed text, base64 and hex are decoded. Invisible Unicode tag characters are handled. Each byte maps back to the original span. So detection reports the original snippet, and excision cuts the original sentence.</li>
+  <li><strong>Pattern set v2</strong> covers instruction override, agent-addressing, concealment, exfiltration (sending data out), chat-template and action-mimicry patterns, markdown-image exfiltration and prompt extraction. It works in eight languages. It also has a hidden-Unicode check.</li>
+  <li><strong>Everywhere a digest shows text.</strong> The scan covers attribute values (<code>alt</code>, <code>title</code>, <code>placeholder</code>, <code>aria-label</code>, <code>href</code>), CSS-generated text and the raw page text. It does not cover only the visible body.</li>
+  <li><strong>Linear time.</strong> Excision takes time linear in the input size. A 1 MB page with no sentence terminators is handled without a hang.</li>
 </ul>
-<p>It is still pattern matching. Paraphrase, languages outside the list, spelled-out markup, reversed non-Latin text and payloads split across elements are missed by construction, and the test suite pins them as known misses so the inventory stays honest.</p>
+<p>It is still pattern matching. By design, it misses paraphrase, languages outside the list, spelled-out markup, reversed non-Latin text and payloads split across elements. The test suite pins them as known misses. So the list stays honest.</p>
 
 <h2>3 · Dry-run</h2>
-<p>The agent's plan is executed against a <strong>synthetic twin</strong>: plausible fake data, served by a stand-in engine that records every call and performs no real I/O. Containment here is by construction, not by an interceptor that could be bypassed: the dry-run engine simply has no real network to reach.</p>
+<p>The agent's plan runs against a <strong>synthetic twin</strong>. This is fake but realistic data. A stand-in engine serves it. The engine records every call and does no real I/O. Containment here comes by construction. It does not need an interceptor that could be bypassed. The dry-run engine has no real network to reach.</p>
 <ul>
-  <li>Twin data is encrypted at rest with a key from the OS keyring or an environment variable, never a constant compiled into the binary.</li>
-  <li>A download or a new tab is recorded at its <em>destination</em> origin and as a network attempt. Recording it at the page's own origin would let an agent on an allowed site fetch from an attacker without producing a deviating event.</li>
-  <li>A whole-turn timeout returns the partial record instead of discarding it.</li>
+  <li>Twin data is encrypted at rest. The key comes from the OS keyring or an environment variable. It is never a constant compiled into the binary.</li>
+  <li>A download or a new tab is recorded at its <em>destination</em> origin, and as a network attempt. Suppose it were recorded at the page's own origin. Then an agent on an allowed site could fetch from an attacker without making a deviating event.</li>
+  <li>A whole-turn timeout returns the partial record. It does not throw the record away.</li>
 </ul>
 
 <h2>4 · Compare</h2>
-<p>The comparator takes the expected fingerprint and the dry-run record and produces a <em>diff</em>: extra primitives (capabilities the task did not imply) and out-of-scope origins (places the task did not authorize). Every event is classified by one function, <code>classify_event</code>, which the comparator and the runtime guard share, so they cannot disagree; a sweep test covers every primitive, origin and fingerprint combination.</p>
+<p>The comparator takes the expected fingerprint and the dry-run record. It makes a <em>diff</em>. The diff lists extra primitives (capabilities the task did not imply) and out-of-scope origins (places the task did not authorize). One function, <code>classify_event</code>, classifies every event. The comparator and the runtime guard share it. So they cannot disagree. A sweep test covers every combination of primitive, origin and fingerprint.</p>
 
 <h2>5 · Consent</h2>
-<p>If the diff is non-empty, nothing real runs. The review panel (titled <em>Review before running</em>) lists each deviation in plain language and asks per item: approve or reject. It is drawn by the application, outside page content, and only the items <em>you</em> approve are added to what the real run may do. The plain-language lines name the offending action and the origin your request actually authorized, so a lookalike domain is visible as such. <strong>Proceed with approved</strong> stays disabled until every item is decided, so there is no path to approving by default.</p>
-<p>The cards are deliberately calm: a neutral surface, a coloured rule down the left edge (amber undecided, green approved, red rejected) and soft tinted buttons instead of solid red and green. A test checks that the labels on those buttons stay readable in both themes.</p>
+<p>If the diff is not empty, nothing real runs. The review panel (titled <em>Review before running</em>) lists each deviation in plain words. It asks you about each item: approve or reject. The application draws it, outside page content. Only the items <em>you</em> approve are added to what the real run may do. Each line names the offending action and the origin your request actually authorized. So a look-alike domain shows up as one. <strong>Proceed with approved</strong> stays disabled until every item is decided. So there is no way to approve by default.</p>
+<p>The cards are calm on purpose. They have a neutral surface, a coloured bar down the left edge (amber undecided, green approved, red rejected), and soft tinted buttons. The buttons are not solid red and green. A test checks that the button labels stay readable in both themes.</p>
 <figure class="shot narrow">
   <img class="theme-shot-light" src="{{ROOT}}static/img/approval-light.png" width="386" height="725" alt="The review panel listing two unexpected actions, js.execute (rejected) and a contact with attacker.example (undecided), each with Reject and Approve buttons." loading="lazy">
   <img class="theme-shot-dark" src="{{ROOT}}static/img/approval-dark.png" width="386" height="725" alt="The review panel in the dark theme listing two unexpected actions, js.execute (rejected) and a contact with attacker.example (undecided), each with Reject and Approve buttons." loading="lazy">
-  <figcaption>The review panel, rendered from sample state, with one item rejected and one still undecided.</figcaption>
+  <figcaption>The review panel, drawn from sample state. One item is rejected and one is still undecided.</figcaption>
 </figure>
 
 <h2>The runtime guard</h2>
-<p>The dry run executes against synthetic pages, so a page that carries an injected instruction exists only in the <em>real</em> run, where the dry run cannot see it. If the loop compared once and then ran every real action, a deviation that only a real page provoked would be compared against nothing. The guard closes that gap.</p>
+<p>The dry run runs against synthetic pages. So a page that carries an injection exists only in the <em>real</em> run. The dry run cannot see it. Suppose the loop compared once and then ran every real action. Then a deviation that only a real page caused would be compared against nothing. The guard closes that gap.</p>
 <ul>
-  <li>Every real action is classified and does not run unless it is in <em>expected ∪ approved</em>: what the predicted capabilities and their scopes admit, plus what you approved in this task's consent prompt.</li>
-  <li>The <em>effect</em> of an action is what is checked: a URL action at that URL's origin, anything else at the active tab's origin, and a click by <code>@ref</code> on a link whose <code>href</code> leads elsewhere counts as a navigation there. A click on a link that leads to the site the tab is already on counts as either a click or a navigation, so a task that was expected only to navigate (<em>“go to this site's docs page”</em>) can follow the site's own links; a link to any other site, or a button, still needs its own permission.</li>
-  <li>An action that is neither expected nor already approved <strong>pauses the run and asks you</strong>: <em>Allow once</em>, <em>Allow for task</em> or <em>Don’t allow</em> (<kbd>Esc</kbd> is “no”). The question names the action and the site, never text the page wrote, and nothing outside the prediction runs until you say yes.</li>
-  <li>A block tells the agent a <strong>fixed sentence</strong> containing nothing from the action or the page, because an observation goes back to the model and anything attacker-chosen echoed there is itself an injection channel.</li>
-  <li>The block is shown to you, committed to the audit log (<code>CapabilityDenied</code>), and the <strong>fourth block ends the run</strong>.</li>
-  <li>An empty prediction blocks everything it was not given consent for.</li>
+  <li>Every real action is classified. It does not run unless it is in <em>expected ∪ approved</em>. That set is what the predicted capabilities and their scopes admit, plus what you approved in this task's consent prompt.</li>
+  <li>The guard checks the <em>effect</em> of an action. A URL action is checked at that URL's origin. Anything else is checked at the active tab's origin. A click by <code>@ref</code> on a link whose <code>href</code> leads elsewhere counts as a navigation there. A click on a link to the site the tab is already on counts as either a click or a navigation. So a task that was expected only to navigate (<em>“go to this site's docs page”</em>) can follow the site's own links. A link to any other site, or a button, still needs its own permission.</li>
+  <li>An action that is neither expected nor already approved <strong>pauses the run and asks you</strong>. You can choose <em>Allow once</em>, <em>Allow for task</em> or <em>Don’t allow</em>. (<kbd>Esc</kbd> means “no”.) The question names the action and the site. It never shows text the page wrote. Nothing outside the prediction runs until you say yes.</li>
+  <li>A block gives the agent a <strong>fixed sentence</strong>. The sentence has nothing from the action or the page. An observation goes back to the model. Anything the attacker chose, if echoed there, is itself an injection channel.</li>
+  <li>The block is shown to you and written to the audit log (<code>CapabilityDenied</code>). The <strong>fourth block ends the run</strong>.</li>
+  <li>An empty prediction blocks everything that has no consent.</li>
 </ul>
-<p>Its stated limits: a click by CSS selector, a form <code>action</code> (submit, Enter in a field) and a server-side redirect cannot be resolved to a destination before they run, so the tab's new origin is checked on the <em>next</em> action, after the request was made. See <a href="{{ROOT}}docs/limits.html">Limits</a>.</p>
+<p>The guard has stated limits. It cannot work out the destination before the action runs in three cases. These are a click by CSS selector, a form <code>action</code> (submit, Enter in a field) and a server-side redirect. So the guard checks the tab's new origin on the <em>next</em> action, after the request was made. See <a href="{{ROOT}}docs/limits.html">Limits</a>.</p>
+<p>With a real model, the guard stopped 25 of the 31 attacks that ran without it. It stopped none of the 5 AgentRedirection attacks. See <a href="{{ROOT}}docs/evaluation.html#live-results">Evaluation: Live results</a>.</p>
 
 <h2>The audit log</h2>
-<p>Security-relevant events are appended to a SQLite-backed log in which every entry commits to the one before it:</p>
+<p>Ferrite appends security events to a SQLite-backed log. Every entry commits to the one before it:</p>
 <ul>
-  <li><strong>Hash chain.</strong> Each entry's hash covers its content and the previous entry's hash, with a fixed domain-separation prefix and a schema version, so reordering or editing an entry breaks every hash after it.</li>
-  <li><strong>Full coverage.</strong> Every persisted column is in the hash preimage. An earlier version omitted two columns, so they could be rewritten while verification still passed; that was fixed and is covered by a tamper test matrix.</li>
-  <li><strong>Canonical form.</strong> The preimage is serialized as JSON in a fixed field order, not <code>Debug</code> output, so <code>null</code> and the empty string are distinguishable and every string is length-delimited.</li>
-  <li><strong>Verifiable.</strong> <code>verify_chain()</code> recomputes the chain; the evaluation records one entry per execution (96 in the original run) and checks it.</li>
+  <li><strong>Hash chain.</strong> Each entry's hash covers its content and the previous entry's hash. It also has a fixed domain-separation prefix and a schema version. So reordering or editing an entry breaks every hash after it.</li>
+  <li><strong>Full coverage.</strong> Every stored column is in the hash input. An earlier version left out two columns. They could be rewritten while verification still passed. That was fixed. A tamper test matrix covers it.</li>
+  <li><strong>Canonical form.</strong> The hash input is written as JSON in a fixed field order. It is not <code>Debug</code> output. So <code>null</code> and the empty string can be told apart. Every string is length-delimited.</li>
+  <li><strong>Verifiable.</strong> <code>verify_chain()</code> recomputes the chain. The evaluation records one entry per run (96 in the original run) and checks it.</li>
 </ul>
 <div class="callout note">
   <h4>Two logs, on purpose</h4>
-  <p>The model-activity trace (every prompt, answer and timing) is kept <em>separately</em> from the audit log. The audit log is small, hash-chained and about decisions; the trace is bulky and local, and mixing them would make the log neither small nor tamper-evident in a useful way.</p>
+  <p>The model-activity trace (every prompt, answer and timing) is kept <em>apart</em> from the audit log. The audit log is small, hash-chained and about decisions. The trace is big and local. Mixing them would make the log neither small nor tamper-evident in a useful way.</p>
 </div>
 
 <h2>Invariants at a glance</h2>
 <ul>
   <li>The fingerprint is built only from text you wrote. Page text, agent output and steps never feed it.</li>
-  <li>A model's labels are filtered through a closed list; anything else is dropped.</li>
+  <li>A model's labels pass a closed list. Anything else is dropped.</li>
   <li>Any provider failure empties the prediction. It never bypasses it.</li>
   <li><code>js.execute</code> can never be expected, at any scope.</li>
-  <li>The comparator and the guard classify identically, by sharing one function.</li>
-  <li>The agent never types into a password, one-time-code or card field: the page script refuses, and a page that needs one pauses the run for you (the sign-in handoff).</li>
-  <li>No test needs the network or an API key; live-provider tests are opt-in.</li>
+  <li>The comparator and the guard classify the same way, because they share one function.</li>
+  <li>The agent never types into a password, one-time-code or card field. The page script refuses. A page that needs one pauses the run for you (the sign-in handoff).</li>
+  <li>No test needs the network or an API key. Live-provider tests are opt-in.</li>
 </ul>
