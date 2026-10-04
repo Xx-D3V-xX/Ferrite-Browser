@@ -29,7 +29,7 @@ ci: check test
 check:
     cargo fmt --all --check
     cargo clippy --workspace --all-targets -- -D warnings
-    cargo machete
+    cargo machete crates
 
 # Format the whole workspace in place.
 fmt:
