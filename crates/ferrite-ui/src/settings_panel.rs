@@ -927,7 +927,7 @@ pub(crate) fn view(state: &FerriteBrowser) -> Element<'_, FerriteBrowserMessage>
     .padding(PANEL_PADDING);
 
     container(column![header, scrollable(body).height(Length::Fill)])
-        .width(Length::Fixed(SIDE_PANEL_WIDTH))
+        .width(Length::Fixed(state.panels.side_width(state.window_size)))
         .height(Length::Fill)
         .style(move |_: &Theme| container::Style {
             background: Some(Background::Color(palette.surface)),

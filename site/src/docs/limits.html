@@ -1,6 +1,6 @@
 <!--
 title: Limits
-order: 9
+order: 13
 group: Honesty
 summary: Every known limit of Ferrite's defense, its evaluation and the product, and an explicit list of what is not claimed.
 -->
@@ -40,20 +40,55 @@ summary: Every known limit of Ferrite's defense, its evaluation and the product,
   <li><strong>The agent is scripted.</strong> It re-enacts each case's authored deviation from ground truth, so the results say nothing about how often a real model takes the bait.</li>
   <li><strong>The fingerprint is rules-only by default.</strong> The 0% false-gate rate is for a well-behaved scripted agent under that prediction. A real agent's rate depends on what it does and on the model prediction layer, which the default run does not exercise.</li>
   <li><strong>Self-authored and generated.</strong> The corpus was written by the defense's author and expanded from shared templates, then tuned against. The intervals treat matrix-correlated cases as independent, so they understate the uncertainty.</li>
-  <li><strong>No independent slice to speak of.</strong> Only three external (AgentDojo) cases exist, which supports no claim. There is no second author, so Cohen's κ for annotation agreement is not computable and has not been faked.</li>
+  <li><strong>No independent slice to speak of.</strong> Only three of the 938 cases are external (AgentDojo), which supports no claim. There is no second author, so Cohen's κ for annotation agreement is not computable and has not been faked.</li>
+  <li><strong>The 1,046-case AgentDojo import has no results.</strong> It is checked in and validated offline, but it is the default corpus of the live runner, which has never been run against a real model. Its labels come from AgentDojo's ground-truth calls mapped onto Ferrite's primitives (some from the goal text alone), with one attack template and a synthetic environment, so even its future numbers will not be comparable to published AgentDojo scores.</li>
+  <li><strong>No real model has been the agent.</strong> A live runner exists for Gemini and Ollama; no run has produced a result. OpenAI-compatible and Anthropic endpoints cannot be selected, because the model layer has no backend for them.</li>
   <li><strong>ADR = 100% is by construction.</strong> It measures the comparator against a scripted agent that issues exactly the declared deviation.</li>
   <li><strong>Missing quantities.</strong> Task-completion parity for benign tasks (no benign baseline under Off) and extra token cost (no token usage in the execution record) are not computed, for stated reasons.</li>
   <li><strong>A live-provider run is not reproducible</strong> byte for byte, so it is reported separately.</li>
 </ul>
 
 <h2>Limits of the product</h2>
+
+<div class="callout warn">
+  <h4>Most of the newest work has only run on Linux</h4>
+  <p>The DevTools panel, resizable panels, page-control overlays, crash banner, calmer approval cards, GPU renderer and display-scale fix were checked on Linux, rendered under a virtual display at normal pixel density, and, for the engine parts, run in the headless engine. <strong>None of it has run on a Mac</strong>, on a Retina screen or on a real GPU. The build on the releases page (commit <code>f4ed744</code>, 2026-10-02) predates most of it.</p>
+</div>
+
+<h3>Websites that do not work yet</h3>
 <ul>
-  <li><strong>Google and GitHub sign-in may still be refused.</strong> These sites decide from the whole session, and Ferrite uses a young engine. The identity choice, the engine's added Web APIs and the sign-in handoff are what Ferrite does about it; none is a guarantee, and it has not been verified against those sites. Still missing in the engine: service workers, <code>navigator.mediaDevices</code> (WebRTC), <code>navigator.userAgentData</code> and <code>window.chrome</code>. Ferrite deliberately does not fake any of them, nor hardware, canvas or renderer details, nor hide automation.</li>
-  <li><strong>Unsigned builds.</strong> Each platform asks you to confirm the first launch.</li>
-  <li><strong>Web compatibility is Servo's.</strong> Ferrite renders with the Servo engine, and several CSS features current sites rely on are missing or broken in it: <code>:has()</code>, container queries, <code>mask-image</code>, <code>backdrop-filter</code>, <code>text-wrap</code>, subgrid, popovers, and <code>aspect-ratio</code> on block boxes (a box with a width collapses to zero height). Pages that depend on them will look wrong. Ferrite enables the engine features that were measured to work (<code>adoptedStyleSheets</code>, FontFace, WebGL, and a further seven Web APIs found by testing every default-off engine switch one at a time) and leaves off those that were measured not to, such as WebRTC (it would hand out the microphone with no prompt), geolocation and service workers and injects one small script so that icons coloured by CSS stay visible (Servo paints them black otherwise), but it cannot add layout features the engine does not have. Google sign-in may also refuse an embedded engine.</li>
+  <li><strong>GitHub does not open in the owner's build, and the cause is unknown.</strong> The first log was empty. A script-thread panic was found and fixed in a vendored engine patch, but it was never reproduced, so it is not proven to be the cause. What would settle it is the log or the <code>collect-logs</code> zip from a build that has the new console and request logging, captured right after loading GitHub (see <a href="{{ROOT}}docs/debugging.html">Debugging and logs</a>).</li>
+  <li><strong>The Google results page was pinned to the left edge.</strong> That is attributed to the engine never being told the display scale (a Retina page was laid out twice as wide as it looks), which is now fixed, but nobody has seen it directly, and Google could not be loaded where this was investigated. It needs a screenshot from a new build.</li>
+  <li><strong>Google and GitHub sign-in may still be refused.</strong> These sites decide from the whole session, and Ferrite uses a young engine. The identity choice, the engine's added Web APIs and the sign-in handoff are what Ferrite does about it; none is a guarantee, and it has not been verified against those sites. Google sign-in in particular is still an open report. Still missing in the engine: service workers, <code>navigator.mediaDevices</code> (WebRTC), <code>navigator.userAgentData</code> and <code>window.chrome</code>. Ferrite deliberately does not fake any of them, nor hardware, canvas or renderer details, nor hide automation.</li>
+  <li><strong>Web compatibility is Servo's.</strong> Ferrite renders with the Servo engine, and several CSS features current sites rely on are missing or broken in it: <code>:has()</code>, container queries, <code>mask-image</code>, <code>backdrop-filter</code>, <code>text-wrap</code>, subgrid, popovers, and <code>aspect-ratio</code> on block boxes (a box with a width collapses to zero height). Pages that depend on them will look wrong. Ferrite enables the engine features that were measured to work (<code>adoptedStyleSheets</code>, FontFace, WebGL, and a further seven Web APIs found by testing every default-off engine switch one at a time) and leaves off those that were measured not to, such as WebRTC (it would hand out the microphone with no prompt), geolocation and service workers, and injects one small script so that icons coloured by CSS stay visible (Servo paints them black otherwise), but it cannot add layout features the engine does not have.</li>
+  <li><strong>Zooming and interaction fail on some pages, unexplained.</strong> The page crash banner and the Engine tab now surface script-thread panics, and dropdowns and dialogs now work, which were the two candidates. Whether they account for what was seen is not known.</li>
+</ul>
+
+<h3>The browser</h3>
+<ul>
+  <li><strong>The DevTools Network tab has no status, size or timing.</strong> A request is listed as it starts, with its method, type and URL; the engine's response callback is not wired up, so there is no status code, duration or waterfall. <code>fetch()</code> and XHR are listed as <em>Other</em>.</li>
+  <li><strong>The file picker is a typed-path card.</strong> There is no native file dialog. The request reaches the browser and an answer path exists, but it has not been exercised against a real upload.</li>
+  <li><strong>HTTP basic-auth prompts and input-method (IME) composition are not handled.</strong> A page behind basic auth gets no prompt, and composed text (Chinese, Japanese, Korean and similar input) is not forwarded. Non-US keyboard layouts, dead keys and key repeat have not been observed.</li>
+  <li><strong><kbd>F12</kbd> opens the Audit panel, not DevTools.</strong> DevTools is <kbd>Cmd</kbd>+<kbd>Opt</kbd>+<kbd>I</kbd> or <kbd>Ctrl</kbd>+<kbd>Shift</kbd>+<kbd>I</kbd>, or <kbd>Cmd/Ctrl</kbd>+<kbd>J</kbd>. Whether <kbd>F12</kbd> should change is an open decision.</li>
+  <li><strong>Address-bar search is Google; the agent's search is not.</strong> Typing a query in the address bar goes to Google. The agent's own prompt still tells it to search with DuckDuckGo Lite and not to use google.com, because Google's pages stayed blank in this engine when that was written. Whether Google's results page now renders properly has not been confirmed.</li>
+  <li><strong>Cookies are written on clean shutdown.</strong> Closing the window saves the profile; a crash, a kill or macOS <kbd>Cmd</kbd>+<kbd>Q</kbd> that bypasses the window close loses that run's new cookies. A 3-second quit watchdog ends the process after a window close, but whether it also covers <kbd>Cmd</kbd>+<kbd>Q</kbd> is unknown.</li>
   <li><strong>Linux keys do not persist across a restart</strong> with the kernel-keyring backend this build uses; see <a href="{{ROOT}}docs/models-and-settings.html">Models and settings</a>.</li>
-  <li><strong>Cookies are written on clean shutdown.</strong> Closing the window saves the profile; a crash, a kill or macOS <kbd>Cmd</kbd>+<kbd>Q</kbd> that bypasses the window close loses that run's new cookies.</li>
-  <li><strong>The packaged builds are new.</strong> The three-platform packaging and release pipeline was written recently; check the release page for what has actually been published.</li>
+</ul>
+
+<h3>Speed and the renderer</h3>
+<ul>
+  <li><strong>Speed on real hardware is unmeasured.</strong> Measured, in the headless engine on Linux: the fix that stopped the shell copying and re-uploading the whole page every tick. Not measured anywhere: the GPU rendering path, the thread pools sized to the core count, and the release profile as <code>just run-fast</code> builds it. An on-disk HTTP cache was tried and removed, because the engine's disk cache stores only entries evicted from memory and did nothing across restarts.</li>
+  <li><strong>The GPU renderer has never run on a real GPU or on a Mac.</strong> It is pixel-identical to the CPU path on Mesa's software OpenGL, which is all it was tested on. It is chosen automatically on macOS only and falls back to the CPU renderer if its self-test fails; <code>FERRITE_RENDERER=gpu|cpu|auto</code> overrides it.</li>
+</ul>
+
+<h3>Logs and builds</h3>
+<ul>
+  <li><strong>No log file on Windows.</strong> Redirecting standard error to a file is Unix-only in the current code, so a Windows run prints to its terminal or nowhere. <code>collect-logs</code> is a bash script: macOS and Linux only, with the stack sample macOS only, and bundled in the macOS app only.</li>
+  <li><strong>Unsigned builds.</strong> Each platform asks you to confirm the first launch, and on macOS the app is ad-hoc signed but not notarized.</li>
+  <li><strong>Builds lag the source.</strong> Builds are made by a manual CI run, and the release page names the commit it came from.</li>
+  <li><strong>The macOS app has crashed for the owner.</strong> It was reported to crash repeatedly, to need a force-quit, and to fail on some pages. A log file, a quit watchdog, crash reporting and the DevTools Engine tab were added to make that diagnosable, and none of them has been run on that Mac yet. How the packaged Windows and Linux builds behave on real machines has not been checked by the project.</li>
+  <li><strong>A build without Servo cannot render pages.</strong> It is for the interface, the defense and the evaluation.</li>
+  <li><strong>No LICENSE file yet.</strong> The crate manifests declare <code>MIT OR Apache-2.0</code>, carried over from an earlier file's stated intent, and the choice has not been confirmed by the project owner.</li>
 </ul>
 
 <h2>What is explicitly not claimed</h2>

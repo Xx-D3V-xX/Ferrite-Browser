@@ -1,5 +1,14 @@
 # Ferrite Rebuild — Agent A0 Demolition Plan
 
+> **Status note (2026-10-04): this plan was executed in A0 and is kept as the
+> record of it, not as a current state description.** The workspace was flattened
+> to the repo root, the dead crates, `.rules` and `commands.md` were deleted, the
+> old docs were archived under `docs/archive/`, and `CLAUDE.md`, `README.md`, the
+> devcontainer files and the CI workflow were rewritten (`docs/TO-DO.md` T-011,
+> T-012, T-013, T-014; `docs/PROGRESS.md`'s 2026-09-18 A0 entry). The quoted
+> sentence below, "Nothing below has been acted on yet", described the moment it
+> was written. The crate and file names in the tables are the pre-rebuild ones.
+
 > Produced by Agent A0 (Archivist) per `docs/REBUILD_DIRECTIVE.md` §6/A0.
 > One line per file or file-group. Verdicts: `keep` (unmodified, feeds a later
 > agent as reference or is still load-bearing) / `rewrite` (content survives,

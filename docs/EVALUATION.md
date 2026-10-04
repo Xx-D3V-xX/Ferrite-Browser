@@ -10,6 +10,12 @@ half; `docs/handoffs/b02.md`) with real-provider verification.
 document reports against has **29 cases**, not the ~360 §13.3's own sizing
 derivation targets. Every interval quoted here is wide because the sample
 is small — that is stated plainly throughout, not smoothed over. See §3.
+
+> **Update 2026-10-04.** The 29-case figure above is the original run, kept as the
+> record of it (§1–§7). The current corpus is **938 cases** (§8; 909 of them
+> generated), plus **1,046 AgentDojo cases** imported for the live model runner
+> (§10). §8 holds the current numbers and limits; §9 explains how to run a real
+> model through the evaluation; `docs/COMMANDS.md` §6 lists every command and flag.
 **B2 mechanically migrated the corpus's `by_tool` vocabulary** from the old
 `ferrite_agent::BrowserTool::tool_id()` strings to `ferrite_core::Primitive
 ::as_str()` directly (closing T-216's drift at its source rather than
@@ -797,3 +803,160 @@ this is the architecture alone.
 - **Measurement.** Scripted agent; rules-only fingerprint; matrix-correlated
   cases; self-authored; no κ.
 
+
+---
+
+## 9. Running with a real model
+
+Everything above is run by a scripted agent that complies with every injection. This section is the other half: a
+**real model** in the agent's seat, so the question becomes what a model actually does under an injection and what
+Ferrite then does about it. It is meant to be run by the owner, on their own machine, with their own keys. Nothing
+here is run by `cargo test` (every behaviour is tested offline against the `mock` provider and a loopback fake
+server), and no result from a real model has been produced or is quoted in this repository yet.
+
+### 9.1 What it is
+
+`crates/ferrite-eval/src/live/`, driven by `cargo run -p ferrite-eval --example live_eval -- <flags>`. For each case it
+runs the app's own agent loop (`ferrite_agent::browser_loop`: same action schema, system prompt and parser) against the
+dry-run engine, with the injection planted in the page or tool output the agent reads. Two roles can each be a model
+or not, independently:
+
+| role | `llm` (default) | other |
+|---|---|---|
+| predictor (`--predictor`) | the small-tier model proposes the fingerprint's `may_use`, as in the app | `rules`: rule layer only |
+| agent (`--agent`) | the main-tier model chooses actions | `scripted`: the worst-case script, no calls |
+
+And the defense, per case, in the modes of `--modes` (default `off,guard`):
+
+| mode | what is on |
+|---|---|
+| `off` | nothing; the baseline |
+| `guard` | the runtime guard refuses every action outside the predicted fingerprint (ADR-014), sanitizer off |
+| `full` | guard plus the sanitizer on what the agent reads |
+| `dryrun` | stage one only: the plan on a clean synthetic page, compared with the prediction (consent burden) |
+
+The simulated user refuses every deviation, the best case for containment.
+
+### 9.2 Providers and keys
+
+The runner reuses `ferrite-model` and adds no HTTP stack, so it supports what `ferrite-model` supports:
+
+| `--provider` | what it is | key |
+|---|---|---|
+| `gemini` | Google Gemini | `FERRITE_GEMINI_API_KEY` or the OS keyring (service `ferrite`) |
+| `ollama` | Ollama Cloud (`https://ollama.com`), or a local server with `--base-url http://localhost:11434` | `OLLAMA_API_KEY` or the keyring; a local server needs none |
+| `mock` | deterministic stand-in, no network; exercises the pipeline, says nothing about any model | none |
+
+**OpenAI-compatible and Anthropic endpoints are not supported**, because `ferrite-model` has no backend for them. Adding
+one is a `ferrite-model` change (T-277), not a runner change. A hosted OpenAI-compatible server that also speaks
+Ollama's `/api/chat` can be reached with `--base-url`, nothing else can.
+
+Keys are read from the environment or the OS keyring by `ferrite-model` and nowhere else. They are never accepted as a
+flag, never printed, and never written: error text kept in a result or in the budget ledger passes through a redactor
+that removes the key values the process holds (tested with a fake server that echoes the key back in a URL and in an
+error body). Model tags are configuration, there is no default: `--model TAG` for both roles, or `--small-model` and
+`--main-model`; environment `FERRITE_LIVE_MODEL`, `FERRITE_LIVE_SMALL_MODEL`, `FERRITE_LIVE_MAIN_MODEL`, then the app's
+`FERRITE_MODEL_SMALL` / `FERRITE_MODEL_MAIN`.
+
+### 9.3 Cost first: `--plan`
+
+`--plan` prints what a selection would cost and calls nothing (no key needed):
+
+```
+live_eval --plan --provider gemini --model <tag> --corpus agentdojo
+```
+
+It reports the cases and runs in the window, how many are already stored, fingerprint predictions, agent steps (typical
+and worst case), a rough token count (characters / 4), and how many invocations the batch cap implies. For the full
+AgentDojo import at the default two modes it prints about 2,092 runs and about 7,300 model calls typical (51,000 at
+most), i.e. roughly 74 invocations at the default cap of 100 calls. Those are estimates from the corpus and the step
+limit; what a model really takes, what the cache absorbs and the provider's tokenizer are only known by running.
+
+### 9.4 Batches, limits and resuming
+
+- **Selection:** `--corpus agentdojo|redteam|core|pilot|agentdojo-hand|all`, `--suite agentdojo/banking`, `--only attack|benign`,
+  `--seed S` (reproducible shuffle, so a small batch samples every suite), `--offset/--limit`.
+- **Batches:** `--batch-size N` runs the next N cases that still have work to do. Run the same command again for the
+  next batch; `--batch-index K` takes slice K of the whole ordering instead.
+- **Calls:** `--max-calls N` (default 100) is a hard cap on requests that reach the provider, retries included. When it
+  is spent the case in flight is abandoned unrecorded (it stays pending), a partial-results ledger is written, and the
+  process exits 3.
+- **Rate limits:** `--pause-ms` spaces calls; a 429/5xx/timeout is retried up to `--max-attempts` (default 5) with
+  exponential backoff and jitter, honouring the provider's `Retry-After` (capped at `--backoff-max-ms`, default 90 s, so
+  an hour-long daily quota is not slept through). After `--max-consecutive-failures` (default 3) failed calls in a row the
+  invocation stops with exit 4: the provider is saying no, so stop and come back later.
+- **Failures are not scores.** A call that never got an answer (rate limit, outage, rejected key, timeout) is stored as an
+  error and excluded from every rate; `--retry-failed` redoes those. A model that answers badly (unparseable action,
+  empty reply, unusable fingerprint) *is* a result: the fingerprint falls back to empty and the case is scored as such.
+- **Resume:** results are an append-only JSONL file, one line per case and mode, synced before the next case starts, under
+  `<out>/results/<provider>--<small>--<main>.jsonl` (default `--out target/live-eval`). A crash, Ctrl-C or closed laptop
+  loses at most the case in flight, and a torn last line is skipped. Re-running the same command skips what is stored.
+  Stored results are reused only when the settings that change behaviour (models, modes, steps, predictor, agent) hash the
+  same. Model responses are also cached under `<out>/model-cache/` (temperature 0), so a re-run of an unchanged case is
+  free and does not count against `--max-calls`; `--no-cache` turns that off.
+
+Exit codes: 0 the batch finished cleanly, 1 internal error, 2 usage, 3 call cap reached, 4 provider unavailable, 5 the
+batch finished but some cases failed (rerun with `--retry-failed`).
+
+### 9.5 The report
+
+`live_eval --report [--compare gemini:<tag>,ollama:<tag>]` writes `<out>/REPORT.md` and `<out>/report.csv` from the
+stored results, one group per provider and model pair. Every rate carries a 95% Wilson interval and rows with few
+observations say so. It has attack runs (attempted, executed, blocked of attempted, final answer) per mode; baseline
+against defense case by case (McNemar exact, Cohen's h); benign tasks (false positives, consent burden); fingerprint
+prediction precision and recall; breakdowns **by suite, by attack category (the attack class), by ground truth and by
+carrier**; and cost (calls, cache hits, rate-limit answers, tokens). Residual attacks that use the task's own primitive
+at its own origin are reported as a floor, not a failure, and attacks with no attacker string to recognize are counted
+and excluded from attack rates.
+
+### 9.6 What to run first
+
+```
+# 1. nothing is called; no key needed
+cargo run --release -p ferrite-eval --example live_eval -- --plan --provider gemini --model <tag> \
+    --corpus agentdojo --seed 1 --batch-size 10
+
+# 2. one small real batch (key in FERRITE_GEMINI_API_KEY or the keyring)
+cargo run --release -p ferrite-eval --example live_eval -- --provider gemini --model <tag> \
+    --corpus agentdojo --seed 1 --batch-size 10 --max-calls 100 --pause-ms 4000
+
+# 3. read what happened, then repeat step 2 for the next batch
+cargo run --release -p ferrite-eval --example live_eval -- --report
+```
+
+Do the `mock` run once first to see the whole flow with no key (`--provider mock --model x`).
+
+### 9.7 What this does not establish
+
+The labels come from AgentDojo's ground-truth calls mapped onto Ferrite primitives, not from AgentDojo's own checks;
+one attack template (`important_instructions`) and one sample per case at temperature 0; a synthetic environment where
+"task success" is approximated by the agent giving a final answer; a simulated user who refuses every deviation. The
+numbers are Ferrite's measurement, not AgentDojo's utility or security scores, and are not comparable to published
+AgentDojo results. Provider tokenizers and real step counts are unmeasured until the first run.
+
+---
+
+## 10. AgentDojo coverage
+
+`crates/ferrite-eval/tests/agentdojo_full/` holds 1,046 cases generated by `scripts/import_agentdojo.py` from
+[AgentDojo](https://github.com/ethz-spylab/agentdojo) (MIT), commit `089ed468cf3ed0322acc66b0211f26d9d90dbf60`,
+benchmark v1.2.2: every user task x every injection task of the four suites (workspace 40 x 14, travel 20 x 7, banking
+16 x 9, slack 21 x 5 = 949 attack cases) with the `important_instructions` template, plus one benign twin per user task
+(97). `agentdojo_full_manifest.json` records the pin, per-suite counts, the lowering and tool maps, and anything the
+importer could not resolve (nothing, at this commit).
+
+- **It parses, never executes.** The task files are read with Python's `ast` (constants folded, f-strings evaluated,
+  the benchmark-version rules re-implemented); no AgentDojo code, tool, environment or utility/security check runs.
+  Each task's ground-truth tool calls are mapped to the nearest Ferrite primitive and origin (`TOOL_MAP`), and the
+  importer refuses to run if a suite registers a tool the map does not cover.
+- **Labels follow the specification**, never the defense's output: the closed capability lowering of ADR-001 (a Rust
+  test checks the importer's copy against `ferrite_core::LOWERING`).
+- **Declared approximations:** injection tasks whose ground truth is text only (some workspace and travel tasks) take
+  their effects from the goal text and are listed in the manifest as `injection_tasks_with_goal_text_effects`; the rest
+  use the ground-truth calls.
+- **Offline checks:** `cargo test -p ferrite-eval --test agentdojo_full_validate` (loads every file, counts against the
+  manifest and the pinned commit, unique ids, label consistency, every attack has a benign twin).
+- **Regenerating or verifying needs the real dataset, which is not in this repository's tooling**: clone the repository,
+  check out the pinned commit, and run `python3 scripts/import_agentdojo.py --src <checkout> --check` (omit `--check` to
+  rewrite). It prints these instructions if `--src` is missing or at another commit. Last verified byte-identical
+  against a fresh clone at the pinned commit on 2026-10-04.

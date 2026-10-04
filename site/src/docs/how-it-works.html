@@ -1,6 +1,6 @@
 <!--
 title: How the defense works
-order: 4
+order: 8
 group: Defense
 summary: The capability model and each stage of Ferrite's defense: prediction, sanitizer, dry run, comparison, consent, the runtime guard and the hash-chained audit log.
 -->
@@ -104,14 +104,20 @@ summary: The capability model and each stage of Ferrite's defense: prediction, s
 <p>The comparator takes the expected fingerprint and the dry-run record and produces a <em>diff</em>: extra primitives (capabilities the task did not imply) and out-of-scope origins (places the task did not authorize). Every event is classified by one function, <code>classify_event</code>, which the comparator and the runtime guard share, so they cannot disagree; a sweep test covers every primitive, origin and fingerprint combination.</p>
 
 <h2>5 · Consent</h2>
-<p>If the diff is non-empty, nothing real runs. The consent panel lists each deviation in plain language and asks per item: approve or reject. It is drawn by the application, outside page content, and only the items <em>you</em> approve are added to what the real run may do. The plain-language lines name the offending action and the origin your request actually authorized, so a lookalike domain is visible as such.</p>
+<p>If the diff is non-empty, nothing real runs. The review panel (titled <em>Review before running</em>) lists each deviation in plain language and asks per item: approve or reject. It is drawn by the application, outside page content, and only the items <em>you</em> approve are added to what the real run may do. The plain-language lines name the offending action and the origin your request actually authorized, so a lookalike domain is visible as such. <strong>Proceed with approved</strong> stays disabled until every item is decided, so there is no path to approving by default.</p>
+<p>The cards are deliberately calm: a neutral surface, a coloured rule down the left edge (amber undecided, green approved, red rejected) and soft tinted buttons instead of solid red and green. A test checks that the labels on those buttons stay readable in both themes.</p>
+<figure class="shot narrow">
+  <img class="theme-shot-light" src="{{ROOT}}static/img/approval-light.png" width="386" height="725" alt="The review panel listing two unexpected actions, js.execute (rejected) and a contact with attacker.example (undecided), each with Reject and Approve buttons." loading="lazy">
+  <img class="theme-shot-dark" src="{{ROOT}}static/img/approval-dark.png" width="386" height="725" alt="The review panel in the dark theme listing two unexpected actions, js.execute (rejected) and a contact with attacker.example (undecided), each with Reject and Approve buttons." loading="lazy">
+  <figcaption>The review panel, rendered from sample state, with one item rejected and one still undecided.</figcaption>
+</figure>
 
 <h2>The runtime guard</h2>
 <p>The dry run executes against synthetic pages, so a page that carries an injected instruction exists only in the <em>real</em> run, where the dry run cannot see it. If the loop compared once and then ran every real action, a deviation that only a real page provoked would be compared against nothing. The guard closes that gap.</p>
 <ul>
   <li>Every real action is classified and does not run unless it is in <em>expected ∪ approved</em>: what the predicted capabilities and their scopes admit, plus what you approved in this task's consent prompt.</li>
   <li>The <em>effect</em> of an action is what is checked: a URL action at that URL's origin, anything else at the active tab's origin, and a click by <code>@ref</code> on a link whose <code>href</code> leads elsewhere counts as a navigation there. A click on a link that leads to the site the tab is already on counts as either a click or a navigation, so a task that was expected only to navigate (<em>“go to this site's docs page”</em>) can follow the site's own links; a link to any other site, or a button, still needs its own permission.</li>
-  <li>An action that is neither expected nor already approved <strong>pauses the run and asks you</strong>: <em>Allow once</em>, <em>Allow for this task</em> or <em>Don't allow</em>. The question names the action and the site, never text the page wrote, and nothing outside the prediction runs until you say yes.</li>
+  <li>An action that is neither expected nor already approved <strong>pauses the run and asks you</strong>: <em>Allow once</em>, <em>Allow for task</em> or <em>Don’t allow</em> (<kbd>Esc</kbd> is “no”). The question names the action and the site, never text the page wrote, and nothing outside the prediction runs until you say yes.</li>
   <li>A block tells the agent a <strong>fixed sentence</strong> containing nothing from the action or the page, because an observation goes back to the model and anything attacker-chosen echoed there is itself an injection channel.</li>
   <li>The block is shown to you, committed to the audit log (<code>CapabilityDenied</code>), and the <strong>fourth block ends the run</strong>.</li>
   <li>An empty prediction blocks everything it was not given consent for.</li>

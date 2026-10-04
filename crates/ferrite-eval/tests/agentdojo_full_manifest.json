@@ -1,0 +1,441 @@
+{
+  "source": "https://github.com/ethz-spylab/agentdojo",
+  "source_commit": "089ed468cf3ed0322acc66b0211f26d9d90dbf60",
+  "license": "MIT",
+  "benchmark_version": "v1.2.2",
+  "importer": "scripts/import_agentdojo.py",
+  "attacks": [
+    "important_instructions"
+  ],
+  "suites": {
+    "workspace": {
+      "user_tasks": 40,
+      "injection_tasks": 14,
+      "benchmark_suite_version": "1.2.2",
+      "injection_tasks_with_goal_text_effects": [
+        "injection_task_10",
+        "injection_task_11",
+        "injection_task_12",
+        "injection_task_13",
+        "injection_task_6",
+        "injection_task_7",
+        "injection_task_8",
+        "injection_task_9"
+      ]
+    },
+    "travel": {
+      "user_tasks": 20,
+      "injection_tasks": 7,
+      "benchmark_suite_version": "1.2.0",
+      "injection_tasks_with_goal_text_effects": [
+        "injection_task_6"
+      ]
+    },
+    "banking": {
+      "user_tasks": 16,
+      "injection_tasks": 9,
+      "benchmark_suite_version": "1.2.2",
+      "injection_tasks_with_goal_text_effects": []
+    },
+    "slack": {
+      "user_tasks": 21,
+      "injection_tasks": 5,
+      "benchmark_suite_version": "1.2.0",
+      "injection_tasks_with_goal_text_effects": []
+    }
+  },
+  "lowering": {
+    "ClipboardRead": [
+      "clipboard.read"
+    ],
+    "ClipboardWrite": [
+      "clipboard.write"
+    ],
+    "ScopedRead": [
+      "cookie.read",
+      "storage.read"
+    ],
+    "WebDownload": [
+      "download"
+    ],
+    "WebInteract": [
+      "click",
+      "dom.write",
+      "form.fill",
+      "scroll",
+      "wait"
+    ],
+    "WebNavigate": [
+      "navigate",
+      "tab.close",
+      "tab.open"
+    ],
+    "WebRead": [
+      "dom.query",
+      "dom.read",
+      "screenshot"
+    ]
+  },
+  "tool_map": {
+    "add_calendar_event_participants": [
+      "write",
+      "calendar",
+      "form.fill"
+    ],
+    "add_user_to_channel": [
+      "write",
+      "channel",
+      "form.fill"
+    ],
+    "append_to_file": [
+      "write",
+      "drive",
+      "form.fill"
+    ],
+    "cancel_calendar_event": [
+      "write",
+      "calendar",
+      "form.fill"
+    ],
+    "check_restaurant_opening_hours": [
+      "read",
+      "restaurant",
+      "dom.read"
+    ],
+    "create_calendar_event": [
+      "write",
+      "calendar",
+      "form.fill"
+    ],
+    "create_file": [
+      "write",
+      "drive",
+      "form.fill"
+    ],
+    "delete_email": [
+      "write",
+      "email",
+      "form.fill"
+    ],
+    "delete_file": [
+      "write",
+      "drive",
+      "form.fill"
+    ],
+    "download_file": [
+      "web_dl",
+      "web",
+      "download"
+    ],
+    "get_all_car_rental_companies_in_city": [
+      "read",
+      "car",
+      "dom.read"
+    ],
+    "get_all_hotels_in_city": [
+      "read",
+      "hotel",
+      "dom.read"
+    ],
+    "get_all_restaurants_in_city": [
+      "read",
+      "restaurant",
+      "dom.read"
+    ],
+    "get_balance": [
+      "read",
+      "transactions",
+      "dom.read"
+    ],
+    "get_car_fuel_options": [
+      "read",
+      "car",
+      "dom.read"
+    ],
+    "get_car_price_per_day": [
+      "read",
+      "car",
+      "dom.read"
+    ],
+    "get_car_rental_address": [
+      "read",
+      "car",
+      "dom.read"
+    ],
+    "get_car_types_available": [
+      "read",
+      "car",
+      "dom.read"
+    ],
+    "get_channels": [
+      "read",
+      "channel",
+      "dom.read"
+    ],
+    "get_contact_information_for_restaurants": [
+      "read",
+      "restaurant",
+      "dom.read"
+    ],
+    "get_cuisine_type_for_restaurants": [
+      "read",
+      "restaurant",
+      "dom.read"
+    ],
+    "get_current_day": [
+      "read",
+      "calendar",
+      "dom.read"
+    ],
+    "get_day_calendar_events": [
+      "read",
+      "calendar",
+      "dom.read"
+    ],
+    "get_dietary_restrictions_for_all_restaurants": [
+      "read",
+      "restaurant",
+      "dom.read"
+    ],
+    "get_draft_emails": [
+      "read",
+      "email",
+      "dom.read"
+    ],
+    "get_file_by_id": [
+      "read",
+      "drive",
+      "dom.read"
+    ],
+    "get_flight_information": [
+      "read",
+      "flight",
+      "dom.read"
+    ],
+    "get_hotels_address": [
+      "read",
+      "hotel",
+      "dom.read"
+    ],
+    "get_hotels_prices": [
+      "read",
+      "hotel",
+      "dom.read"
+    ],
+    "get_iban": [
+      "read",
+      "account",
+      "dom.read"
+    ],
+    "get_most_recent_transactions": [
+      "read",
+      "transactions",
+      "dom.read"
+    ],
+    "get_price_for_restaurants": [
+      "read",
+      "restaurant",
+      "dom.read"
+    ],
+    "get_rating_reviews_for_car_rental": [
+      "read",
+      "car",
+      "dom.read"
+    ],
+    "get_rating_reviews_for_hotels": [
+      "read",
+      "hotel",
+      "dom.read"
+    ],
+    "get_rating_reviews_for_restaurants": [
+      "read",
+      "restaurant",
+      "dom.read"
+    ],
+    "get_received_emails": [
+      "read",
+      "email",
+      "dom.read"
+    ],
+    "get_restaurants_address": [
+      "read",
+      "restaurant",
+      "dom.read"
+    ],
+    "get_scheduled_transactions": [
+      "read",
+      "transactions",
+      "dom.read"
+    ],
+    "get_sent_emails": [
+      "read",
+      "email",
+      "dom.read"
+    ],
+    "get_unread_emails": [
+      "read",
+      "email",
+      "dom.read"
+    ],
+    "get_user_info": [
+      "read",
+      "account",
+      "dom.read"
+    ],
+    "get_user_information": [
+      "read",
+      "account",
+      "dom.read"
+    ],
+    "get_users_in_channel": [
+      "read",
+      "channel",
+      "dom.read"
+    ],
+    "get_webpage": [
+      "web_get",
+      "web",
+      "navigate"
+    ],
+    "invite_user_to_slack": [
+      "write",
+      "channel",
+      "form.fill"
+    ],
+    "list_files": [
+      "read",
+      "drive",
+      "dom.read"
+    ],
+    "post_webpage": [
+      "web_post",
+      "web",
+      "form.fill"
+    ],
+    "read_channel_messages": [
+      "read",
+      "channel",
+      "dom.read"
+    ],
+    "read_file": [
+      "read",
+      "file",
+      "dom.read"
+    ],
+    "read_inbox": [
+      "read",
+      "inbox",
+      "dom.read"
+    ],
+    "remove_user_from_slack": [
+      "write",
+      "channel",
+      "form.fill"
+    ],
+    "reschedule_calendar_event": [
+      "write",
+      "calendar",
+      "form.fill"
+    ],
+    "reserve_car_rental": [
+      "write",
+      "car",
+      "form.fill"
+    ],
+    "reserve_hotel": [
+      "write",
+      "hotel",
+      "form.fill"
+    ],
+    "reserve_restaurant": [
+      "write",
+      "restaurant",
+      "form.fill"
+    ],
+    "schedule_transaction": [
+      "write",
+      "transactions",
+      "form.fill"
+    ],
+    "search_calendar_events": [
+      "read",
+      "calendar",
+      "dom.read"
+    ],
+    "search_contacts_by_email": [
+      "read",
+      "email",
+      "dom.read"
+    ],
+    "search_contacts_by_name": [
+      "read",
+      "email",
+      "dom.read"
+    ],
+    "search_emails": [
+      "read",
+      "email",
+      "dom.read"
+    ],
+    "search_files": [
+      "read",
+      "drive",
+      "dom.read"
+    ],
+    "search_files_by_filename": [
+      "read",
+      "drive",
+      "dom.read"
+    ],
+    "send_channel_message": [
+      "write",
+      "channel",
+      "form.fill"
+    ],
+    "send_direct_message": [
+      "write",
+      "inbox",
+      "form.fill"
+    ],
+    "send_email": [
+      "write",
+      "email",
+      "form.fill"
+    ],
+    "send_money": [
+      "write",
+      "transactions",
+      "form.fill"
+    ],
+    "share_file": [
+      "write",
+      "drive",
+      "form.fill"
+    ],
+    "update_password": [
+      "write",
+      "account",
+      "form.fill"
+    ],
+    "update_scheduled_transaction": [
+      "write",
+      "transactions",
+      "form.fill"
+    ],
+    "update_user_info": [
+      "write",
+      "account",
+      "form.fill"
+    ]
+  },
+  "suite_origins": {
+    "workspace": "https://workspace.example",
+    "travel": "https://travel.example",
+    "banking": "https://banking.example",
+    "slack": "https://slack.example"
+  },
+  "cases": 1046,
+  "benign_cases": 97,
+  "attack_cases": 949,
+  "unresolved": []
+}

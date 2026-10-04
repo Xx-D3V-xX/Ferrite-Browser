@@ -38,6 +38,7 @@ pub fn init() -> Option<PathBuf> {
             std::env::set_var("RUST_BACKTRACE", "1");
         }
     }
+    install_panic_hook();
     if std::io::stderr().is_terminal() {
         return None;
     }
@@ -58,6 +59,26 @@ pub fn init() -> Option<PathBuf> {
     std::mem::forget(file);
     banner(&current);
     Some(current)
+}
+
+/// Hands every panic to the DevTools view (`ferrite_servo::diag`) before the
+/// default hook prints it with its backtrace.
+fn install_panic_hook() {
+    let default = std::panic::take_hook();
+    std::panic::set_hook(Box::new(move |info| {
+        let thread = std::thread::current();
+        let message = info
+            .payload()
+            .downcast_ref::<&str>()
+            .map(|s| (*s).to_string())
+            .or_else(|| info.payload().downcast_ref::<String>().cloned())
+            .unwrap_or_else(|| "panic".to_string());
+        let location = info.location().map_or_else(String::new, |l| {
+            format!("{}:{}:{}", l.file(), l.line(), l.column())
+        });
+        ferrite_servo::diag::record_panic(thread.name().unwrap_or("unnamed"), &message, &location);
+        default(info);
+    }));
 }
 
 fn banner(path: &std::path::Path) {

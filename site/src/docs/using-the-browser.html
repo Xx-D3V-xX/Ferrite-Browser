@@ -1,0 +1,116 @@
+<!--
+title: Using the browser
+order: 4
+group: Use
+summary: Ferrite's window, tab strip, toolbar and address bar, keyboard shortcuts, resizable panels, the dropdowns and dialogs a page can ask for, and the crash banner.
+-->
+<p class="lede">Ferrite is a normal browser with an agent panel beside it. This page covers the window, the shortcuts, the panels you can resize, what happens when a page asks for a dropdown, a dialog or a file, and what the crash banner means.</p>
+
+<div class="callout note">
+  <h4>Which build has this</h4>
+  <p>Everything here is in the source. The build on the releases page was published on 2026-10-02 from commit <code>f4ed744</code>, before the page-control overlays, resizable panels, DevTools and crash banner were written. The release page names its commit; build from source (<a href="{{ROOT}}docs/run-it.html">Run it from source</a>) to get them now. The screenshots on this page were rendered on Linux.</p>
+</div>
+
+<h2>The window</h2>
+<figure class="shot wide">
+  <img class="theme-shot-light" src="{{ROOT}}static/img/browser-light.png" width="1280" height="800" alt="The Ferrite window: a tab strip with four tabs, a toolbar with back, forward, reload, the address bar, the Agent button, an audit shield and a menu, and this website rendered below." loading="lazy">
+  <img class="theme-shot-dark" src="{{ROOT}}static/img/browser-dark.png" width="1280" height="800" alt="The Ferrite window in its dark theme: a tab strip with four tabs, a toolbar with back, forward, reload, the address bar, the Agent button, an audit shield and a menu, and this website rendered below." loading="lazy">
+  <figcaption>Tab strip, toolbar and page. The interface is drawn from sample state (the three other tabs are placeholders); the page is a real engine render of this website served from localhost. The “Not secure” chip is real: the address is plain <code>http://</code>.</figcaption>
+</figure>
+
+<h3>Tab strip</h3>
+<ul>
+  <li>Tabs share the strip equally, down to a minimum width, and the strip scrolls beyond that. A long title is cut with an ellipsis. The active tab keeps a minimum width so its close button stays reachable.</li>
+  <li>The close button shows on the active or hovered tab, and a middle-click closes a tab. <kbd>Cmd/Ctrl</kbd>+<kbd>T</kbd> or the <strong>+</strong> opens one.</li>
+  <li>A small dot on a tab means the page needs you: the accent colour while it waits on a dropdown or dialog, red after it stopped responding. This matters because a background tab's alert is otherwise invisible, and its page is blocked until you look.</li>
+  <li>The empty part of the strip drags the window, and a double-click maximizes it. On macOS the title bar is transparent and the strip holds the window buttons; on Linux and Windows the window keeps its normal frame.</li>
+</ul>
+
+<h3>Toolbar and address bar</h3>
+<p>Left to right: back, forward, reload (it becomes stop while a page loads), the address bar, the <strong>Agent</strong> button (a dot appears when something needs your decision), the <strong>audit</strong> shield and the menu. A thin band sweeping the toolbar's bottom edge shows loading.</p>
+<ul>
+  <li>An address with a scheme (<code>https://…</code>) or an <code>about:</code> page is opened as typed.</li>
+  <li>A bare host or path containing a dot and no spaces gets <code>https://</code>; <code>localhost</code> and IP addresses get <code>http://</code>.</li>
+  <li><strong>Anything else is a Google search.</strong> The agent's own search is separate: its prompt still sends it to DuckDuckGo Lite and tells it not to use google.com, because Google's pages stayed blank in this engine when that was written. Whether Google's results page now renders well is unconfirmed (see <a href="{{ROOT}}docs/limits.html">Limits</a>).</li>
+  <li>Clicking the bar selects everything. A zoom chip appears in it when the page is not at 100%, and a bookmark button saves the page.</li>
+</ul>
+
+<h3>The menu</h3>
+<figure class="shot narrow">
+  <img class="theme-shot-light" src="{{ROOT}}static/img/menu-light.png" width="400" height="430" alt="The overflow menu: New tab, a zoom control, Find in page, Bookmark this page, Bookmarks, History, Downloads, Developer tools, Switch to dark theme and Settings." loading="lazy">
+  <img class="theme-shot-dark" src="{{ROOT}}static/img/menu-dark.png" width="400" height="430" alt="The overflow menu in the dark theme: New tab, a zoom control, Find in page, Bookmark this page, Bookmarks, History, Downloads, Developer tools, Switch to light theme and Settings." loading="lazy">
+  <figcaption>The overflow menu. This screenshot was rendered on Linux, so the shortcuts read Ctrl; on macOS they read Cmd.</figcaption>
+</figure>
+<p>Bookmarks, History and Downloads share one drawer. Browsing history is for the current session only and is not saved; bookmarks are. Downloads has a manual <em>Download current page</em> action, and clicks on <code>&lt;a download&gt;</code> links are not intercepted.</p>
+
+<h2>Keyboard shortcuts</h2>
+<p><kbd>Mod</kbd> is <kbd>Cmd</kbd> on macOS and <kbd>Ctrl</kbd> everywhere else. These come from the shortcut table in the interface code, and they keep working while the address bar or the agent box has focus (editing keys such as <kbd>Mod</kbd>+<kbd>A</kbd>, <kbd>C</kbd>, <kbd>V</kbd>, <kbd>X</kbd> and <kbd>Z</kbd> still reach the field).</p>
+<div class="table-wrap"><table>
+<thead><tr><th>Keys</th><th>Action</th></tr></thead>
+<tbody>
+<tr><td><kbd>Mod</kbd>+<kbd>T</kbd> / <kbd>Mod</kbd>+<kbd>W</kbd></td><td>New tab / close the active tab</td></tr>
+<tr><td><kbd>Mod</kbd>+<kbd>R</kbd>, <kbd>F5</kbd></td><td>Reload</td></tr>
+<tr><td><kbd>Mod</kbd>+<kbd>L</kbd></td><td>Focus the address bar</td></tr>
+<tr><td><kbd>Mod</kbd>+<kbd>F</kbd></td><td>Find in page (<kbd>Esc</kbd> closes the bar)</td></tr>
+<tr><td><kbd>Mod</kbd>+<kbd>D</kbd></td><td>Bookmark this page, or remove the bookmark</td></tr>
+<tr><td><kbd>Mod</kbd>+<kbd>=</kbd>, <kbd>Mod</kbd>+<kbd>-</kbd>, <kbd>Mod</kbd>+<kbd>0</kbd></td><td>Zoom in, out, reset</td></tr>
+<tr><td><kbd>Mod</kbd>+<kbd>[</kbd>, <kbd>Mod</kbd>+<kbd>]</kbd>, <kbd>Alt</kbd>+<kbd>←</kbd>, <kbd>Alt</kbd>+<kbd>→</kbd></td><td>Back, forward</td></tr>
+<tr><td><kbd>Mod</kbd>+<kbd>Shift</kbd>+<kbd>[</kbd> / <kbd>]</kbd>, <kbd>Ctrl</kbd>+<kbd>Tab</kbd> / <kbd>Ctrl</kbd>+<kbd>Shift</kbd>+<kbd>Tab</kbd></td><td>Previous or next tab (<kbd>Ctrl</kbd>+<kbd>Tab</kbd> is <kbd>Ctrl</kbd> on macOS too)</td></tr>
+<tr><td><kbd>Mod</kbd>+<kbd>1</kbd> to <kbd>8</kbd>, <kbd>Mod</kbd>+<kbd>9</kbd></td><td>That tab by number; the last tab</td></tr>
+<tr><td><kbd>Mod</kbd>+<kbd>Shift</kbd>+<kbd>A</kbd></td><td>Show or hide the agent panel</td></tr>
+<tr><td><kbd>Mod</kbd>+<kbd>Shift</kbd>+<kbd>O</kbd></td><td>New agent chat</td></tr>
+<tr><td><kbd>Mod</kbd>+<kbd>,</kbd></td><td>Settings</td></tr>
+<tr><td><kbd>Cmd</kbd>+<kbd>Opt</kbd>+<kbd>I</kbd> (macOS), <kbd>Ctrl</kbd>+<kbd>Shift</kbd>+<kbd>I</kbd> (elsewhere), <kbd>Mod</kbd>+<kbd>J</kbd></td><td>Developer tools</td></tr>
+<tr><td><kbd>F12</kbd></td><td>The <strong>Audit</strong> panel (model calls and the hash-chained log), <em>not</em> DevTools</td></tr>
+</tbody></table></div>
+<p>Typing, pointer and wheel input go to the page unless a field of the browser has focus or a page control is open. Not handled: input-method (IME) composition and HTTP basic-auth prompts. Non-US keyboard layouts, dead keys and key repeat have not been observed.</p>
+
+<h2>Panels you can resize</h2>
+<p>The agent, library (bookmarks, history, downloads) and settings drawers share the right-hand side, one at a time. DevTools and the audit panel share the bottom. Drag the edge between a panel and the page to resize it, and double-click the edge to reset it.</p>
+<ul>
+  <li>Side drawers are 300 to 760 px wide (380 by default); bottom panels are 140 to 720 px tall (260 by default).</li>
+  <li>The page always keeps at least 360 by 160 px, and sizes are re-fitted to the real window every time, so a size saved on a big monitor never swallows the page on a small one.</li>
+  <li>Sizes are saved when you release the mouse, in <code>ui-layout.json</code> in the data folder. If a size cannot be saved, the panel still resizes.</li>
+</ul>
+
+<h2>What a page can ask the browser for</h2>
+<p>Dropdown lists, <code>alert()</code>, <code>confirm()</code> and <code>prompt()</code>, the colour picker, the file picker and the page's context menu reach the browser as requests, and Ferrite draws each one itself as an overlay on the page. The page is blocked until you answer, and while one is open the page receives no pointer or key input. Every control can be answered or dismissed (<kbd>Esc</kbd> cancels it).</p>
+<p><strong>The page's text is untrusted.</strong> A dialog's message, an option's label or a menu row is drawn as plain text with control and bidirectional characters removed and lengths capped, and a dialog names the site it comes from and says it comes from the page, so a page cannot pass its words off as Ferrite's.</p>
+<div class="shots stack">
+  <figure class="shot half">
+    <img class="theme-shot-light" src="{{ROOT}}static/img/controls-select-light.png" width="490" height="410" alt="A dropdown list of countries drawn by Ferrite over a form, with Germany ticked." loading="lazy">
+    <img class="theme-shot-dark" src="{{ROOT}}static/img/controls-select-dark.png" width="490" height="410" alt="A dropdown list of countries drawn by Ferrite over a form in the dark theme, with Germany ticked." loading="lazy">
+    <figcaption>A <code>&lt;select&gt;</code> list. The form is a real engine render of a local demo page; the overlay is drawn from sample state placed over its select box.</figcaption>
+  </figure>
+  <figure class="shot half">
+    <img class="theme-shot-light" src="{{ROOT}}static/img/controls-dialog-light.png" width="480" height="270" alt="A confirm dialog titled This page asks, from localhost, with the message Remove 2 items from your cart, a note that the message comes from the web page, and Cancel and OK buttons." loading="lazy">
+    <img class="theme-shot-dark" src="{{ROOT}}static/img/controls-dialog-dark.png" width="480" height="270" alt="A confirm dialog in the dark theme titled This page asks, from localhost, with the message Remove 2 items from your cart, a note that the message comes from the web page, and Cancel and OK buttons." loading="lazy">
+    <figcaption>A <code>confirm()</code> dialog, framed as coming from the page. Rendered from sample state.</figcaption>
+  </figure>
+  <figure class="shot half">
+  <img class="theme-shot-light" src="{{ROOT}}static/img/controls-file-light.png" width="480" height="270" alt="The file picker card: Choose a file, from localhost, with a field for the full path and a note that the page accepts .pdf and .png, and Cancel and Open buttons." loading="lazy">
+  <img class="theme-shot-dark" src="{{ROOT}}static/img/controls-file-dark.png" width="480" height="270" alt="The file picker card in the dark theme: Choose a file, from localhost, with a field for the full path and a note that the page accepts .pdf and .png, and Cancel and Open buttons." loading="lazy">
+  <figcaption>The file picker. Ferrite has no native file dialog yet, so you type or paste the path. Rendered from sample state.</figcaption>
+  </figure>
+</div>
+<div class="callout warn">
+  <h4>Known gaps</h4>
+  <p>The file picker is a typed-path card, and the path the engine receives after you press Open has not been exercised against a real upload. HTTP basic-auth prompts are not handled at all, so a page behind basic auth gets no prompt. Select, <code>confirm()</code>, <code>prompt()</code> and the colour input were verified in the engine; the overlays were driven on Linux at normal pixel density, not on a Retina screen or a Mac.</p>
+</div>
+<p>The page's cursor (pointer, text, crosshair and so on) is followed; <code>cursor: none</code> shows the ordinary arrow.</p>
+
+<h2>When a page stops responding</h2>
+<p>If a page's script thread dies, the engine reports it and Ferrite leaves the page frozen on screen with a banner over it, plus the red dot on its tab. The banner is not a dialog: you can keep using the rest of the browser.</p>
+<figure class="shot wide">
+  <img class="theme-shot-light" src="{{ROOT}}static/img/crash-light.png" width="1280" height="230" alt="The top of the Ferrite window with a banner over the page: This page stopped responding, with Reload, Details and a close button, and a red dot on the active tab." loading="lazy">
+  <img class="theme-shot-dark" src="{{ROOT}}static/img/crash-dark.png" width="1280" height="230" alt="The top of the Ferrite window in the dark theme with a banner over the page: This page stopped responding, with Reload, Details and a close button, and a red dot on the active tab." loading="lazy">
+  <figcaption>The crash banner, rendered from sample state. The engine did not really crash here.</figcaption>
+</figure>
+<dl class="defs">
+  <dt>Reload</dt><dd>Gives the tab a fresh engine session and loads the same address again. Reload and address entry on a crashed tab also start a fresh session instead of talking to the dead one.</dd>
+  <dt>Details</dt><dd>Shows the reason and a backtrace, with a Copy button that copies a short report including the page address.</dd>
+  <dt>Dismiss</dt><dd>Hides the banner. The crash stays in <a href="{{ROOT}}docs/debugging.html">DevTools' Engine tab</a> and in the log file.</dd>
+</dl>
+
+<h2>The agent panel</h2>
+<p>The panel is a chat. Each run is a turn with the steps the agent took, collapsed once it finishes, and its answer. Chats are saved and listed under the clock icon. The answer is rendered as Markdown: no HTML is interpreted, no images are fetched, and a link shows the site it really goes to and opens only when you click it. Settings and the cards that ask for your decision are covered in <a href="{{ROOT}}docs/getting-started.html#4-when-a-review-or-approval-card-appears">Getting started</a> and <a href="{{ROOT}}docs/models-and-settings.html">Models and settings</a>.</p>

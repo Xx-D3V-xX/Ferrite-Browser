@@ -1,4 +1,5 @@
 [workspace]
+exclude = ["vendor"]
 members = [
   "crates/ferrite-core",
   "crates/ferrite-model",
@@ -168,3 +169,7 @@ panic = "unwind"
 [profile.bench]
 inherits = "release"
 debug = "line-tables-only"
+
+# The engine's script crate with Ferrite's fixes (vendor/servo-script/FERRITE-PATCHES.md).
+[patch.crates-io]
+servo-script = { path = "vendor/servo-script" }

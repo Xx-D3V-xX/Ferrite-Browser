@@ -5,6 +5,19 @@ Targets per `docs/REBUILD_DIRECTIVE.md` §7.4: **< 12 GB target-dir** and
 every phase gate — this file is data, not aspiration; a >20% regression
 should be fixed before moving on, per §7.4.
 
+> **Status note (2026-10-04).** The tables below are dated measurements and are
+> not re-measured. Things that have changed since they were taken: the target dir
+> is now `<repo>/target` (the `justfile` and the scripts export it; the
+> `~/.cache/ferrite-target` path below is the old default), and the real engine is
+> Servo 0.6.0 from crates.io (ADR-013), not the git tag `v0.0.5` the A9 entry
+> built. `scripts/setup-local.sh --help` now says to plan on 20 to 60 minutes and
+> 10+ GB for the first Servo build, which is the working figure; the 15m31s / 6.4 GB
+> below is the old debug build added to an existing target dir. On 2026-10-04 the
+> development sandbox's `target/` measured 16 GB (`du -sh target`: debug build,
+> Servo, test and example binaries), above the original 12 GB target; no phase-gate
+> re-measurement was made. CI's Servo release build runs only inside the manual CI
+> run's second job (`docs/COMMANDS.md` section 10).
+
 Machine for all measurements below: macOS (Apple Silicon, arm64),
 `rustc 1.98.1`, cold numbers taken with `~/.cache/ferrite-target` deleted
 but the cargo registry/index cache warm (a true from-network-zero clone

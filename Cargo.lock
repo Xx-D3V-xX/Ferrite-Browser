@@ -2535,14 +2535,17 @@ version = "0.1.0"
 dependencies = [
  "async-trait",
  "chrono",
+ "ferrite-agent",
  "ferrite-audit-log",
  "ferrite-core",
  "ferrite-engine",
  "ferrite-ipi",
  "ferrite-model",
+ "hex",
  "rand 0.8.8",
  "serde",
  "serde_json",
+ "sha2 0.10.9",
  "thiserror 1.0.69",
  "tokio",
  "uuid",
@@ -2595,11 +2598,16 @@ dependencies = [
 name = "ferrite-servo"
 version = "0.1.0"
 dependencies = [
+ "euclid",
  "ferrite-audit-log",
+ "gleam",
+ "glow 0.17.0",
  "log",
+ "png 0.17.16",
  "raw-window-handle",
  "rustls",
  "servo",
+ "surfman",
  "url",
  "uuid",
  "winit",
@@ -8835,8 +8843,6 @@ dependencies = [
 [[package]]
 name = "servo-script"
 version = "0.6.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "c08de23e00326c3f698ebe2a39bc4d51fbf7507af128c8cbb295b1ae6ae2f13c"
 dependencies = [
  "aes 0.9.1",
  "aes-gcm 0.11.1",
