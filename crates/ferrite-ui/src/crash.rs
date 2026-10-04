@@ -272,11 +272,11 @@ mod tests {
     fn dismissing_hides_the_banner_and_details_toggle() {
         let mut state = state_with_crash();
         assert!(banner(&state).is_some());
-        update(&mut state, Msg::ToggleDetails);
+        let _ = update(&mut state, Msg::ToggleDetails);
         assert!(state.tab_diag[0].crash.as_ref().unwrap().details);
-        update(&mut state, Msg::ToggleDetails);
+        let _ = update(&mut state, Msg::ToggleDetails);
         assert!(!state.tab_diag[0].crash.as_ref().unwrap().details);
-        update(&mut state, Msg::Dismiss);
+        let _ = update(&mut state, Msg::Dismiss);
         assert!(banner(&state).is_none());
     }
 
@@ -296,7 +296,7 @@ mod tests {
         // This build has no engine, so a new session cannot be made: exactly
         // the failure path.
         let mut state = state_with_crash();
-        update(&mut state, Msg::Reload);
+        let _ = update(&mut state, Msg::Reload);
         assert!(state.tab_diag[0].crash.is_none(), "the banner is gone");
         assert!(state.servo_sessions.is_empty(), "no dead session is kept");
         assert!(state.tab_error[0]

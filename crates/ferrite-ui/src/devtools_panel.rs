@@ -7,7 +7,7 @@
 
 use ferrite_servo::diag::ConsoleLevel;
 use iced::widget::{
-    button, column, container, mouse_area, row, scrollable, text, text_input, Space,
+    button, column, container, mouse_area, row, scrollable, stack, text, text_input, Space,
 };
 use iced::{Alignment, Background, Border, Color, Element, Font, Length, Theme};
 
@@ -147,13 +147,15 @@ fn pill<'a>(
         .into()
 }
 
-fn level_icon(palette: &'static Palette, level: ConsoleLevel) -> (Icon, Color) {
+/// The glyph in a message's gutter. Plain logs carry none, as in DevTools: the
+/// icon is for what needs a second look.
+fn level_icon(palette: &'static Palette, level: ConsoleLevel) -> Option<(Icon, Color)> {
     match level {
-        ConsoleLevel::Error => (Icon::Reject, palette.danger),
-        ConsoleLevel::Warn => (Icon::Warning, palette.warn),
-        ConsoleLevel::Info => (Icon::Info, palette.accent_bright),
-        ConsoleLevel::Log => (Icon::Console, palette.text_dim),
-        ConsoleLevel::Debug => (Icon::Bug, tint(palette.text_dim, 0.8)),
+        ConsoleLevel::Error => Some((Icon::Reject, palette.danger)),
+        ConsoleLevel::Warn => Some((Icon::Warning, palette.warn)),
+        ConsoleLevel::Info => Some((Icon::Info, palette.accent_bright)),
+        ConsoleLevel::Log => None,
+        ConsoleLevel::Debug => Some((Icon::Bug, tint(palette.text_dim, 0.8))),
     }
 }
 
@@ -204,7 +206,10 @@ fn tab_button<'a>(
         }))
         .into()];
     cells.extend(badges);
-    column![
+    // The underline is a second layer over the button, so the tab is exactly
+    // as wide as its label (a column with a full-width underline would make
+    // every tab share the header equally).
+    stack![
         button(row(cells).spacing(SP_XS + 2.0).align_y(Alignment::Center))
             .padding([SP_XS + 2.0, SP_MD])
             .style(move |_: &Theme, status: button::Status| button::Style {
@@ -227,16 +232,17 @@ fn tab_button<'a>(
                 ..button::Style::default()
             })
             .on_press(dev(Msg::SetTab(tab))),
-        container(Space::new(Length::Fill, Length::Fixed(2.0))).style(move |_: &Theme| {
-            container::Style {
-                background: Some(Background::Color(if active {
-                    palette.accent
-                } else {
-                    Color::TRANSPARENT
-                })),
-                ..container::Style::default()
-            }
-        }),
+        container(
+            container(Space::new(Length::Fill, Length::Fixed(2.0)))
+                .width(Length::Fill)
+                .style(move |_: &Theme| container::Style {
+                    background: active.then_some(Background::Color(palette.accent)),
+                    ..container::Style::default()
+                })
+        )
+        .width(Length::Fill)
+        .height(Length::Fill)
+        .align_y(Alignment::End),
     ]
     .into()
 }
@@ -659,9 +665,9 @@ fn console_row<'a>(
         .into();
     }
 
-    let (glyph, tone) = match r.kind {
-        RowKind::Input => (Icon::ChevronRight, palette.accent_bright),
-        RowKind::Result => (Icon::Back, palette.text_dim),
+    let glyph = match r.kind {
+        RowKind::Input => Some((Icon::ChevronRight, palette.accent_bright)),
+        RowKind::Result => Some((Icon::Back, palette.text_dim)),
         _ => level_icon(palette, r.level),
     };
     let body_color = match (r.kind, r.level) {
@@ -716,11 +722,14 @@ fn console_row<'a>(
             .color(palette.text_dim)
             .width(Length::Fixed(TIME_W))
             .into(),
-        container(icon(glyph, 13.0, tone))
-            .width(Length::Fixed(16.0))
-            .center_x(Length::Fixed(16.0))
-            .padding([2.0, 0.0])
-            .into(),
+        container(match glyph {
+            Some((glyph, tone)) => icon(glyph, 13.0, tone),
+            None => Space::with_width(Length::Fixed(13.0)).into(),
+        })
+        .width(Length::Fixed(16.0))
+        .center_x(Length::Fixed(16.0))
+        .padding([2.0, 0.0])
+        .into(),
     ];
     if r.count > 1 {
         cells.push(pill(
@@ -739,7 +748,19 @@ fn console_row<'a>(
                     .wrapping(text::Wrapping::None),
             )
             .padding([0.0, SP_XS])
-            .style(link_button_style)
+            .style(move |_: &Theme, status: button::Status| button::Style {
+                background: None,
+                text_color: if matches!(status, button::Status::Hovered | button::Status::Pressed) {
+                    palette.accent_bright
+                } else {
+                    palette.text_dim
+                },
+                border: Border {
+                    radius: 4.0.into(),
+                    ..Border::default()
+                },
+                ..button::Style::default()
+            })
             .on_press(dev(Msg::CopyText(source.clone()))),
             "Copy location",
             palette,
@@ -747,8 +768,7 @@ fn console_row<'a>(
     }
 
     let wash = match r.level {
-        ConsoleLevel::Error if r.kind == RowKind::Message => Some(tint(palette.danger, 0.09)),
-        ConsoleLevel::Warn if r.kind == RowKind::Message => Some(tint(palette.warn, 0.07)),
+        ConsoleLevel::Error if r.kind == RowKind::Message => Some(tint(palette.danger, 0.08)),
         _ => None,
     };
     container(
@@ -1000,9 +1020,18 @@ fn engine_list<'a>(
     let rows: Vec<Element<FerriteBrowserMessage>> = events
         .iter()
         .rev()
-        .map(|e| {
+        .flat_map(|e| {
             let expanded = state.devtools.expanded.contains(&(Section::Engine, e.id));
-            engine_row(palette, e, expanded)
+            [
+                engine_row(palette, e, expanded),
+                container(Space::new(Length::Fill, Length::Fixed(1.0)))
+                    .width(Length::Fill)
+                    .style(move |_: &Theme| container::Style {
+                        background: Some(Background::Color(palette.divider)),
+                        ..container::Style::default()
+                    })
+                    .into(),
+            ]
         })
         .collect();
     scrollable(column(rows).width(Length::Fill))
@@ -1136,7 +1165,6 @@ fn engine_row<'a>(
                 width: 0.0,
                 ..Border::default()
             },
-            background: Some(Background::Color(tint(palette.danger, 0.05))),
             ..container::Style::default()
         })
         .into()

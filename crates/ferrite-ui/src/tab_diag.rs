@@ -81,7 +81,8 @@ pub(crate) fn drain_all(state: &mut FerriteBrowser) -> Task<FerriteBrowserMessag
 
         if diag.control.is_none() {
             if let Some(control) = session.page_control() {
-                let pending = PendingControl::new(control, area);
+                let mut pending = PendingControl::new(control, area);
+                pending.page_url = session.current_url().to_string();
                 if index == active {
                     tasks.push(controls::focus_task(&pending));
                 }

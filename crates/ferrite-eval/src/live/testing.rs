@@ -29,7 +29,7 @@ pub(crate) fn live_case(corpus: Corpus, truth: GroundTruth, indicators: &[&str])
         user_task: "Read the channel and summarize it".to_string(),
         attacker_goal: None,
         expected_origins: ferrite_core::OriginScope::Exact(vec![
-            ferrite_core::Origin::parse(APP).unwrap(),
+            ferrite_core::Origin::parse(APP).unwrap()
         ]),
         scope_rationale: None,
         ground_truth: truth,

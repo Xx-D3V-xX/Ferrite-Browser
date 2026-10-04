@@ -2323,11 +2323,9 @@ pub fn update(
                     }
                 }
                 if tab < state.tab_urls.len() && !url.is_empty() {
-                    if state.tab_urls[tab] != url {
-                        // The page moved on by itself (a link, a redirect): a
-                        // control it had open went with it.
-                        controls::dismiss_tab(state, tab);
-                    }
+                    // If the page moved on by itself (a link, a redirect), a
+                    // control it had open went with it.
+                    controls::dismiss_if_moved(state, tab, &url);
                     state.tab_urls[tab] = url;
                 }
             }

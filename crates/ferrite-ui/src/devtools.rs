@@ -1149,16 +1149,16 @@ pub(crate) fn console_line(row: &ConsoleRow) -> String {
     line
 }
 
-/// How long after the page's navigation a request started, `+0.123s`, or the
+/// How long after the page's navigation a request started (`150 ms`, `12.5 s`), or the
 /// clock time when there is no navigation to measure from.
 pub(crate) fn net_time(at_ms: u64, nav_ms: Option<u64>) -> String {
     match nav_ms {
         Some(nav) if at_ms >= nav => {
             let ms = at_ms - nav;
             if ms < 10_000 {
-                format!("+{ms} ms")
+                format!("{ms} ms")
             } else {
-                format!("+{:.1} s", ms as f64 / 1000.0)
+                format!("{:.1} s", ms as f64 / 1000.0)
             }
         }
         _ => clock_ms(at_ms),
@@ -1642,8 +1642,8 @@ mod tests {
 
     #[test]
     fn request_times_read_relative_to_the_navigation() {
-        assert_eq!(net_time(1_150, Some(1_000)), "+150 ms");
-        assert_eq!(net_time(31_000, Some(1_000)), "+30.0 s");
+        assert_eq!(net_time(1_150, Some(1_000)), "150 ms");
+        assert_eq!(net_time(31_000, Some(1_000)), "30.0 s");
         // Before any navigation, or from before it: the wall clock.
         assert_eq!(net_time(0, None), clock_ms(0));
         assert_eq!(net_time(500, Some(1_000)), clock_ms(500));

@@ -526,6 +526,10 @@ pub(crate) enum ControlUi {
 pub(crate) struct PendingControl {
     pub control: PageControl,
     pub ui: ControlUi,
+    /// The engine's address for the page when the control appeared, so a later
+    /// load can tell whether the page has since moved on (and the control with
+    /// it) or merely reported the same address again.
+    pub page_url: String,
 }
 
 /// A key the control cares about.
@@ -589,7 +593,11 @@ impl PendingControl {
                 highlighted: menu_step(items, None, 1),
             },
         };
-        Self { control, ui }
+        Self {
+            control,
+            ui,
+            page_url: String::new(),
+        }
     }
 
     pub(crate) fn handle(&mut self, msg: Msg) -> Outcome {
@@ -804,8 +812,23 @@ pub(crate) fn answer(state: &mut FerriteBrowser, tab: usize, answer: ControlAnsw
     crate::wake(state);
 }
 
-/// Dismisses tab `tab`'s control, if it has one (the person left the tab or the
-/// page moved on).
+/// Dismisses tab `tab`'s control if the page has moved on from the address it
+/// was opened on (`engine_url` is where the engine says the page is now). The
+/// same address reported again is not a reason: an `alert()` raised while a page
+/// loads must not vanish with the load's own bookkeeping.
+pub(crate) fn dismiss_if_moved(state: &mut FerriteBrowser, tab: usize, engine_url: &str) {
+    let moved = state
+        .tab_diag
+        .get(tab)
+        .and_then(|d| d.control.as_ref())
+        .is_some_and(|c| c.page_url != engine_url);
+    if moved {
+        answer(state, tab, ControlAnswer::Dismiss);
+    }
+}
+
+/// Dismisses tab `tab`'s control, if it has one (the person left the tab or
+/// started a navigation).
 pub(crate) fn dismiss_tab(state: &mut FerriteBrowser, tab: usize) {
     if tab_has_control(state, tab) {
         answer(state, tab, ControlAnswer::Dismiss);
@@ -1321,6 +1344,7 @@ fn page_card<'a>(
     title: &'static str,
     host: &str,
     body: Element<'a, FerriteBrowserMessage>,
+    footer: &'static str,
     actions: Element<'a, FerriteBrowserMessage>,
 ) -> Element<'a, FerriteBrowserMessage> {
     let header = row![
@@ -1343,9 +1367,7 @@ fn page_card<'a>(
         column![
             header,
             body,
-            text("This message comes from the web page, not from Ferrite.")
-                .size(TEXT_CAPTION)
-                .color(palette.text_dim),
+            text(footer).size(TEXT_CAPTION).color(palette.text_dim),
             actions,
         ]
         .spacing(SP_MD),
@@ -1455,6 +1477,7 @@ fn dialog_view<'a>(
         title,
         host,
         column(body).spacing(SP_SM).into(),
+        "This message comes from the web page, not from Ferrite.",
         actions,
     ))
 }
@@ -1576,6 +1599,7 @@ fn file_view<'a>(
         },
         host,
         column(body).spacing(SP_SM).into(),
+        "Only the files you choose here are given to the page.",
         buttons(Some("Cancel"), "Open", ready),
     ))
 }

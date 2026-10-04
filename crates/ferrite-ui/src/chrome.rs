@@ -25,7 +25,7 @@ use std::time::{Duration, Instant};
 
 use iced::widget::{
     button, column, container, horizontal_space, mouse_area, row, scrollable, stack, text,
-    text_input,
+    text_input, Space,
 };
 use iced::{Alignment, Background, Border, Color, Element, Length, Padding, Size, Theme};
 use iced_widget::image::Image as ServoImage;
@@ -425,6 +425,43 @@ fn tab_icon(state: &FerriteBrowser, i: usize, active: bool) -> Element<'_, Msg> 
     slot(icon(Icon::Globe, TAB_ICON_SLOT - 3.0, tint(color, 0.8)))
 }
 
+/// A small dot on a tab that needs the person: the accent while its page waits
+/// on a control (a dialog, a list) and the danger colour after a crash. A
+/// background tab's alert is otherwise invisible, and its page is blocked until
+/// someone looks.
+fn tab_badge<'a>(
+    state: &'a FerriteBrowser,
+    i: usize,
+    palette: &'static Palette,
+) -> Option<Element<'a, Msg>> {
+    let diag = state.tab_diag.get(i)?;
+    let tone = if diag.crash.is_some() {
+        palette.danger
+    } else if diag.control.is_some() {
+        palette.accent_bright
+    } else {
+        return None;
+    };
+    Some(tip(
+        container(Space::new(Length::Fixed(7.0), Length::Fixed(7.0))).style(move |_: &Theme| {
+            container::Style {
+                background: Some(Background::Color(tone)),
+                border: Border {
+                    radius: 100.0.into(),
+                    ..Border::default()
+                },
+                ..container::Style::default()
+            }
+        }),
+        if diag.crash.is_some() {
+            "This page stopped responding"
+        } else {
+            "This page is waiting for you"
+        },
+        palette,
+    ))
+}
+
 fn tab_view(state: &FerriteBrowser, i: usize, width: f32, can_close: bool) -> Element<'_, Msg> {
     let palette = state.palette();
     let active = i == state.active_tab;
@@ -456,6 +493,9 @@ fn tab_view(state: &FerriteBrowser, i: usize, width: f32, can_close: bool) -> El
         );
     } else {
         items.push(horizontal_space().into());
+    }
+    if let Some(badge) = tab_badge(state, i, palette) {
+        items.push(badge);
     }
     if parts.close {
         items.push(

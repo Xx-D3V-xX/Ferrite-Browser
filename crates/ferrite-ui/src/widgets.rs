@@ -205,8 +205,9 @@ pub(crate) enum SplitAxis {
 }
 
 /// The thin bar between the page and a panel that the person drags to resize
-/// it. It draws a hairline that thickens and takes the accent colour under the
-/// pointer (and while dragging), shows the matching resize cursor, and reports
+/// it. It is invisible at rest (the panel's own edge is the line), shows a
+/// 3 px line in the accent colour under the pointer (and while dragging) with
+/// the matching resize cursor, and reports
 /// where a left press landed along its axis in window coordinates. The drag
 /// itself is not handled here: a subscription follows the pointer only while a
 /// drag is on, so nothing else in the window has to be rebuilt per move.
@@ -215,18 +216,17 @@ pub(crate) struct Splitter<'a, Message> {
     thickness: f32,
     on_press: Box<dyn Fn(f32) -> Message + 'a>,
     dragging: bool,
-    idle: Color,
     hot: Color,
 }
 
 impl<'a, Message> Splitter<'a, Message> {
-    /// `thickness` is the grab area (the drawn line is thinner); `on_press`
+    /// `thickness` is the grab area (the drawn line is thinner), `hot` the colour
+    /// the line takes under the pointer; `on_press`
     /// maps the press position (x for [`SplitAxis::Width`], y for
     /// [`SplitAxis::Height`]) to a message.
     pub(crate) fn new(
         axis: SplitAxis,
         thickness: f32,
-        idle: Color,
         hot: Color,
         on_press: impl Fn(f32) -> Message + 'a,
     ) -> Self {
@@ -235,7 +235,6 @@ impl<'a, Message> Splitter<'a, Message> {
             thickness,
             on_press: Box::new(on_press),
             dragging: false,
-            idle,
             hot,
         }
     }
@@ -331,7 +330,11 @@ where
     ) {
         let bounds = layout.bounds();
         let hot = self.dragging || cursor.is_over(bounds);
-        let line = if hot { 3.0 } else { 1.0 };
+        if !hot {
+            // At rest the bar is invisible (the panel's own edge is the line).
+            return;
+        }
+        let line = 3.0;
         let rect = match self.axis {
             SplitAxis::Width => Rectangle {
                 x: bounds.x + (bounds.width - line) / 2.0,
@@ -347,9 +350,13 @@ where
         renderer.fill_quad(
             renderer::Quad {
                 bounds: rect,
+                shadow: iced::Shadow {
+                    color: Color::TRANSPARENT,
+                    ..iced::Shadow::default()
+                },
                 ..renderer::Quad::default()
             },
-            if hot { self.hot } else { self.idle },
+            self.hot,
         );
     }
 }

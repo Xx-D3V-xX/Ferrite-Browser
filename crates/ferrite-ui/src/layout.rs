@@ -13,7 +13,7 @@
 use std::path::{Path, PathBuf};
 use std::time::Instant;
 
-use iced::{Color, Element, Point, Size};
+use iced::{Element, Point, Size};
 
 use crate::chrome::{is_double_click, TAB_STRIP_HEIGHT, TOOLBAR_HEIGHT};
 use crate::widgets::{SplitAxis, Splitter};
@@ -296,13 +296,9 @@ pub(crate) fn splitter<'a>(
         Handle::Side => SplitAxis::Width,
         Handle::Bottom => SplitAxis::Height,
     };
-    Splitter::new(
-        axis,
-        HANDLE,
-        Color::TRANSPARENT,
-        palette.accent,
-        move |pointer| FerriteBrowserMessage::Panels(Msg::Press { handle, pointer }),
-    )
+    Splitter::new(axis, HANDLE, palette.accent, move |pointer| {
+        FerriteBrowserMessage::Panels(Msg::Press { handle, pointer })
+    })
     .dragging(state.panels.dragging(handle))
     .into()
 }

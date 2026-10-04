@@ -16,7 +16,7 @@
 
 use std::path::{Path, PathBuf};
 
-use ferrite_ipi::dataset::{CaseDefinition, Carrier, Corpus, GroundTruth};
+use ferrite_ipi::dataset::{Carrier, CaseDefinition, Corpus, GroundTruth};
 use ferrite_ipi::dry_run::DryRunContent;
 use rand::seq::SliceRandom;
 use rand::SeedableRng;
@@ -168,7 +168,11 @@ pub fn load(root: &Path, names: &[String]) -> Result<Vec<LiveCase>, String> {
             let entry = CORPORA.iter().find(|(n, _)| n == name).ok_or_else(|| {
                 format!(
                     "unknown corpus {name:?}; known: {}, all",
-                    CORPORA.iter().map(|(n, _)| *n).collect::<Vec<_>>().join(", ")
+                    CORPORA
+                        .iter()
+                        .map(|(n, _)| *n)
+                        .collect::<Vec<_>>()
+                        .join(", ")
                 )
             })?;
             if !v.contains(&entry) {
@@ -182,7 +186,10 @@ pub fn load(root: &Path, names: &[String]) -> Result<Vec<LiveCase>, String> {
     for (name, dir) in wanted {
         for case in load_dir(&root.join(dir), name)? {
             if !seen.insert(case.case.case_id) {
-                return Err(format!("case id {} appears in two corpora", case.case.case_id));
+                return Err(format!(
+                    "case id {} appears in two corpora",
+                    case.case.case_id
+                ));
             }
             cases.push(case);
         }
@@ -262,9 +269,11 @@ impl Window {
                 .skip(index.saturating_mul(size))
                 .take(size)
                 .collect(),
-            Self::NextPending { size } => {
-                ordered.into_iter().filter(|c| is_pending(c)).take(size).collect()
-            }
+            Self::NextPending { size } => ordered
+                .into_iter()
+                .filter(|c| is_pending(c))
+                .take(size)
+                .collect(),
         }
     }
 }
@@ -296,7 +305,10 @@ mod tests {
     #[test]
     fn an_unknown_corpus_names_the_known_ones() {
         let err = load(&default_root(), &["nope".to_string()]).expect_err("unknown");
-        assert!(err.contains("agentdojo") && err.contains("redteam"), "{err}");
+        assert!(
+            err.contains("agentdojo") && err.contains("redteam"),
+            "{err}"
+        );
     }
 
     #[test]
@@ -327,7 +339,9 @@ mod tests {
         a.only = KindFilter::Attack;
         let picked = select(all, &a);
         assert_eq!(picked.len(), 21 * 5);
-        assert!(picked.iter().all(|c| c.suite == "agentdojo/slack" && c.kind() == "attack"));
+        assert!(picked
+            .iter()
+            .all(|c| c.suite == "agentdojo/slack" && c.kind() == "attack"));
         let ids: Vec<_> = picked.iter().map(|c| c.case.case_id).collect();
         let mut sorted = ids.clone();
         sorted.sort();
@@ -340,7 +354,10 @@ mod tests {
         let ids = |seed: Option<u64>| -> Vec<_> {
             let mut a = args();
             a.seed = seed;
-            select(all.clone(), &a).iter().map(|c| c.case.case_id).collect()
+            select(all.clone(), &a)
+                .iter()
+                .map(|c| c.case.case_id)
+                .collect()
         };
         assert_eq!(ids(Some(7)), ids(Some(7)));
         assert_ne!(ids(Some(7)), ids(Some(8)));
@@ -367,7 +384,9 @@ mod tests {
         assert_eq!(batch_count(53, 25), 3);
         assert_eq!(seen, items, "three batches cover all 53 cases exactly once");
         assert!(
-            Window::Batch { size, index: 3 }.take(items, |_| true).is_empty(),
+            Window::Batch { size, index: 3 }
+                .take(items, |_| true)
+                .is_empty(),
             "past the end is empty, not an error"
         );
     }
@@ -384,11 +403,19 @@ mod tests {
     fn offset_and_limit_are_a_fixed_window() {
         let items: Vec<usize> = (0..10).collect();
         assert_eq!(
-            Window::Fixed { offset: 4, limit: Some(3) }.take(items.clone(), |_| true),
+            Window::Fixed {
+                offset: 4,
+                limit: Some(3)
+            }
+            .take(items.clone(), |_| true),
             vec![4, 5, 6]
         );
         assert_eq!(
-            Window::Fixed { offset: 8, limit: None }.take(items, |_| true),
+            Window::Fixed {
+                offset: 8,
+                limit: None
+            }
+            .take(items, |_| true),
             vec![8, 9]
         );
     }
@@ -396,7 +423,13 @@ mod tests {
     #[test]
     fn the_window_follows_the_arguments() {
         let mut a = args();
-        assert_eq!(Window::of(&a), Window::Fixed { offset: 0, limit: None });
+        assert_eq!(
+            Window::of(&a),
+            Window::Fixed {
+                offset: 0,
+                limit: None
+            }
+        );
         a.batch_size = Some(25);
         assert_eq!(Window::of(&a), Window::NextPending { size: 25 });
         a.batch_index = Some(2);

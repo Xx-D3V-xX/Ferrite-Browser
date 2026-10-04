@@ -376,10 +376,15 @@ mod tests {
             .with("FERRITE_GEMINI_API_KEY", KEY)
             .with("HOME", "/home/someone-long-enough");
         let r = Redactor::from_env(&env);
-        let scrubbed = r.scrub(&format!("a {KEY} b ollama-secret-value-123 c /home/someone-long-enough"));
+        let scrubbed = r.scrub(&format!(
+            "a {KEY} b ollama-secret-value-123 c /home/someone-long-enough"
+        ));
         assert!(!scrubbed.contains(KEY));
         assert!(!scrubbed.contains("ollama-secret-value-123"));
-        assert!(scrubbed.contains("/home/someone-long-enough"), "only key variables");
+        assert!(
+            scrubbed.contains("/home/someone-long-enough"),
+            "only key variables"
+        );
     }
 
     #[test]

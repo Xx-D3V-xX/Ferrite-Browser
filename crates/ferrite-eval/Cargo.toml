@@ -44,6 +44,7 @@ hex = { workspace = true }
 # key (`DryRunOrchestrator::with_test_twin_key`) so none of them touches the OS
 # keyring (R7).
 ferrite-ipi = { workspace = true, features = ["test-util"] }
+ferrite-core = { workspace = true, features = ["test-util"] }
 # Loopback-only fake model servers (`live::provider` tests): nothing leaves the
 # machine. The workspace tokio omits "net" on purpose (T-207); enabled here for
 # tests only, the same way `ferrite-agent` and `ferrite-model` do.

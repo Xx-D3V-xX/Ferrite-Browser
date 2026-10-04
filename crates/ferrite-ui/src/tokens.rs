@@ -21,8 +21,8 @@
 // Every colour comes from the active [`Palette`]; nothing here hardcodes a
 // theme.
 
-use iced::widget::{button, container, row, text_input, tooltip, Space};
-use iced::{Background, Border, Color, Element, Length, Shadow, Theme, Vector};
+use iced::widget::{button, container, stack, text_input, tooltip, Space};
+use iced::{Background, Border, Color, Element, Length, Padding, Shadow, Theme, Vector};
 
 use crate::{palette_for_theme, FerriteBrowserMessage, Palette};
 
@@ -182,7 +182,11 @@ pub(crate) fn page_style(theme: &Theme) -> container::Style {
     }
 }
 
-/// A bottom drawer (audit log, JS console).
+/// A bottom drawer (audit log, DevTools). No shadow: iced's software renderer
+/// (tiny-skia) paints a shadow without honouring the area being redrawn, so a
+/// shadow around something this large darkened the whole panel a little more
+/// on every partial redraw (a click, a keystroke). The splitter above it and
+/// its own border separate it from the page.
 pub(crate) fn bottom_panel_style(theme: &Theme) -> container::Style {
     let palette = palette_for_theme(theme);
     container::Style {
@@ -196,14 +200,6 @@ pub(crate) fn bottom_panel_style(theme: &Theme) -> container::Style {
                 bottom_left: 0.0,
                 bottom_right: 0.0,
             },
-        },
-        shadow: Shadow {
-            color: Color {
-                a: 0.3,
-                ..Color::BLACK
-            },
-            offset: Vector::new(0.0, -4.0),
-            blur_radius: 14.0,
         },
         ..container::Style::default()
     }
@@ -252,6 +248,25 @@ pub(crate) fn rule_card<'a>(
     tone: Color,
     content: Element<'a, FerriteBrowserMessage>,
 ) -> Element<'a, FerriteBrowserMessage> {
+    // The card is the base layer and the rule a second layer that takes the
+    // card's own height (a row cannot do this: a `Fill`-height child laid out
+    // before its taller sibling is given a height of zero).
+    let card = container(content)
+        .padding(Padding {
+            left: SP_MD + RULE_WIDTH,
+            ..Padding::new(SP_MD)
+        })
+        .width(Length::Fill)
+        .style(move |_: &Theme| container::Style {
+            background: Some(Background::Color(palette.raised)),
+            border: Border {
+                color: palette.divider,
+                width: 1.0,
+                radius: radius(RADIUS_MD),
+            },
+            shadow: shadow_card(),
+            text_color: Some(palette.text),
+        });
     let rule =
         container(Space::new(Length::Fixed(RULE_WIDTH), Length::Fill)).style(move |_: &Theme| {
             container::Style {
@@ -268,18 +283,9 @@ pub(crate) fn rule_card<'a>(
                 ..container::Style::default()
             }
         });
-    container(row![rule, container(content).padding(SP_MD).width(Length::Fill)].width(Length::Fill))
+    stack![card, rule]
         .width(Length::Fill)
-        .style(move |_: &Theme| container::Style {
-            background: Some(Background::Color(palette.raised)),
-            border: Border {
-                color: palette.divider,
-                width: 1.0,
-                radius: radius(RADIUS_MD),
-            },
-            shadow: shadow_card(),
-            text_color: Some(palette.text),
-        })
+        .height(Length::Shrink)
         .into()
 }
 

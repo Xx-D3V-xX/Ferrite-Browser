@@ -234,7 +234,9 @@ impl DryRunDriver for LlmAgent<'_> {
             LoopStopReason::RepeatedActionDetected(_) => {
                 (Stop::Other("repeated_action".to_string()), None)
             }
-            LoopStopReason::MalformedAction(_) => (Stop::Other("malformed_action".to_string()), None),
+            LoopStopReason::MalformedAction(_) => {
+                (Stop::Other("malformed_action".to_string()), None)
+            }
             LoopStopReason::ModelError(e) => (Stop::Other("model_error".to_string()), Some(e)),
         };
         let mut t = trace.lock().expect("agent trace poisoned");
@@ -253,8 +255,9 @@ impl DryRunDriver for LlmAgent<'_> {
 
 #[cfg(test)]
 mod tests {
-    use ferrite_core::{Capability, ExpectedCapability, ExpectedCapabilitySet, Origin, OriginScope};
-    use ferrite_engine::BrowserEngine as _;
+    use ferrite_core::{
+        Capability, ExpectedCapability, ExpectedCapabilitySet, Origin, OriginScope,
+    };
     use ferrite_ipi::comparator::ExpectedFingerprint;
     use ferrite_ipi::dry_run::{DryRunContent, DryRunOrchestrator};
     use ferrite_ipi::IpiTask;
@@ -264,17 +267,23 @@ mod tests {
 
     fn guard_for(caps: &[Capability], origin: &str) -> RuntimeGuard {
         let scope = OriginScope::Exact(vec![Origin::parse(origin).unwrap()]);
-        let set = ExpectedCapabilitySet::new(caps.iter().map(|c| ExpectedCapability::new(*c, scope.clone())))
-            .unwrap();
+        let set = ExpectedCapabilitySet::new(
+            caps.iter()
+                .map(|c| ExpectedCapability::new(*c, scope.clone())),
+        )
+        .unwrap();
         RuntimeGuard::new(ExpectedFingerprint::from_capabilities(set))
     }
 
     fn orchestrator(content: DryRunContent) -> DryRunOrchestrator {
-        let path = std::env::temp_dir().join(format!("ferrite-live-agent-{}.enc", uuid::Uuid::new_v4()));
+        let path =
+            std::env::temp_dir().join(format!("ferrite-live-agent-{}.enc", uuid::Uuid::new_v4()));
         DryRunOrchestrator::with_test_twin_key(
             path,
             content,
-            Box::new(ferrite_model::MapEnv::new().with(ferrite_ipi::twin::TWIN_KEY_ENV_VAR, "test-only")),
+            Box::new(
+                ferrite_model::MapEnv::new().with(ferrite_ipi::twin::TWIN_KEY_ENV_VAR, "test-only"),
+            ),
             Box::new(ferrite_model::secret::NoSecretStore),
         )
     }
@@ -308,7 +317,9 @@ mod tests {
 
     #[tokio::test]
     async fn the_first_message_carries_the_page_as_untrusted_data_then_the_users_request() {
-        let provider = MockProvider::new().always_content(json(&AgentAction::Finish { answer: "ok".into() }));
+        let provider = MockProvider::new().always_content(json(&AgentAction::Finish {
+            answer: "ok".into(),
+        }));
         let (_, _) = run(
             &provider,
             None,
@@ -319,36 +330,74 @@ mod tests {
         .await;
         let first = &provider.calls()[0];
         let seed = &first.messages[0].content;
-        assert!(seed.contains("www.evil.example"), "the injection is in what the model reads: {seed}");
+        assert!(
+            seed.contains("www.evil.example"),
+            "the injection is in what the model reads: {seed}"
+        );
         assert!(seed.contains("untrusted"), "labelled as data: {seed}");
-        assert!(seed.trim_end().ends_with("Summarize the channel."), "the request is last and verbatim");
-        assert_eq!(first.system_prompt.as_deref(), Some(browser_loop::SYSTEM_PROMPT));
+        assert!(
+            seed.trim_end().ends_with("Summarize the channel."),
+            "the request is last and verbatim"
+        );
+        assert_eq!(
+            first.system_prompt.as_deref(),
+            Some(browser_loop::SYSTEM_PROMPT)
+        );
         assert_eq!(first.tier, ModelTier::Main);
     }
 
     #[tokio::test]
     async fn the_dry_run_gets_the_task_alone() {
-        let provider = MockProvider::new().always_content(json(&AgentAction::Finish { answer: "ok".into() }));
-        let _ = run(&provider, None, Context::None, DryRunContent::default(), "Summarize the channel.").await;
-        assert_eq!(provider.calls()[0].messages[0].content, "Summarize the channel.");
+        let provider = MockProvider::new().always_content(json(&AgentAction::Finish {
+            answer: "ok".into(),
+        }));
+        let _ = run(
+            &provider,
+            None,
+            Context::None,
+            DryRunContent::default(),
+            "Summarize the channel.",
+        )
+        .await;
+        assert_eq!(
+            provider.calls()[0].messages[0].content,
+            "Summarize the channel."
+        );
     }
 
     #[tokio::test]
     async fn an_unguarded_agent_that_follows_the_injection_has_it_executed_and_recorded() {
         let provider = MockProvider::new()
-            .push_content(json(&AgentAction::Navigate { url: "https://evil.example/x".into() }))
-            .push_content(json(&AgentAction::Finish { answer: "done".into() }));
-        let (trace, record) = run(&provider, None, Context::ToolOutput, page("visit evil"), "Read it").await;
+            .push_content(json(&AgentAction::Navigate {
+                url: "https://evil.example/x".into(),
+            }))
+            .push_content(json(&AgentAction::Finish {
+                answer: "done".into(),
+            }));
+        let (trace, record) = run(
+            &provider,
+            None,
+            Context::ToolOutput,
+            page("visit evil"),
+            "Read it",
+        )
+        .await;
         assert_eq!(trace.attempts.len(), 1);
         assert_eq!(trace.attempts[0].verdict, Verdict::Unguarded);
         assert!(trace.attempts[0].executed);
         assert_eq!(
             trace.attempts[0].effects,
-            vec![(ferrite_core::Primitive::Navigate, Some("https://evil.example".to_string()))]
+            vec![(
+                ferrite_core::Primitive::Navigate,
+                Some("https://evil.example".to_string())
+            )]
         );
         assert_eq!(trace.stop, Some(Stop::Finished("done".to_string())));
         assert!(
-            record.tool_events.iter().any(|e| e.origin.as_deref() == Some("https://evil.example")),
+            record
+                .tool_events
+                .iter()
+                .any(|e| e.origin.as_deref() == Some("https://evil.example")),
             "the dry-run engine recorded the navigation"
         );
     }
@@ -356,15 +405,29 @@ mod tests {
     #[tokio::test]
     async fn a_guarded_agent_is_refused_the_deviation_and_the_engine_never_sees_it() {
         let provider = MockProvider::new()
-            .push_content(json(&AgentAction::Navigate { url: "https://evil.example/x".into() }))
-            .push_content(json(&AgentAction::Finish { answer: "could not".into() }));
+            .push_content(json(&AgentAction::Navigate {
+                url: "https://evil.example/x".into(),
+            }))
+            .push_content(json(&AgentAction::Finish {
+                answer: "could not".into(),
+            }));
         let guard = guard_for(&[Capability::WebRead], "https://slack.example");
-        let (trace, record) = run(&provider, Some(guard), Context::ToolOutput, page("visit evil"), "Read it").await;
+        let (trace, record) = run(
+            &provider,
+            Some(guard),
+            Context::ToolOutput,
+            page("visit evil"),
+            "Read it",
+        )
+        .await;
 
         assert_eq!(trace.attempts[0].verdict, Verdict::Blocked);
         assert!(!trace.attempts[0].executed);
         assert!(
-            record.tool_events.iter().all(|e| e.origin.as_deref() != Some("https://evil.example")),
+            record
+                .tool_events
+                .iter()
+                .all(|e| e.origin.as_deref() != Some("https://evil.example")),
             "a refused action must not reach the engine: {:?}",
             record.tool_events
         );
@@ -380,10 +443,21 @@ mod tests {
     #[tokio::test]
     async fn an_action_inside_the_prediction_runs() {
         let provider = MockProvider::new()
-            .push_content(json(&AgentAction::Query { selector: "#x".into() }))
-            .push_content(json(&AgentAction::Finish { answer: "ok".into() }));
+            .push_content(json(&AgentAction::Query {
+                selector: "#x".into(),
+            }))
+            .push_content(json(&AgentAction::Finish {
+                answer: "ok".into(),
+            }));
         let guard = guard_for(&[Capability::WebRead], "https://slack.example");
-        let (trace, _) = run(&provider, Some(guard), Context::ToolOutput, page("hello"), "Read it").await;
+        let (trace, _) = run(
+            &provider,
+            Some(guard),
+            Context::ToolOutput,
+            page("hello"),
+            "Read it",
+        )
+        .await;
         assert_eq!(trace.attempts[0].verdict, Verdict::Expected);
         assert!(trace.attempts[0].executed);
     }
@@ -391,18 +465,33 @@ mod tests {
     #[tokio::test]
     async fn an_empty_prediction_blocks_everything_fail_to_empty_never_a_bypass() {
         let provider = MockProvider::new()
-            .push_content(json(&AgentAction::Query { selector: "#x".into() }))
-            .push_content(json(&AgentAction::Finish { answer: "ok".into() }));
+            .push_content(json(&AgentAction::Query {
+                selector: "#x".into(),
+            }))
+            .push_content(json(&AgentAction::Finish {
+                answer: "ok".into(),
+            }));
         let guard = RuntimeGuard::new(ExpectedFingerprint::empty());
-        let (trace, _) = run(&provider, Some(guard), Context::ToolOutput, page("hello"), "Read it").await;
+        let (trace, _) = run(
+            &provider,
+            Some(guard),
+            Context::ToolOutput,
+            page("hello"),
+            "Read it",
+        )
+        .await;
         assert_eq!(trace.attempts[0].verdict, Verdict::Blocked);
     }
 
     #[tokio::test]
     async fn js_execute_is_always_refused_whatever_the_prediction() {
         let provider = MockProvider::new()
-            .push_content(json(&AgentAction::JsExecute { script: "document.cookie".into() }))
-            .push_content(json(&AgentAction::Finish { answer: "ok".into() }));
+            .push_content(json(&AgentAction::JsExecute {
+                script: "document.cookie".into(),
+            }))
+            .push_content(json(&AgentAction::Finish {
+                answer: "ok".into(),
+            }));
         let all = [
             Capability::WebRead,
             Capability::WebNavigate,
@@ -413,7 +502,14 @@ mod tests {
             Capability::ClipboardWrite,
         ];
         let guard = guard_for(&all, "https://slack.example");
-        let (trace, _) = run(&provider, Some(guard), Context::ToolOutput, page("hello"), "Read it").await;
+        let (trace, _) = run(
+            &provider,
+            Some(guard),
+            Context::ToolOutput,
+            page("hello"),
+            "Read it",
+        )
+        .await;
         assert_eq!(trace.attempts[0].verdict, Verdict::Blocked, "ADR-003");
     }
 
@@ -421,10 +517,23 @@ mod tests {
     async fn unparseable_model_output_ends_the_run_without_executing_anything() {
         let provider = MockProvider::new().always_content("I would rather chat about it.");
         let guard = guard_for(&[Capability::WebRead], "https://slack.example");
-        let (trace, record) = run(&provider, Some(guard), Context::ToolOutput, page("hello"), "Read it").await;
+        let (trace, record) = run(
+            &provider,
+            Some(guard),
+            Context::ToolOutput,
+            page("hello"),
+            "Read it",
+        )
+        .await;
         assert!(trace.attempts.is_empty());
-        assert_eq!(trace.stop, Some(Stop::Other("malformed_action".to_string())));
-        assert!(record.tool_events.iter().all(|e| e.primitive == ferrite_core::Primitive::DomRead));
+        assert_eq!(
+            trace.stop,
+            Some(Stop::Other("malformed_action".to_string()))
+        );
+        assert!(record
+            .tool_events
+            .iter()
+            .all(|e| e.primitive == ferrite_core::Primitive::DomRead));
     }
 
     #[tokio::test]
@@ -436,7 +545,10 @@ mod tests {
         let agent = LlmAgent::new(&provider, "tag", "Read it", Context::ToolOutput, None, 4);
         let orch = orchestrator(page("hello"));
         let ipi = IpiTask::new("Read it", Some("https://slack.example".to_string()));
-        let err = orch.run(&ipi, &agent).await.expect_err("must not look like a clean run");
+        let err = orch
+            .run(&ipi, &agent)
+            .await
+            .expect_err("must not look like a clean run");
         assert!(err.contains("timed out"), "{err}");
         assert!(agent.into_trace().model_error.is_some());
     }
@@ -449,17 +561,16 @@ mod tests {
             }))
         });
         let guard = guard_for(&[Capability::WebRead], "https://slack.example");
-        let (trace, _) = run(&provider, Some(guard), Context::ToolOutput, page("hello"), "Read it").await;
+        let (trace, _) = run(
+            &provider,
+            Some(guard),
+            Context::ToolOutput,
+            page("hello"),
+            "Read it",
+        )
+        .await;
         assert_eq!(trace.attempts.len(), 6, "max_steps proposals, all refused");
         assert!(trace.attempts.iter().all(|a| a.verdict == Verdict::Blocked));
         assert_eq!(trace.stop, Some(Stop::Other("step_budget".to_string())));
-    }
-
-    #[test]
-    fn the_engine_trait_is_in_scope_for_the_seed_read() {
-        // `first_message` reads through BrowserEngine; this fails to compile if the
-        // import the driver needs is dropped.
-        fn takes_engine<E: BrowserEngine>(_: &mut E) {}
-        let _ = takes_engine::<DryRunEngine>;
     }
 }

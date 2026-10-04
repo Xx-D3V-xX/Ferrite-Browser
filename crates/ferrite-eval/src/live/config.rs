@@ -26,8 +26,8 @@
 use std::path::PathBuf;
 use std::time::Duration;
 
-use ferrite_model::EnvSource;
 use ferrite_ipi::tool_decision::DefenseMode;
+use ferrite_model::EnvSource;
 use serde::{Deserialize, Serialize};
 
 /// Which backend answers.
@@ -59,7 +59,11 @@ impl ProviderKind {
             "gemini" => Ok(Self::Gemini),
             "ollama" => Ok(Self::Ollama),
             "mock" => Ok(Self::Mock),
-            other => Err(ArgsError::value("--provider", other, "gemini, ollama or mock")),
+            other => Err(ArgsError::value(
+                "--provider",
+                other,
+                "gemini, ollama or mock",
+            )),
         }
     }
 }
@@ -452,7 +456,9 @@ impl LiveArgs {
                         "all" => KindFilter::All,
                         "attack" => KindFilter::Attack,
                         "benign" => KindFilter::Benign,
-                        other => return Err(ArgsError::value(&flag, other, "all, attack or benign")),
+                        other => {
+                            return Err(ArgsError::value(&flag, other, "all, attack or benign"))
+                        }
                     }
                 }
                 "--batch-size" => out.batch_size = Some(positive(&flag, &value(&flag)?)?),
@@ -536,25 +542,25 @@ impl LiveArgs {
     ///
     /// [`ArgsError::Invalid`] when a live role has no tag.
     pub fn model_tags(&self) -> Result<ModelTags, ArgsError> {
-        let needs_small = self.predictor == PredictorKind::Llm
-            && self.modes.iter().any(|m| m.needs_prediction());
+        let needs_small =
+            self.predictor == PredictorKind::Llm && self.modes.iter().any(|m| m.needs_prediction());
         let needs_main = self.agent == AgentKind::Llm;
         let provider = self.provider.unwrap_or(ProviderKind::Mock);
         // The mock needs no real tag; it still records one so result files say
         // what ran.
-        let fallback = |tag: &Option<String>| tag.clone().filter(|_| provider != ProviderKind::Mock);
-        let small = match (&self.small_model, needs_small) {
-            (Some(t), _) => t.clone(),
-            (None, true) if provider == ProviderKind::Mock => "mock-small".to_string(),
-            (None, true) => {
-                return Err(ArgsError::Invalid(
+        let fallback =
+            |tag: &Option<String>| tag.clone().filter(|_| provider != ProviderKind::Mock);
+        let small =
+            match (&self.small_model, needs_small) {
+                (Some(t), _) => t.clone(),
+                (None, true) if provider == ProviderKind::Mock => "mock-small".to_string(),
+                (None, true) => return Err(ArgsError::Invalid(
                     "the fingerprint predictor needs a model: pass --small-model (or --model), \
                      set FERRITE_LIVE_SMALL_MODEL, or use --predictor rules"
                         .to_string(),
-                ))
-            }
-            (None, false) => fallback(&self.main_model).unwrap_or_else(|| "unused".to_string()),
-        };
+                )),
+                (None, false) => fallback(&self.main_model).unwrap_or_else(|| "unused".to_string()),
+            };
         let main = match (&self.main_model, needs_main) {
             (Some(t), _) => t.clone(),
             (None, true) if provider == ProviderKind::Mock => "mock-main".to_string(),
@@ -670,7 +676,10 @@ mod tests {
     fn defaults_are_conservative_and_name_no_model() {
         let args = parse(&[]).expect("parses");
         assert_eq!(args.command, Command::Run);
-        assert_eq!(args.provider, None, "the provider is explicit, never defaulted");
+        assert_eq!(
+            args.provider, None,
+            "the provider is explicit, never defaulted"
+        );
         assert_eq!(args.small_model, None, "no model tag exists in source");
         assert_eq!(args.main_model, None);
         assert_eq!(args.max_calls, defaults::MAX_CALLS);
@@ -716,8 +725,15 @@ mod tests {
 
     #[test]
     fn the_two_tiers_can_differ() {
-        let args = parse(&["--provider", "ollama", "--small-model", "tiny", "--main-model", "big"])
-            .expect("parses");
+        let args = parse(&[
+            "--provider",
+            "ollama",
+            "--small-model",
+            "tiny",
+            "--main-model",
+            "big",
+        ])
+        .expect("parses");
         let tags = args.model_tags().expect("both set");
         assert_eq!(tags.small, "tiny");
         assert_eq!(tags.main, "big");
@@ -760,8 +776,15 @@ mod tests {
         assert_eq!(args.model_tags().expect("ok").main, "only-agent");
 
         // Off mode needs no prediction, so the predictor needs no tag either.
-        let args = parse(&["--provider", "gemini", "--modes", "off", "--main-model", "m"])
-            .expect("parses");
+        let args = parse(&[
+            "--provider",
+            "gemini",
+            "--modes",
+            "off",
+            "--main-model",
+            "m",
+        ])
+        .expect("parses");
         assert!(args.model_tags().is_ok());
     }
 
@@ -778,7 +801,10 @@ mod tests {
             parse(&["--provider", "openai"]),
             Err(ArgsError::BadValue { .. })
         ));
-        assert!(matches!(parse(&["--bogus"]), Err(ArgsError::UnknownFlag(_))));
+        assert!(matches!(
+            parse(&["--bogus"]),
+            Err(ArgsError::UnknownFlag(_))
+        ));
         assert!(matches!(
             parse(&["--batch-size"]),
             Err(ArgsError::MissingValue(_))
@@ -799,7 +825,10 @@ mod tests {
 
     #[test]
     fn contradictory_batching_is_rejected() {
-        assert!(parse(&["--batch-index", "2"]).is_err(), "an index needs a size");
+        assert!(
+            parse(&["--batch-index", "2"]).is_err(),
+            "an index needs a size"
+        );
         assert!(parse(&["--batch-size", "5", "--batch-index", "1", "--limit", "9"]).is_err());
         assert!(parse(&["--batch-size", "5", "--batch-index", "1"]).is_ok());
         assert!(parse(&["--backoff-base-ms", "500", "--backoff-max-ms", "100"]).is_err());

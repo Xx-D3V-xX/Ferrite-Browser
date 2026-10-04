@@ -1,25 +1,33 @@
 //! The model stack a live run calls through, and what it learns about each call.
 //!
 //! ```text
-//! Probe(case-level)  ->  Budget  ->  Throttle  ->  Cache  ->  Probe(live)  ->  backend
+//! Probe(case-level) -> Cache -> Throttle -> Budget -> Probe(live) -> backend
 //! ```
 //!
 //! Everything cross-cutting is `ferrite-model`'s own decorator, reused rather than
-//! re-implemented (`docs/REBUILD_DIRECTIVE.md` §10.3, §10.5):
+//! re-implemented (`docs/REBUILD_DIRECTIVE.md` §10.3, §10.5), but in an order
+//! chosen for a quota rather than for the app:
 //!
-//! - [`Budget`] is the hard `--max-calls` ceiling; when it is spent it writes a
-//!   partial-results ledger and refuses every further call.
+//! - [`Cache`] is outermost, so a response already recorded costs nothing at all:
+//!   it consumes no pause, no retry slot and none of the `--max-calls` cap. At
+//!   temperature 0 a response is a pure function of its request, so a re-run of an
+//!   unchanged case is free, and so is a second mode whose first prompt is
+//!   identical to the first's (the guard only changes what happens *after* an
+//!   action is refused).
 //! - [`Throttle`] is the pacing (`--pause-ms` as a one-token bucket), the retry
 //!   policy (`--max-attempts`), exponential backoff with full jitter, and the
 //!   `Retry-After` the provider sent (capped at `--backoff-max-ms`).
-//! - [`Cache`] makes a re-run of an unchanged case free: at temperature 0 a
-//!   response is a pure function of its request.
+//! - [`Budget`] sits *inside* the throttle, so it counts every request that is
+//!   actually sent, a retry included. `--max-calls` is therefore a hard cap on
+//!   requests to the backend, the number a quota is measured in. When it is spent
+//!   it writes a partial-results ledger and refuses every further call.
 //!
 //! The two [`Probe`]s are this crate's addition and change no behaviour. The outer
 //! one sees each call as the pipeline made it (its final result, its latency, the
 //! typed error that survived the retries); the inner one sees only what reached
 //! the backend, so cache hits and retries can be told apart: `live_attempts -
-//! (logical - cache_hits)` is the number of retries.
+//! (logical - cache_hits)` is the number of retries. [`Redactor`] scrubs every
+//! error text a probe keeps, and the budget's ledger file.
 //!
 //! # Classifying a failure
 //!
@@ -36,7 +44,7 @@ use std::time::{Duration, Instant};
 use async_trait::async_trait;
 use ferrite_core::Clock;
 use ferrite_model::backends::{GeminiProvider, OllamaProvider};
-use ferrite_model::decorators::{BackoffPolicy, BudgetSummary, RateLimit};
+use ferrite_model::decorators::{BackoffPolicy, RateLimit};
 use ferrite_model::testing::Sleeper;
 use ferrite_model::{
     Budget, Cache, CompletionRequest, CompletionResponse, EnvSource, LayeredEnv, MapEnv,
@@ -160,7 +168,10 @@ impl ProbeStats {
     }
 
     fn push(&self, event: CallEvent) {
-        self.events.lock().expect("probe stats poisoned").push(event);
+        self.events
+            .lock()
+            .expect("probe stats poisoned")
+            .push(event);
     }
 }
 
@@ -213,7 +224,10 @@ impl<P: ModelProvider> ModelProvider for Probe<P> {
                 prompt_tokens: 0,
                 eval_tokens: 0,
                 latency_ms,
-                error: Some((ErrorClass::of(error), self.redactor.bounded(&error.to_string()))),
+                error: Some((
+                    ErrorClass::of(error),
+                    self.redactor.bounded(&error.to_string()),
+                )),
             },
         };
         self.stats.push(event);
@@ -282,8 +296,24 @@ impl StackConfig {
     }
 }
 
-type SummaryFn = Box<dyn Fn() -> BudgetSummary + Send + Sync>;
+type CacheHandle = Option<Arc<Cache<Arc<dyn ModelProvider>>>>;
+type SummaryFn = Box<dyn Fn() -> StackSummary + Send + Sync>;
 type FlushFn = Box<dyn Fn() + Send + Sync>;
+
+/// What the stack has spent.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct StackSummary {
+    /// The `--max-calls` cap.
+    pub cap: u32,
+    /// Requests sent to the backend, retries included: what the cap counts.
+    pub backend_calls: u32,
+    /// Calls the cache answered.
+    pub cache_hits: u32,
+    /// Prompt tokens the backend reported.
+    pub prompt_tokens: u64,
+    /// Completion tokens the backend reported.
+    pub eval_tokens: u64,
+}
 
 /// A provider wrapped in the full stack, plus the handles a runner reads.
 pub struct ModelStack {
@@ -307,14 +337,15 @@ impl std::fmt::Debug for ModelStack {
 }
 
 impl ModelStack {
-    /// What the budget has counted so far.
+    /// What has been spent so far.
     #[must_use]
-    pub fn summary(&self) -> BudgetSummary {
+    pub fn summary(&self) -> StackSummary {
         (self.summary)()
     }
 
-    /// Writes the budget ledger and the cache's hit statistics. Best effort: a
-    /// failure here must not turn a good run into a bad one.
+    /// Writes the budget ledger (scrubbed of secrets) and the cache's hit
+    /// statistics. Best effort: a failure here must not turn a good run into a bad
+    /// one.
     pub fn flush(&self) {
         (self.flush)();
     }
@@ -335,36 +366,60 @@ pub fn build_stack<P: ModelProvider + 'static>(
     let base: Arc<dyn ModelProvider> = Arc::new(inner);
     let counted: Arc<dyn ModelProvider> =
         Arc::new(Probe::new(base, live.clone(), redactor.clone()));
-
-    let (cached, cache_handle): (Arc<dyn ModelProvider>, Option<Arc<Cache<Arc<dyn ModelProvider>>>>) =
-        match &config.cache_dir {
-            Some(dir) => {
-                let cache = Arc::new(Cache::new(counted, dir, clock.clone()));
-                (cache.clone(), Some(cache))
-            }
-            None => (counted, None),
-        };
-
-    let throttled: Arc<dyn ModelProvider> =
-        Arc::new(Throttle::new(cached, config.throttle(), clock.clone(), sleeper));
     let budget = Arc::new(Budget::new(
-        throttled,
+        counted,
         config.max_calls,
         &config.partial_results_path,
-        clock,
+        clock.clone(),
     ));
+    let throttled: Arc<dyn ModelProvider> = Arc::new(Throttle::new(
+        budget.clone(),
+        config.throttle(),
+        clock.clone(),
+        sleeper,
+    ));
+    let (cached, cache_handle): (Arc<dyn ModelProvider>, CacheHandle) = match &config.cache_dir {
+        Some(dir) => {
+            let cache = Arc::new(Cache::new(throttled, dir, clock));
+            (cache.clone(), Some(cache))
+        }
+        None => (throttled, None),
+    };
     let provider: Arc<dyn ModelProvider> =
-        Arc::new(Probe::new(budget.clone(), outer.clone(), redactor.clone()));
+        Arc::new(Probe::new(cached, outer.clone(), redactor.clone()));
 
+    let cap = config.max_calls;
     let summary_budget = budget.clone();
+    let summary_cache = cache_handle.clone();
     let flush_budget = budget;
+    let ledger = config.partial_results_path.clone();
+    let scrub = redactor.clone();
     ModelStack {
         provider,
         outer,
         live,
-        summary: Box::new(move || summary_budget.summary()),
+        summary: Box::new(move || {
+            let b = summary_budget.summary();
+            StackSummary {
+                cap,
+                backend_calls: b.calls_used,
+                cache_hits: summary_cache
+                    .as_ref()
+                    .map_or(0, |c| u32::try_from(c.stats().hits).unwrap_or(u32::MAX)),
+                prompt_tokens: b.prompt_tokens,
+                eval_tokens: b.eval_tokens,
+            }
+        }),
         flush: Box::new(move || {
             let _ = flush_budget.write_partial_results();
+            // The ledger records each failed call's error text, which a provider can
+            // build from what a server sent back; scrub it before it stays on disk.
+            if let Ok(text) = std::fs::read_to_string(&ledger) {
+                let clean = scrub.scrub(&text);
+                if clean != text {
+                    let _ = std::fs::write(&ledger, clean);
+                }
+            }
             if let Some(cache) = &cache_handle {
                 let _ = cache.flush_stats();
             }
@@ -463,14 +518,17 @@ mod tests {
     }
 
     fn tmp(label: &str) -> std::path::PathBuf {
-        let dir = std::env::temp_dir().join(format!("ferrite-live-provider-{label}-{}", uuid::Uuid::new_v4()));
+        let dir = std::env::temp_dir().join(format!(
+            "ferrite-live-provider-{label}-{}",
+            uuid::Uuid::new_v4()
+        ));
         std::fs::create_dir_all(&dir).unwrap();
         dir
     }
 
     fn stack(mock: MockProvider, config: &StackConfig) -> (ModelStack, Arc<RecordingSleeper>) {
         let sleeper = Arc::new(RecordingSleeper::new());
-        let clock: Arc<dyn Clock> = Arc::new(FixedClock::at(chrono::DateTime::UNIX_EPOCH));
+        let clock: Arc<dyn Clock> = Arc::new(FixedClock::at_epoch());
         let stack = build_stack(mock, config, clock, sleeper.clone(), &Redactor::default());
         (stack, sleeper)
     }
@@ -484,7 +542,11 @@ mod tests {
             .push_content("ok");
         let (stack, sleeper) = stack(mock, &config(&dir));
 
-        let response = stack.provider.complete(req("agent step")).await.expect("recovers");
+        let response = stack
+            .provider
+            .complete(req("agent step"))
+            .await
+            .expect("recovers");
         assert_eq!(response.content, "ok");
 
         // The waits are exactly what the provider asked for, not a guess.
@@ -498,7 +560,9 @@ mod tests {
         let live = stack.live.drain();
         assert_eq!(live.len(), 3, "three attempts reached the backend");
         assert_eq!(live.iter().filter(|e| !e.ok).count(), 2);
-        assert!(live.iter().all(|e| e.ok || matches!(e.error, Some((ErrorClass::RateLimited, _)))));
+        assert!(live
+            .iter()
+            .all(|e| e.ok || matches!(e.error, Some((ErrorClass::RateLimited, _)))));
     }
 
     #[tokio::test]
@@ -506,7 +570,9 @@ mod tests {
         let dir = tmp("cap");
         let mut cfg = config(&dir);
         cfg.backoff_max = Duration::from_secs(60);
-        let mock = MockProvider::new().push(rate_limited(Some(3600))).push_content("ok");
+        let mock = MockProvider::new()
+            .push(rate_limited(Some(3600)))
+            .push_content("ok");
         let (stack, sleeper) = stack(mock, &cfg);
         stack.provider.complete(req("x")).await.expect("recovers");
         assert_eq!(sleeper.recorded(), vec![Duration::from_secs(60)]);
@@ -525,7 +591,11 @@ mod tests {
             .push(rate_limited(None))
             .push_content("ok");
         let (stack, sleeper) = stack(mock, &cfg);
-        stack.provider.complete(req("x")).await.expect("recovers on the 4th try");
+        stack
+            .provider
+            .complete(req("x"))
+            .await
+            .expect("recovers on the 4th try");
         let waits = sleeper.recorded();
         assert_eq!(waits.len(), 3);
         // Full jitter: each wait is in [0, min(max, base * 2^n)].
@@ -536,15 +606,24 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn when_every_attempt_fails_the_typed_error_reaches_the_caller_after_exactly_max_attempts() {
+    async fn when_every_attempt_fails_the_typed_error_reaches_the_caller_after_exactly_max_attempts(
+    ) {
         let dir = tmp("exhaust");
         let mut cfg = config(&dir);
         cfg.max_attempts = 3;
         let mock = MockProvider::new().always(|_| rate_limited(None));
         let (stack, sleeper) = stack(mock, &cfg);
-        let err = stack.provider.complete(req("x")).await.expect_err("never succeeds");
+        let err = stack
+            .provider
+            .complete(req("x"))
+            .await
+            .expect_err("never succeeds");
         assert!(matches!(err, ModelError::RateLimited { .. }), "{err:?}");
-        assert_eq!(stack.live.drain().len(), 3, "no more attempts than --max-attempts");
+        assert_eq!(
+            stack.live.drain().len(),
+            3,
+            "no more attempts than --max-attempts"
+        );
         assert_eq!(sleeper.count(), 2);
         let outer = stack.outer.drain();
         assert_eq!(outer[0].error.as_ref().unwrap().0, ErrorClass::RateLimited);
@@ -561,9 +640,17 @@ mod tests {
             })
         });
         let (stack, sleeper) = stack(mock, &config(&dir));
-        let err = stack.provider.complete(req("x")).await.expect_err("rejected");
+        let err = stack
+            .provider
+            .complete(req("x"))
+            .await
+            .expect_err("rejected");
         assert!(matches!(err, ModelError::ClientError { .. }));
-        assert_eq!(stack.live.drain().len(), 1, "retrying a rejected request spends quota for nothing");
+        assert_eq!(
+            stack.live.drain().len(),
+            1,
+            "retrying a rejected request spends quota for nothing"
+        );
         assert_eq!(sleeper.count(), 0);
     }
 
@@ -576,13 +663,24 @@ mod tests {
         let (stack, _) = stack(mock, &cfg);
         stack.provider.complete(req("a")).await.expect("1");
         stack.provider.complete(req("b")).await.expect("2");
-        let err = stack.provider.complete(req("c")).await.expect_err("budget spent");
+        let err = stack
+            .provider
+            .complete(req("c"))
+            .await
+            .expect_err("budget spent");
         assert!(matches!(err, ModelError::BudgetExhausted { .. }), "{err:?}");
-        assert_eq!(stack.live.drain().len(), 2, "the third call never reached the backend");
-        assert_eq!(stack.summary().calls_used, 2);
+        assert_eq!(
+            stack.live.drain().len(),
+            2,
+            "the third call never reached the backend"
+        );
+        assert_eq!(stack.summary().backend_calls, 2);
         assert!(dir.join("partial.json").exists(), "the ledger was written");
         let outer = stack.outer.drain();
-        assert_eq!(outer[2].error.as_ref().unwrap().0, ErrorClass::BudgetExhausted);
+        assert_eq!(
+            outer[2].error.as_ref().unwrap().0,
+            ErrorClass::BudgetExhausted
+        );
     }
 
     #[tokio::test]
@@ -592,12 +690,24 @@ mod tests {
         cfg.cache_dir = Some(dir.join("cache"));
         let mock = MockProvider::new().always_content("ok");
         let (stack, _) = stack(mock, &cfg);
-        stack.provider.complete(req("fingerprint")).await.expect("miss");
-        stack.provider.complete(req("fingerprint")).await.expect("hit");
+        stack
+            .provider
+            .complete(req("fingerprint"))
+            .await
+            .expect("miss");
+        stack
+            .provider
+            .complete(req("fingerprint"))
+            .await
+            .expect("hit");
         let outer = stack.outer.drain();
         assert_eq!(outer.len(), 2);
         assert!(!outer[0].cache_hit && outer[1].cache_hit);
-        assert_eq!(stack.live.drain().len(), 1, "only the miss reached the backend");
+        assert_eq!(
+            stack.live.drain().len(),
+            1,
+            "only the miss reached the backend"
+        );
         assert_eq!(stack.summary().cache_hits, 1);
     }
 
@@ -607,13 +717,11 @@ mod tests {
         let mut cfg = config(&dir);
         cfg.pause = Duration::from_millis(2000);
         let mock = MockProvider::new().always_content("ok");
-        let sleeper = Arc::new(RecordingSleeper::new());
-        let clock_handle = Arc::new(FixedClock::at(chrono::DateTime::UNIX_EPOCH));
+        let clock_handle = Arc::new(FixedClock::at_epoch());
         let hook_clock = clock_handle.clone();
         let sleeper_with_clock = Arc::new(RecordingSleeper::with_hook(move |d| {
             hook_clock.advance(chrono::TimeDelta::from_std(d).unwrap());
         }));
-        let _ = sleeper;
         let stack = build_stack(
             mock,
             &cfg,
@@ -625,27 +733,56 @@ mod tests {
             stack.provider.complete(req("x")).await.expect("ok");
         }
         let waits = sleeper_with_clock.recorded();
-        assert_eq!(waits.len(), 2, "the first call is free, each later one waits the pause");
-        assert!(waits.iter().all(|w| *w >= Duration::from_millis(1999)), "{waits:?}");
+        assert_eq!(
+            waits.len(),
+            2,
+            "the first call is free, each later one waits the pause"
+        );
+        assert!(
+            waits.iter().all(|w| *w >= Duration::from_millis(1999)),
+            "{waits:?}"
+        );
     }
 
     #[test]
     fn infrastructure_failures_are_told_apart_from_the_models_own_bad_output() {
         let provider = ProviderId::Mock;
         for infra in [
-            ModelError::RateLimited { provider, retry_after: None },
-            ModelError::ServerError { provider, status: 503, body_excerpt: String::new() },
-            ModelError::Timeout { provider, after: Duration::from_secs(1) },
-            ModelError::Transport { provider, detail: String::new() },
-            ModelError::ClientError { provider, status: 404, body_excerpt: String::new() },
+            ModelError::RateLimited {
+                provider,
+                retry_after: None,
+            },
+            ModelError::ServerError {
+                provider,
+                status: 503,
+                body_excerpt: String::new(),
+            },
+            ModelError::Timeout {
+                provider,
+                after: Duration::from_secs(1),
+            },
+            ModelError::Transport {
+                provider,
+                detail: String::new(),
+            },
+            ModelError::ClientError {
+                provider,
+                status: 404,
+                body_excerpt: String::new(),
+            },
             ModelError::Config("x".into()),
         ] {
             assert!(ErrorClass::of(&infra).is_infrastructure(), "{infra:?}");
         }
         for bad_output in [
-            ModelError::MalformedJson { provider, detail: String::new() },
+            ModelError::MalformedJson {
+                provider,
+                detail: String::new(),
+            },
             ModelError::EmptyResponse { provider },
-            ModelError::SchemaViolation { detail: String::new() },
+            ModelError::SchemaViolation {
+                detail: String::new(),
+            },
         ] {
             let class = ErrorClass::of(&bad_output);
             assert!(!class.is_infrastructure(), "{bad_output:?}");
@@ -671,7 +808,7 @@ mod tests {
             })
         });
         let sleeper = Arc::new(RecordingSleeper::new());
-        let clock: Arc<dyn Clock> = Arc::new(FixedClock::at(chrono::DateTime::UNIX_EPOCH));
+        let clock: Arc<dyn Clock> = Arc::new(FixedClock::at_epoch());
         let stack = build_stack(mock, &config(&dir), clock, sleeper, &Redactor::new([key]));
         let _ = stack.provider.complete(req("x")).await;
         for event in stack.outer.drain().into_iter().chain(stack.live.drain()) {

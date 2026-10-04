@@ -80,7 +80,8 @@ impl Results {
 #[must_use]
 pub fn file_name(provider: &str, small: &str, main: &str) -> String {
     let slug = |s: &str| -> String {
-        s.chars()
+        let mut out: String = s
+            .chars()
             .map(|c| {
                 if c.is_ascii_alphanumeric() || matches!(c, '.' | '-' | '_') {
                     c
@@ -88,7 +89,12 @@ pub fn file_name(provider: &str, small: &str, main: &str) -> String {
                     '_'
                 }
             })
-            .collect()
+            .collect();
+        // No `..` component, however many dots a tag is made of.
+        while out.contains("..") {
+            out = out.replace("..", "_");
+        }
+        out
     };
     format!("{}--{}--{}.jsonl", slug(provider), slug(small), slug(main))
 }
@@ -164,7 +170,12 @@ impl Store {
     /// # Errors
     ///
     /// Any I/O error creating or reading the file.
-    pub fn open(out: &Path, provider: &str, small: &str, main: &str) -> std::io::Result<(Self, Results)> {
+    pub fn open(
+        out: &Path,
+        provider: &str,
+        small: &str,
+        main: &str,
+    ) -> std::io::Result<(Self, Results)> {
         let dir = results_dir(out);
         std::fs::create_dir_all(&dir)?;
         let path = dir.join(file_name(provider, small, main));
@@ -208,49 +219,25 @@ impl Store {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::live::config::{AgentKind, LiveMode, PredictorKind};
-    use crate::live::record::{CallCounts, Outcome, SCHEMA_VERSION};
+    use crate::live::record::SCHEMA_VERSION;
 
     fn temp(label: &str) -> PathBuf {
-        let dir = std::env::temp_dir().join(format!("ferrite-live-store-{label}-{}", uuid::Uuid::new_v4()));
+        let dir = std::env::temp_dir().join(format!(
+            "ferrite-live-store-{label}-{}",
+            uuid::Uuid::new_v4()
+        ));
         std::fs::create_dir_all(&dir).unwrap();
         dir
     }
 
-    pub(crate) fn record(key: &str, started: &str, error: bool) -> LiveRecord {
-        LiveRecord {
-            schema: SCHEMA_VERSION,
-            run_key: key.to_string(),
-            case_id: key.split('|').next().unwrap().to_string(),
-            suite: "s".to_string(),
-            source: "src".to_string(),
-            kind: "attack".to_string(),
-            ground_truth: "deviation".to_string(),
-            attack_category: None,
-            carrier: "tool_output".to_string(),
-            provider: "mock".to_string(),
-            small_model: "s".to_string(),
-            main_model: "m".to_string(),
-            mode: LiveMode::Guard,
-            agent: AgentKind::Llm,
-            predictor: PredictorKind::Llm,
-            config_hash: "h".to_string(),
-            started_at: started.to_string(),
-            prediction: None,
-            ideal_capabilities: None,
-            attack_capabilities: None,
-            actions: Vec::new(),
-            stop_reason: "finished".to_string(),
-            final_answer: None,
-            outcome: Outcome::default(),
-            latency_ms: 1,
-            calls: CallCounts::default(),
-            error: error.then(|| crate::live::record::RecordError {
-                class: "rate_limited".to_string(),
-                message: "slow down".to_string(),
-                retryable: true,
-            }),
-        }
+    fn record(key: &str, started: &str, error: bool) -> LiveRecord {
+        let mut r = crate::live::testing::record(key, started);
+        r.error = error.then(|| crate::live::record::RecordError {
+            class: "rate_limited".to_string(),
+            message: "slow down".to_string(),
+            retryable: true,
+        });
+        r
     }
 
     #[test]
@@ -258,8 +245,12 @@ mod tests {
         let out = temp("roundtrip");
         let (mut store, existing) = Store::open(&out, "mock", "s", "m").unwrap();
         assert!(existing.by_key.is_empty());
-        store.append(&record("c1|k", "2026-01-01T00:00:00Z", false)).unwrap();
-        store.append(&record("c2|k", "2026-01-01T00:00:01Z", false)).unwrap();
+        store
+            .append(&record("c1|k", "2026-01-01T00:00:00Z", false))
+            .unwrap();
+        store
+            .append(&record("c2|k", "2026-01-01T00:00:01Z", false))
+            .unwrap();
         drop(store);
         let (_, again) = Store::open(&out, "mock", "s", "m").unwrap();
         assert_eq!(again.by_key.len(), 2);
@@ -270,11 +261,18 @@ mod tests {
     fn a_retried_case_replaces_its_failure_without_rewriting_the_file() {
         let out = temp("retry");
         let (mut store, _) = Store::open(&out, "mock", "s", "m").unwrap();
-        store.append(&record("c1|k", "2026-01-01T00:00:00Z", true)).unwrap();
+        store
+            .append(&record("c1|k", "2026-01-01T00:00:00Z", true))
+            .unwrap();
         let before = std::fs::read_to_string(store.path()).unwrap();
-        store.append(&record("c1|k", "2026-01-01T00:05:00Z", false)).unwrap();
+        store
+            .append(&record("c1|k", "2026-01-01T00:05:00Z", false))
+            .unwrap();
         let after = std::fs::read_to_string(store.path()).unwrap();
-        assert!(after.starts_with(&before), "append-only: the old line is untouched");
+        assert!(
+            after.starts_with(&before),
+            "append-only: the old line is untouched"
+        );
         let results = read_file(store.path()).unwrap();
         assert_eq!(results.by_key.len(), 1);
         assert!(results.succeeded("c1|k"), "the latest line wins");
@@ -285,12 +283,15 @@ mod tests {
     fn a_torn_last_line_loses_only_that_line_and_does_not_poison_the_next() {
         let out = temp("torn");
         let (mut store, _) = Store::open(&out, "mock", "s", "m").unwrap();
-        store.append(&record("c1|k", "2026-01-01T00:00:00Z", false)).unwrap();
+        store
+            .append(&record("c1|k", "2026-01-01T00:00:00Z", false))
+            .unwrap();
         let path = store.path().to_path_buf();
         drop(store);
         // A crash mid-write: half a JSON object, no newline.
         let mut f = OpenOptions::new().append(true).open(&path).unwrap();
-        f.write_all(br#"{"schema":1,"run_key":"c2|k","case_id":"c2","sui"#).unwrap();
+        f.write_all(br#"{"schema":1,"run_key":"c2|k","case_id":"c2","sui"#)
+            .unwrap();
         drop(f);
 
         let read = read_file(&path).unwrap();
@@ -299,9 +300,14 @@ mod tests {
 
         let (mut store, existing) = Store::open(&out, "mock", "s", "m").unwrap();
         assert_eq!(existing.by_key.len(), 1);
-        store.append(&record("c3|k", "2026-01-01T00:00:09Z", false)).unwrap();
+        store
+            .append(&record("c3|k", "2026-01-01T00:00:09Z", false))
+            .unwrap();
         let read = read_file(&path).unwrap();
-        assert!(read.has("c1|k") && read.has("c3|k"), "the next record is intact");
+        assert!(
+            read.has("c1|k") && read.has("c3|k"),
+            "the next record is intact"
+        );
         assert!(!read.has("c2|k"));
     }
 
@@ -330,8 +336,10 @@ mod tests {
         let (mut a, _) = Store::open(&out, "mock", "s", "m1").unwrap();
         let (mut b, _) = Store::open(&out, "mock", "s", "m2").unwrap();
         assert_ne!(a.path(), b.path());
-        a.append(&record("c1|a", "2026-01-01T00:00:00Z", false)).unwrap();
-        b.append(&record("c1|b", "2026-01-01T00:00:00Z", false)).unwrap();
+        a.append(&record("c1|a", "2026-01-01T00:00:00Z", false))
+            .unwrap();
+        b.append(&record("c1|b", "2026-01-01T00:00:00Z", false))
+            .unwrap();
         assert_eq!(read_all(&out).unwrap().by_key.len(), 2);
     }
 
