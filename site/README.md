@@ -10,7 +10,8 @@ site/
 ├── src/
 │   ├── layout.html   page shell: header, footer, theme, <head>
 │   ├── index.html    the landing page
-│   └── docs/*.html   one documentation article each (front-matter comment first)
+│   └── docs/*.html   one documentation article each (front-matter comment first);
+│                     glossary.html ("Words we use") is the plain-words word list
 └── static/           css, js, fonts, images (copied to dist/static/)
 ```
 
@@ -56,7 +57,26 @@ Sidebar order is the `order:` number; a group's pages must be consecutive. At th
 last audit it is Start (Overview, Getting started, Run it from source), Use
 (Using the browser, Models and settings, Debugging and logs), Defense (Threat
 model, How the defense works), Evaluation (Evaluation, Metrics, Reproduce it,
-Live evaluation), Honesty (Limits).
+Live evaluation), Honesty (Limits), Reference (Words we use). The glossary is
+linked from the docs overview, the sidebar and the footer (`src/layout.html`).
+When a page uses a new technical word, add it to `src/docs/glossary.html`.
+
+## Writing style
+
+The site is written in very simple English. The rules:
+
+- Use short sentences, about 15 words or fewer. Say one idea in each sentence.
+- Use the active voice and common words. No idioms, no jokes, no marketing hype.
+- Explain a technical word in plain words the first time it appears on a page, and
+  list it in the glossary. For example: a fingerprint is the list of tools and
+  websites a task is expected to need; a guard is the check that stops an action
+  outside that list; a dry run is a practice run that does nothing real.
+- Keep numbers, commands, flags, paths, shortcuts and UI labels exactly as they are.
+  Plain English never changes a figure.
+- Keep every caveat and honesty note. Simple words must not claim more than the
+  evidence. If the evidence is thin, say so in the same sentence as the number.
+- Do not rename a heading without checking links to it. A heading's id comes from its
+  text, and other pages link to it (`grep -rn "#the-id" site/src`).
 
 ## Keep the numbers honest
 
@@ -71,15 +91,19 @@ Counts are checked against the repository, not copied: at the last audit
 ones (`python3 scripts/gen_redteam_corpus.py --check` says all 909 match), which is
 the 938-case corpus `just eval` runs, and 1,046 files in `agentdojo_full/`
 (949 attacks and 97 benign twins; `agentdojo_full_manifest.json`). The AgentDojo
-import is **not** in the headline numbers and has no results; a live-runner figure
-(`2,092 runs, about 7,300 calls`) comes from `live_eval --plan --provider gemini
---model x --corpus agentdojo`, which calls nothing. If a number is not in
-`docs/EVALUATION.md` or a command output you ran, it does not go on the site.
+import is **not** in the headline numbers. Its only results come from the owner's one
+live run (ollama `gemma4:31b`, all 1,984 cases, 3,968 runs), whose report is copied
+unchanged to `docs/results/live-eval-ollama-gemma4-31b.md`; every live number on the
+site comes from that file. A live-runner cost figure (`2,092 runs, about 7,300
+calls`) comes from `live_eval --plan --provider gemini --model x --corpus
+agentdojo`, which calls nothing. If a number is not in
+`docs/EVALUATION.md`, the live report above or a command output you ran, it does
+not go on the site.
 
 Commands, flags and shortcuts are read from the `justfile`, `scripts/`,
 `crates/ferrite-ui/src/lib.rs` (`handle_key_press`) and the example programs' own
-`--help`, and each page says what has not been run (macOS, Windows, a real GPU, a
-real model). When you re-audit, bump `DOCS_AS_OF` in `build.py`.
+`--help`, and each page says what has not been run (macOS, Windows, a real GPU, any real
+model but one). When you re-audit, bump `DOCS_AS_OF` in `build.py`.
 
 Two statements go stale fastest and are dated on purpose: which commit the
 published `latest` release was built from (check it with
