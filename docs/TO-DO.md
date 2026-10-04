@@ -23,7 +23,7 @@ Status enum: `open` / `in-progress` / `done <SHA>` / `dropped <reason>` /
 
 ## Summary for a v0.1.0 reader (added by A13, T-113; re-tallied 2026-10-04 by script directly against every row below, T-001 to T-304, not carried forward from an earlier count)
 
-**131 rows total: 84 done, 10 in-progress, 34 open, 1 held, 1 dropped, 1
+**131 rows total: 85 done, 9 in-progress, 34 open, 1 held, 1 dropped, 1
 needing owner confirmation.** (A row whose status reads "done for what was
 verified" is counted as done; its row says what was not verified. "open" in a
 row's own text, as in T-264, does not change its status.)
@@ -38,7 +38,7 @@ row's own text, as in T-264, does not change its status.)
   `AgentRuntime`/`ToolExecutor` vocabulary (grep-confirmed before deletion);
   see those rows and `docs/PROGRESS.md`'s B3 entry for what was verified live
   and what was not.
-- **Open or in-progress, grouped** (every one of the 44 appears in exactly one
+- **Open or in-progress, grouped** (every one of the 43 appears in exactly one
   group):
   - *Defense and audit limits:* T-217 (per-capability scope authoring is
     provisional), T-218 (audit truncation defense is best-effort), T-219 (two
@@ -55,8 +55,7 @@ row's own text, as in T-264, does not change its status.)
     still open), T-300 (the guard stopped none of the 5 AgentRedirection
     attacks), T-301 (the guard refuses too many normal tasks because the
     predictor is weak), T-302 (no run yet with a model that falls for
-    injections more often), T-303 (no Gemini run yet), T-304 (the live
-    results go into the docs and the site; waiting for a commit).
+    injections more often), T-303 (no Gemini run yet).
   - *Laya:* T-234 (the fast lane is unmeasured), T-250 (slow on the owner's
     Mac).
   - *UI and product gaps:* T-232 (no `<a download>` interception), T-233
@@ -245,7 +244,7 @@ One row per charter. Each charter's own exit gate (`docs/REBUILD_DIRECTIVE.md`
 | T-301 | open | found reading the first live results, 2026-10-04 | **The guard refuses too many normal tasks, and the predictor is the likely cause.** In the `gemma4:31b` run, 86/226 = 38.1% [32.0-44.5] of normal tasks had an action refused. The prediction had precision 52.2% (1196/2293) and recall 70.1% (1196/1706). The whole ideal set was predicted in only 588/1046 = 56.2% of cases. 27/1984 model answers were unusable and 41/1984 fingerprints were empty. The guard refuses whatever is outside the prediction, so a weak prediction means refused normal tasks. We have not tested this by changing the predictor. To do: improve the predictor (its prompt or its rule layer). Run the normal tasks again with `--only benign` and compare. Keep two rules from `CLAUDE.md`: a failure still gives an empty list, and the predictor must not admit more attack actions (today 98/393 = 24.9%). |
 | T-302 | open | found reading the first live results, 2026-10-04 | **Run a second model that falls for injections more often.** `gemma4:31b` tried the attack in only 31 of 1,542 measurable runs with no guard. So the guard had few attacks to stop, and its ranges are wide (for example blocked 15/21 = 71.4% [50.0-86.2]). To do: pick a model that follows injections more often. It must be one that `ferrite-model` supports today (Gemini or Ollama). Run the same selection (`--corpus all --seed 1 --modes off,guard`). Read the report, and use `--report --compare` to put it next to `gemma4:31b`. Needs the owner to choose the model and to supply the key. |
 | T-303 | open | found reading the first live results, 2026-10-04 | **No Gemini run yet.** The runner already supports `--provider gemini` (key in `FERRITE_GEMINI_API_KEY` or the OS keyring). Run `--plan` first to see the cost, then run in batches. This row does not cover OpenAI-compatible or Anthropic runs. They need a new backend in `ferrite-model` first, and that work is T-277. Do not add them here before T-277 is done. Needs the owner's key. |
-| T-304 | in-progress (the text is written; add the SHA when it is committed) | the owner: "add the new full live-model results", 2026-10-04 | **Put the live results into the docs and the site.** Done in this pass for the docs: `docs/EVALUATION.md` has a new section 11 and no longer says that no real model has been run, `docs/results/live-eval-ollama-gemma4-31b.md` is the source record, and this ledger and `docs/PROGRESS.md` are updated. The README, `docs/COMMANDS.md`, the hand-off notes and the site (`site/**`) are updated by other agents in the same pass. Not verified: those other files. This row stays in-progress until the change is committed. |
+| T-304 | done `8758725` (site) and `9018569` (README, commands) and `88883d2` (evaluation guide) | the owner: "add the new full live-model results", 2026-10-04 | **Put the live results into the docs and the site.** Done in this pass for the docs: `docs/EVALUATION.md` has a new section 11 and no longer says that no real model has been run, `docs/results/live-eval-ollama-gemma4-31b.md` is the source record, and this ledger and `docs/PROGRESS.md` are updated. The README, `docs/COMMANDS.md`, the hand-off notes and the site (`site/**`) are updated by other agents in the same pass. Not verified: those other files. This row stays in-progress until the change is committed. |
 
 ## Standing notes (originally "for whoever picks up A1 next"; updated 2026-10-04)
 
