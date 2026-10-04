@@ -800,7 +800,7 @@ Page console messages are in DevTools (section 4) and mirrored to the log as
 
 | Recipe | Runs | What it does | Needs |
 |---|---|---|---|
-| `just check` | `cargo fmt --all --check`, `cargo clippy --workspace --all-targets -- -D warnings`, `cargo machete` | structural gate: format, lint (all targets, deny warnings), unused dependencies. Does not build Servo, does not run cargo-deny | `cargo-machete` |
+| `just check` | `cargo fmt --all --check`, `cargo clippy --workspace --all-targets -- -D warnings`, `cargo machete crates` | structural gate: format, lint (all targets, deny warnings), unused dependencies. Does not build Servo, does not run cargo-deny | `cargo-machete` |
 | `just fmt` | `cargo fmt --all` | formats the workspace in place | |
 | `just lint` | `cargo clippy --workspace --all-targets -- -D warnings` | clippy alone. `--all-targets` matters: its absence hid a real bug for months (T-207) | |
 | `just test` | `cargo test --workspace` | the full suite (unit, integration, doctests). Needs **no network and no API key** (R7) | enough disk to link; if short, per crate |
@@ -842,7 +842,7 @@ version with `bundled`; no AI attribution in commits.
 
 | Workflow | Trigger | What it does |
 |---|---|---|
-| `ci.yml` (**CI**) | **manual only** (`workflow_dispatch`; Actions tab, Run workflow). No push, pull request or schedule trigger: an owner decision (`docs/TO-DO.md` T-210) | Job 1, on Linux, Windows and macOS: `cargo fetch`; on Linux `cargo fmt --all --check`; clippy (all targets, deny warnings); on Linux `cargo machete`, `cargo deny check`, `check_purge.sh` and `check_no_archive_links.sh`; `cargo test --workspace`; `cargo build --release -p ferrite-shell` (Servo-free). Job 2 (after job 1 passes everywhere), each OS: builds `cargo build --release -p ferrite-shell --features ferrite-servo/servo`, packages it with `scripts/package.sh` and uploads it as an artifact kept 90 days |
+| `ci.yml` (**CI**) | **manual only** (`workflow_dispatch`; Actions tab, Run workflow). No push, pull request or schedule trigger: an owner decision (`docs/TO-DO.md` T-210) | Job 1, on Linux, Windows and macOS: `cargo fetch`; on Linux `cargo fmt --all --check`; clippy (all targets, deny warnings); on Linux `cargo machete crates` (our crates only; `vendor/` is upstream code), `cargo deny check`, `check_purge.sh` and `check_no_archive_links.sh`; `cargo test --workspace`; `cargo build --release -p ferrite-shell` (Servo-free). Job 2 (after job 1 passes everywhere), each OS: builds `cargo build --release -p ferrite-shell --features ferrite-servo/servo`, packages it with `scripts/package.sh` and uploads it as an artifact kept 90 days |
 | `release.yml` (**Release**) | automatically when a CI run completes, and only if that run was a manual dispatch that **succeeded** | downloads the three packages CI built and republishes the rolling prerelease tagged `latest` (the old one is deleted first) with the commit, branch, CI run and download notes. It never checks out or runs the CI run's code. A `workflow_run` workflow only fires from the default branch's copy of the file |
 | `pages.yml` (**Site**) | manual only | builds `site/` with `python3 site/build.py` (fails on a broken internal link or anchor) and deploys to GitHub Pages. One-time setup: repository Settings, Pages, Source "GitHub Actions" |
 
