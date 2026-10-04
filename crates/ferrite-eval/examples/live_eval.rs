@@ -1,6 +1,6 @@
-//! `just live-eval` / `just live-eval-plan`: the evaluation with a real model in
-//! the loop, in batches a quota can survive. See `docs/EVALUATION.md`, "Running
-//! with a real model", and `--help`.
+//! `cargo run -p ferrite-eval --example live_eval -- ...`: the evaluation with a
+//! real model in the loop, in batches a quota can survive. See
+//! `docs/EVALUATION.md`, "Running with a real model", and `--help`.
 //!
 //! This is the one binary in the crate that can reach the network, and only when
 //! `--provider gemini` or `--provider ollama` is given. It is never built into or

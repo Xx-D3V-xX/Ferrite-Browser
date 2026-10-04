@@ -4866,3 +4866,15 @@ The first macOS run of the Settings branch failed one `ferrite-ui` test (`openin
 ## 2026-10-02 — coordinator — A log file, and a quit that always quits (T-274)
 
 The owner's .app crashes, hangs on quit and ignores zoom on some pages, and a Finder launch leaves no log. Added the log file (`logging.rs`), a 3 s quit watchdog and an explicit process exit, and a UI stall note (`lifecycle.rs`). The cause of the crashes is still unknown: waiting for the owner's `ferrite.log` and, for a hang, a macOS `sample`.
+
+## 2026-10-04 — eval — The live model runner is finished and the full AgentDojo import is verified (T-275, T-276, T-277, T-278)
+
+**Asked by the owner:** a real LLM in the evaluation loop with the provider and model selectable, run in batches that survive rate and usage limits, a thorough AgentDojo pass, run on their own machine with their own keys. The previous agent was cut off mid-rewrite of `live/provider.rs`.
+
+**Found:** the snapshot was complete, not half-finished: `provider.rs` assembles the stack as case-level probe, cache, throttle, budget, live probe, backend, and its 10 tests, the other `live` modules and the CLI were consistent with it. No dead code, no TODOs, no new dependencies. The work left was documentation and a stale pointer (`examples/live_eval.rs` named `just live-eval` recipes that do not exist; the importer pointed at an "AgentDojo coverage" section that had not been written).
+
+**Done:** `docs/EVALUATION.md` sections 9 (running with a real model: providers and keys, `--plan`, batches, limits and resume, the report, the first commands to run, what it does not establish) and 10 (AgentDojo coverage); the importer now prints the clone and checkout commands when `--src` is missing or at another commit; T-275 to T-278 in `docs/TO-DO.md`.
+
+**Verified:** `cargo clippy -p ferrite-eval --all-targets -- -D warnings` and `cargo fmt --all --check` clean; `cargo test -p ferrite-eval` all green (231 unit tests, 7 loopback fake-server tests, 10 `agentdojo_full_validate` tests, the other corpus and pilot tests). With the `mock` provider: `--plan` on the full import (1,046 cases, 2,092 runs, about 7,300 calls typical), two consecutive 12-case batches (the second continued with the next pending cases), and `--report` (REPORT.md and report.csv with per-attack-category breakdowns). `git clone` of the real AgentDojo repository at the pinned commit `089ed468` followed by `python3 scripts/import_agentdojo.py --src <clone> --check` reports the 1,046 case files and the manifest byte-identical; the same command with a missing or non-git `--src` exits 2 with instructions.
+
+**Not verified:** any real provider (Gemini or Ollama Cloud rate-limit behaviour, real token counts and step counts, so the `--plan` figures are estimates), the OS keyring path (tests use an in-memory store), a run on the owner's machine. OpenAI-compatible and Anthropic providers do not exist in `ferrite-model` and so are not selectable (T-277). `just live-eval` recipes were not added (justfile out of scope, T-278).

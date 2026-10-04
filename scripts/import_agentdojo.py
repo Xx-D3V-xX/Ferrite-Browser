@@ -1066,7 +1066,15 @@ def main():
 
     head = subprocess.run(["git", "-C", str(args.src), "rev-parse", "HEAD"], capture_output=True, text=True).stdout.strip()
     if head != PINNED_SHA and not args.allow_other_commit:
-        print(f"error: {args.src} is at {head or 'no git checkout'}, this importer is pinned to {PINNED_SHA}", file=sys.stderr)
+        found = f"at commit {head}" if head else "not a git checkout (or missing)"
+        print(
+            f"error: {args.src} is {found}; this importer is pinned to {PINNED_SHA}.\n"
+            "It needs the real AgentDojo source (it reads the task files, it ships no data of its own):\n"
+            f"    git clone {SOURCE_URL} <dir>\n"
+            f"    git -C <dir> checkout {PINNED_SHA}\n"
+            "    python3 scripts/import_agentdojo.py --src <dir> --check",
+            file=sys.stderr,
+        )
         return 2
     missing = tool_coverage(args.src)
     if missing:
