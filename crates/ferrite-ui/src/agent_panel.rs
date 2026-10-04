@@ -33,9 +33,9 @@ use iced::widget::{column, horizontal_space, row};
 
 use super::*;
 use crate::tokens::{
-    danger_btn_style, field_style, on_fill, outline_btn_style, raised_bar_style, rule_card,
-    safe_btn_style, tint, tip, toolbar_btn_style, RADIUS_SM, SP_LG, SP_MD, SP_SM, SP_XS, TEXT_BODY,
-    TEXT_CAPTION, TEXT_SMALL, TEXT_TITLE,
+    allow_btn_style, danger_btn_style, deny_btn_style, field_style, on_fill, outline_btn_style,
+    raised_bar_style, rule_card, tint, tip, toolbar_btn_style, RADIUS_SM, SP_LG, SP_MD, SP_SM,
+    SP_XS, TEXT_BODY, TEXT_CAPTION, TEXT_SMALL, TEXT_TITLE,
 };
 
 // ---------------------------------------------------------------------------
@@ -715,7 +715,7 @@ fn view_runtime_card<'a>(
             card_action(
                 "Don\u{2019}t allow",
                 Some("Esc"),
-                danger_btn_style,
+                deny_btn_style,
                 4,
                 FerriteBrowserMessage::RuntimeDeny,
             ),
@@ -1421,14 +1421,13 @@ fn note_card<'a>(
 // Empty state
 // ---------------------------------------------------------------------------
 
-fn empty_state(state: &FerriteBrowser) -> Element<'_, FerriteBrowserMessage> {
-    let palette = state.palette();
-    let has_page = state
-        .tab_urls
-        .get(state.active_tab)
-        .is_some_and(|u| is_real_page(u));
+/// The shortest panel that still has room for the suggestion chips under the
+/// greeting. Shorter (a bottom panel is open, or the window is small), they
+/// would be cut off mid-chip, so only the greeting is shown.
+const SUGGESTIONS_MIN_HEIGHT: f32 = 300.0;
 
-    let chips: Vec<Element<FerriteBrowserMessage>> = suggestions(has_page)
+fn suggestion_chips<'a>(has_page: bool) -> Vec<Element<'a, FerriteBrowserMessage>> {
+    suggestions(has_page)
         .into_iter()
         .map(|s| {
             button(text(s.label).size(12))
@@ -1464,10 +1463,18 @@ fn empty_state(state: &FerriteBrowser) -> Element<'_, FerriteBrowserMessage> {
                 .on_press(FerriteBrowserMessage::SuggestionChosen(s.fill.to_string()))
                 .into()
         })
-        .collect();
+        .collect()
+}
 
-    container(
-        column![
+fn empty_state(state: &FerriteBrowser) -> Element<'_, FerriteBrowserMessage> {
+    let palette = state.palette();
+    let has_page = state
+        .tab_urls
+        .get(state.active_tab)
+        .is_some_and(|u| is_real_page(u));
+
+    responsive(move |size: Size| {
+        let mut body: Vec<Element<FerriteBrowserMessage>> = vec![
             container(icon(Icon::Agent, 22.0, palette.accent))
                 .width(Length::Fixed(48.0))
                 .height(Length::Fixed(48.0))
@@ -1482,11 +1489,13 @@ fn empty_state(state: &FerriteBrowser) -> Element<'_, FerriteBrowserMessage> {
                         ..Border::default()
                     },
                     ..container::Style::default()
-                }),
+                })
+                .into(),
             text("What can I help with?")
                 .size(16)
                 .font(font_weight(iced::font::Weight::Semibold))
-                .color(palette.text),
+                .color(palette.text)
+                .into(),
             text(if has_page {
                 "I can read this page, click, fill in forms and work across your tabs."
             } else {
@@ -1495,17 +1504,29 @@ fn empty_state(state: &FerriteBrowser) -> Element<'_, FerriteBrowserMessage> {
             .size(12)
             .color(palette.text_dim)
             .align_x(iced::alignment::Horizontal::Center)
-            .width(Length::Fill),
-            column(chips).spacing(8).align_x(iced::Alignment::Center),
-        ]
-        .spacing(12)
-        .align_x(iced::Alignment::Center)
-        .max_width(280),
-    )
-    .width(Length::Fill)
-    .height(Length::Fill)
-    .center(Length::Fill)
-    .padding(16)
+            .width(Length::Fill)
+            .into(),
+        ];
+        if size.height >= SUGGESTIONS_MIN_HEIGHT {
+            body.push(
+                column(suggestion_chips(has_page))
+                    .spacing(8)
+                    .align_x(iced::Alignment::Center)
+                    .into(),
+            );
+        }
+        container(
+            column(body)
+                .spacing(12)
+                .align_x(iced::Alignment::Center)
+                .max_width(280),
+        )
+        .width(Length::Fill)
+        .height(Length::Fill)
+        .center(Length::Fill)
+        .padding(16)
+        .into()
+    })
     .into()
 }
 
@@ -1853,7 +1874,7 @@ fn view_composer(state: &FerriteBrowser) -> Element<'_, FerriteBrowserMessage> {
 // ---------------------------------------------------------------------------
 
 /// One reviewable item: what the dry run did, and a Reject / Approve pair. The
-/// decided side is filled (danger / safe); the undecided side is an outline, so
+/// decided side is washed (danger / safe); the undecided side is an outline, so
 /// "nothing chosen yet" never looks like "approved".
 fn consent_item_card<'a>(
     state: &FerriteBrowser,
@@ -1898,15 +1919,7 @@ fn consent_item_card<'a>(
         button(
             container(
                 row![
-                    icon(
-                        glyph,
-                        11.0,
-                        if chosen {
-                            on_fill(chosen_fill)
-                        } else {
-                            palette.text
-                        }
-                    ),
+                    icon(glyph, 11.0, if chosen { chosen_fill } else { palette.text }),
                     text(label).size(TEXT_SMALL)
                 ]
                 .spacing(SP_XS + 2.0)
@@ -1945,7 +1958,7 @@ fn consent_item_card<'a>(
                     "Reject",
                     Icon::Reject,
                     rejected,
-                    danger_btn_style,
+                    deny_btn_style,
                     palette.danger,
                     FerriteBrowserMessage::RejectTool(item.id.to_string()),
                 ),
@@ -1953,7 +1966,7 @@ fn consent_item_card<'a>(
                     "Approve",
                     Icon::Approve,
                     approved,
-                    safe_btn_style,
+                    allow_btn_style,
                     palette.safe,
                     FerriteBrowserMessage::ApproveTool(item.id.to_string()),
                 ),
@@ -1996,7 +2009,7 @@ fn consent_body(state: &FerriteBrowser) -> Element<'_, FerriteBrowserMessage> {
 
     let mut body: Vec<Element<FerriteBrowserMessage>> = vec![
         row![
-            icon(Icon::Warning, ICON_SIZE, palette.danger),
+            icon(Icon::Warning, ICON_SIZE, palette.warn),
             text("Review before running")
                 .size(TEXT_TITLE)
                 .font(font_weight(iced::font::Weight::Semibold))

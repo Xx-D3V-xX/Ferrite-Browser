@@ -503,23 +503,40 @@ pub(crate) fn danger_btn_style(theme: &Theme, status: button::Status) -> button:
     }
 }
 
-/// Safe button: solid green, for an explicit approval.
-pub(crate) fn safe_btn_style(theme: &Theme, status: button::Status) -> button::Style {
-    let palette = palette_for_theme(theme);
+/// A choice that is made with colour but not with a loud fill: a wash of
+/// `tone` over whatever is behind, a hairline in `tone`, and the ordinary text
+/// colour, so the label reads as well as on any other button.
+fn soft_btn(tone: Color, text: Color, status: button::Status) -> button::Style {
+    let wash = match status {
+        button::Status::Active => 0.16,
+        button::Status::Hovered => 0.24,
+        button::Status::Pressed => 0.32,
+        button::Status::Disabled => 0.06,
+    };
     button::Style {
-        background: Some(Background::Color(match status {
-            button::Status::Hovered => tint(palette.safe, 0.88),
-            button::Status::Pressed => darken(palette.safe, 0.85),
-            button::Status::Disabled => tint(palette.safe, 0.35),
-            button::Status::Active => palette.safe,
-        })),
-        text_color: on_fill(palette.safe),
+        background: Some(Background::Color(tint(tone, wash))),
+        text_color: text,
         border: Border {
             radius: radius(RADIUS_MD),
-            ..Border::default()
+            width: 1.0,
+            color: tint(tone, 0.6),
         },
         ..button::Style::default()
     }
+}
+
+/// "No" in a decision card: a soft danger wash, not a solid red fill. It is the
+/// safe answer, so it is the one with colour, but a person deciding should not
+/// be shouted at.
+pub(crate) fn deny_btn_style(theme: &Theme, status: button::Status) -> button::Style {
+    let palette = palette_for_theme(theme);
+    soft_btn(palette.danger, palette.text, status)
+}
+
+/// "Yes" in a decision card, in the same soft style as [`deny_btn_style`].
+pub(crate) fn allow_btn_style(theme: &Theme, status: button::Status) -> button::Style {
+    let palette = palette_for_theme(theme);
+    soft_btn(palette.safe, palette.text, status)
 }
 
 /// A row in a menu or list: transparent, a hover wash, square-ish corners.
@@ -658,6 +675,30 @@ mod tests {
     fn hover_is_a_lighter_wash_than_pressed_in_both_themes() {
         for palette in [&DARK_PALETTE, &LIGHT_PALETTE] {
             assert!(hover_bg(palette).a < pressed_bg(palette).a);
+        }
+    }
+
+    #[test]
+    fn deny_and_allow_are_washes_whose_labels_stay_readable_in_both_themes() {
+        for (theme, palette) in [(Theme::Dark, &DARK_PALETTE), (Theme::Light, &LIGHT_PALETTE)] {
+            for style in [deny_btn_style, allow_btn_style] {
+                for status in [
+                    button::Status::Active,
+                    button::Status::Hovered,
+                    button::Status::Pressed,
+                ] {
+                    let s = style(&theme, status);
+                    let Some(Background::Color(wash)) = s.background else {
+                        panic!("a decision button has a background");
+                    };
+                    assert!(wash.a <= 0.35, "{status:?}: a wash, not a solid fill");
+                    let under = mix(palette.raised, Color { a: 1.0, ..wash }, wash.a);
+                    assert!(
+                        contrast_ratio(s.text_color, under) >= 4.5,
+                        "{status:?} label on {under:?}"
+                    );
+                }
+            }
         }
     }
 

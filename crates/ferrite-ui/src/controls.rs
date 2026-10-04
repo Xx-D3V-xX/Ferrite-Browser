@@ -2317,6 +2317,38 @@ mod tests {
     }
 
     #[test]
+    fn a_control_the_engine_withdrew_or_replaced_is_not_left_on_screen() {
+        let shown = PendingControl::new(a_select(), Size::new(800.0, 600.0));
+        // Same control reported again: nothing to do, whatever has been done
+        // to it since.
+        assert!(!differs(Some(&shown), Some(&a_select())));
+        // The engine has none (the page removed the element): drop ours.
+        assert!(differs(Some(&shown), None));
+        // A different one took its place.
+        let alert = PageControl::Dialog {
+            kind: DialogKind::Alert,
+            message: "hi".to_string(),
+            default: String::new(),
+        };
+        assert!(differs(Some(&shown), Some(&alert)));
+        // A new one while none is shown: show it. Neither: nothing.
+        assert!(differs(None, Some(&alert)));
+        assert!(!differs(None, None));
+    }
+
+    #[test]
+    fn what_the_person_ticked_does_not_make_the_control_look_replaced() {
+        let multi = PageControl::Select {
+            options: vec![option(0, "a"), option(1, "b")],
+            multiple: true,
+            anchor: DeviceRect::default(),
+        };
+        let mut shown = PendingControl::new(multi.clone(), Size::new(800.0, 600.0));
+        assert_eq!(shown.handle(Msg::SelectChoose(1)), Outcome::Nothing);
+        assert!(!differs(Some(&shown), Some(&multi)));
+    }
+
+    #[test]
     fn dismissing_a_tab_that_has_no_control_is_a_no_op() {
         let mut state = FerriteBrowser::default();
         dismiss_tab(&mut state, 0);

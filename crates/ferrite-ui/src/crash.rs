@@ -310,6 +310,35 @@ mod tests {
     }
 
     #[test]
+    fn the_toolbar_reload_restarts_a_dead_page_instead_of_asking_it() {
+        let mut state = state_with_crash();
+        assert!(is_crashed(&state, 0));
+        let _ = crate::update(&mut state, FerriteBrowserMessage::Reload);
+        assert!(!is_crashed(&state, 0), "the banner is gone");
+        // No engine in this build, so the fresh session cannot be made.
+        assert!(state.tab_error[0].is_some());
+    }
+
+    #[test]
+    fn typing_an_address_into_a_dead_tab_loads_it_in_a_fresh_session() {
+        let mut state = state_with_crash();
+        let _ = crate::update(
+            &mut state,
+            FerriteBrowserMessage::NavigateRequested("https://b.example/".to_string()),
+        );
+        assert!(!is_crashed(&state, 0));
+        assert_eq!(state.tab_urls[0], "https://b.example/");
+    }
+
+    #[test]
+    fn a_healthy_tab_is_not_restarted_by_reload() {
+        let mut state = FerriteBrowser::default();
+        state.tab_urls[0] = "https://a.example/".to_string();
+        let _ = crate::update(&mut state, FerriteBrowserMessage::Reload);
+        assert!(state.tab_error[0].is_none());
+    }
+
+    #[test]
     fn only_the_active_tabs_banner_shows() {
         let mut state = state_with_crash();
         crate::push_tab_state(&mut state);
