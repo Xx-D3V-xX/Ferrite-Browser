@@ -10,6 +10,12 @@ half; `docs/handoffs/b02.md`) with real-provider verification.
 document reports against has **29 cases**, not the ~360 §13.3's own sizing
 derivation targets. Every interval quoted here is wide because the sample
 is small — that is stated plainly throughout, not smoothed over. See §3.
+
+> **Update 2026-10-04.** The 29-case figure above is the original run, kept as the
+> record of it (§1–§7). The current corpus is **938 cases** (§8; 909 of them
+> generated), plus **1,046 AgentDojo cases** imported for the live model runner
+> (§10). §8 holds the current numbers and limits; §9 explains how to run a real
+> model through the evaluation; `docs/COMMANDS.md` §6 lists every command and flag.
 **B2 mechanically migrated the corpus's `by_tool` vocabulary** from the old
 `ferrite_agent::BrowserTool::tool_id()` strings to `ferrite_core::Primitive
 ::as_str()` directly (closing T-216's drift at its source rather than

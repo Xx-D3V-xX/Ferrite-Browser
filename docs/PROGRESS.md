@@ -4878,3 +4878,51 @@ The owner's .app crashes, hangs on quit and ignores zoom on some pages, and a Fi
 **Verified:** `cargo clippy -p ferrite-eval --all-targets -- -D warnings` and `cargo fmt --all --check` clean; `cargo test -p ferrite-eval` all green (231 unit tests, 7 loopback fake-server tests, 10 `agentdojo_full_validate` tests, the other corpus and pilot tests). With the `mock` provider: `--plan` on the full import (1,046 cases, 2,092 runs, about 7,300 calls typical), two consecutive 12-case batches (the second continued with the next pending cases), and `--report` (REPORT.md and report.csv with per-attack-category breakdowns). `git clone` of the real AgentDojo repository at the pinned commit `089ed468` followed by `python3 scripts/import_agentdojo.py --src <clone> --check` reports the 1,046 case files and the manifest byte-identical; the same command with a missing or non-git `--src` exits 2 with instructions.
 
 **Not verified:** any real provider (Gemini or Ollama Cloud rate-limit behaviour, real token counts and step counts, so the `--plan` figures are estimates), the OS keyring path (tests use an in-memory store), a run on the owner's machine. OpenAI-compatible and Anthropic providers do not exist in `ferrite-model` and so are not selectable (T-277). `just live-eval` recipes were not added (justfile out of scope, T-278).
+
+## 2026-10-03 — coordinator — Pages can ask for things; per-tab logs; Google in the address bar (T-279, T-284, T-285)
+
+**Reported by the owner:** dropdowns, `confirm()` and file inputs did nothing; errors could not be identified; the address bar should search Google, not DuckDuckGo.
+
+**Landed:** the engine hands the embedder `<select>` lists, `alert`/`confirm`/`prompt`, the file and colour pickers and context menus, and Ferrite dropped all of them. `ferrite-servo` now keeps the pending control as plain data (`diag::PageControl`) and applies one answer (`diag::ControlAnswer`); it also keeps every console message and every request start per tab, exposes the page's cursor and a page-crash notice, and records panics. `examples/page_shot.rs` loads a URL in the real engine and reports the title, load time, console, request summary and a PNG. An address-bar entry that is not a URL goes to Google.
+
+**Commits:** `f8c4a31`.
+
+**Tests:** `ferrite-servo` `diag` tests (`a_full_queue_drops_the_oldest`, `panics_are_taken_once`, `hex_colours_parse_in_both_lengths_and_refuse_junk`, `levels_order_by_severity`, `the_source_of_an_uncaught_exception_is_pulled_out`); `activity_tests::a_bare_local_address_gets_http_and_a_bare_site_gets_https`. In the real engine: `examples/controls_probe.rs` (select, confirm, prompt and colour verified; the file picker's answer path was not).
+
+**Not verified:** any of it on macOS; against a real page in the app; Google's results page (blocked in the build sandbox). The agent's own prompt still sends it to DuckDuckGo Lite on purpose. Filed: T-293 (file picker is a typed-path card), T-294 (HTTP auth, IME).
+
+## 2026-10-03 — coordinator — Display scale, a GPU context with CPU fallback, core-count pools, a patched servo-script (T-280, T-281, T-282, T-283)
+
+**Reported by the owner:** the macOS app is slow, text is tiny (a 175% zoom was the workaround), Google results sit against the left edge, GitHub does not open.
+
+**Landed:** (1) the engine was never told the display scale, so a Retina screen was laid out as a viewport twice as wide as it looks; `set_display_scale` now feeds every tab. (2) A GPU offscreen rendering context (`gpu_context.rs`) that proves itself by clearing to a colour and reading it back and otherwise falls back to the CPU renderer; `FERRITE_RENDERER=gpu|cpu|auto` (auto tries the GPU on macOS only); the choice is logged as `[ferrite-render]` (ADR-021). (3) Style/layout threads and the WebRender and worker pools follow the core count (3-8 and 4-8). (4) `vendor/servo-script`, servo-script 0.6.0 with `location.ancestorOrigins` no longer panicking the script thread (ADR-022). (5) `scripts/collect-logs.sh`, bundled into the macOS app by `scripts/package.sh`.
+
+**Commits:** `e97ca27`.
+
+**Tests:** none added (the change is in code that only builds with Servo). By hand: `page_shot` at scale 2 reports a `640x400 @2` viewport for a 1280-pixel frame; the GPU path is pixel-identical to the CPU path on Mesa's software GL; `collect-logs.sh` runs on Linux.
+
+**Not verified:** **the GPU path has never run on a real GPU or on a Mac**; no speed-up from it or from the thread pools was measured (T-296); the Google layout was not loaded; the `ancestorOrigins` panic was never reproduced, so it is not proven to be what broke GitHub (T-290); `collect-logs.sh` on macOS.
+
+## 2026-10-04 — ui — DevTools, resizable panels, calmer approval cards, stale-control fixes (T-286, T-287, T-288, T-289)
+
+**Asked by the owner:** Chrome-style logging to find errors, resizable panels, an approval panel colour that does not look bad. The UI agent was cut off by a usage limit; its work was snapshotted and finished.
+
+**Landed:** a DevTools panel (Console with levels, filter, preserve log and a prompt that runs JavaScript in the page; Network; Engine) opened with Cmd+Opt+I / Ctrl+Shift+I or Cmd/Ctrl+J, with Copy all, Save log... and Open log folder; F12 still opens the Audit panel. Resizable side drawers and bottom panels with sizes saved to `ui-layout.json`. Approval cards with a neutral surface, a coloured left rule and soft allow/deny washes instead of solid red and green. A control the page withdrew or replaced no longer stays on screen; Reload and address entry work on a crashed tab; the page-crash banner has Reload, Details and Dismiss.
+
+**Commits:** `18ef770`, `773a55a`, `4705749`, `4d1853b`.
+
+**Tests:** `cargo test -p ferrite-ui` passed 501 tests in the coordinator's run on 2026-10-04 (400 on 2026-10-01); among the new: `devtools` (25, e.g. `the_log_is_bounded_and_the_cache_follows_the_front`), `layout` (11, e.g. `a_double_press_resets_that_panel_only`), `crash` (7, e.g. `the_toolbar_reload_restarts_a_dead_page_instead_of_asking_it`), `controls` (31, e.g. `a_control_the_engine_withdrew_or_replaced_is_not_left_on_screen`), `chrome_tests::developer_tools_open_with_chromes_chord_and_still_with_the_console_key`, `tokens::deny_and_allow_are_washes_whose_labels_stay_readable_in_both_themes`. Rendered under Xvfb and driven with xdotool at scale 1. `cargo clippy --workspace --all-targets -- -D warnings` and `cargo fmt --all --check` were clean.
+
+**Not verified:** macOS, HiDPI, Windows, any real page's console or network list in the app. The Network tab has no status, size or timing (T-292). Whether F12 should open DevTools is an owner decision (T-297). Cmd+Q and the 3-second quit watchdog (T-295).
+
+## 2026-10-04 — docs — Command guide, ledger re-tally, hand-off folded in (T-279 to T-299)
+
+**Asked by the owner:** "update all the docs, the commands I can run, what they do, everything in detail, how to run stuff, and the task/plan lists".
+
+**Landed:** `docs/COMMANDS.md` (every recipe, script, example and flag, the shortcuts, the log file, the environment variables, CI and release); README Status, Running, Evaluating, Watching, Logins and Workspace sections refreshed; ledger rows T-279 to T-299 for the 2026-10-02..04 work and the honest open items; the summary block re-tallied by script against every row (126 rows: 84 done, 8 in-progress, 31 open, 1 held, 1 dropped, 1 needing owner confirmation); status words that were not in the declared enum (`partly done`) rewritten as `in-progress`, and commit SHAs added to rows whose commits name them; ADR-021 (GPU context with CPU fallback) and ADR-022 (vendored servo-script patch); `docs/HANDOFF-2026-10-03.md` reduced to a pointer plus the resume steps; `justfile` recipes `live-eval`, `live-eval-plan`, `page-shot`, `probe-controls`, `inspect-case`, `agentdojo-check` and `collect-logs`.
+
+**Found and corrected:** T-253 ("never run on GitHub") was out of date: the GitHub Actions API shows CI on `main` at `c6f82b1` and `f4ed744` succeeding on every job, each followed by a successful Release run, with the three packages on the `latest` prerelease (built from `f4ed744`, which has the 2026-10-02 log file and quit watchdog but none of the 2026-10-03/04 work). T-236 ("the chat UI was never rendered") was out of date. The T-2xx table in the ledger was split in two by a stray rule. Three new findings: Windows writes no `ferrite.log` (T-298); the Linux package README names an `env.local` that a packaged app never reads (T-299); `just test-live` does not reach the one `#[ignore]`d test, which needs `--features engine-servo`.
+
+**Checked how:** script flags by running the scripts' `--help` and `--dry-run` modes (`doctor.sh --no-probe`, `setup-local.sh --dry-run --yes --no-laya`, `run-local.sh --dry-run`), the already-built `live_eval --help` and `--provider mock --plan`, `import_agentdojo.py --help`, the argument parsers and key handler in the source, the workflows and `package.sh` by reading, and the Actions API read-only. `scripts/check_no_archive_links.sh` and `scripts/check_purge.sh` are clean.
+
+**Not verified:** no `just` recipe was run (`just` is not installed here); nothing was run on macOS or Windows; no cargo build or test was run for this pass; the shortcuts were read from `handle_key_press`, not pressed.
