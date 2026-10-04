@@ -1,6 +1,6 @@
 <!--
 title: Reproduce it
-order: 7
+order: 11
 group: Evaluation
 summary: Re-run Ferrite's whole evaluation offline with two commands, regenerate the corpus, and run the optional live-provider experiment.
 -->
@@ -8,7 +8,7 @@ summary: Re-run Ferrite's whole evaluation offline with two commands, regenerate
 
 <h2>What you need</h2>
 <ul>
-  <li>A recent Rust toolchain. Optionally <a href="https://github.com/casey/just" rel="noopener"><code>just</code></a>; every recipe below is a one-line <code>cargo</code> command you can run directly.</li>
+  <li>A recent Rust toolchain. Optionally <a href="https://github.com/casey/just" rel="noopener"><code>just</code></a>; every recipe below is a one-line <code>cargo</code> or <code>python3</code> command you can run directly.</li>
   <li>The repository: <code>git clone https://github.com/rayanjainn/Ferrite-Browser</code>.</li>
   <li>Nothing else. The evaluation crate is Servo-free, so none of this builds the browser engine.</li>
 </ul>
@@ -17,12 +17,17 @@ summary: Re-run Ferrite's whole evaluation offline with two commands, regenerate
 <pre><code>$ just eval
 # or:
 $ cargo run -p ferrite-eval --example eval</code></pre>
-<p>This runs every case under all four modes (the 938-case corpus, 3,488 executions), appends one entry per execution to a hash-chained audit log, verifies the chain, and writes the report to <code>target/eval-report/</code>:</p>
+<p>This runs every case under all four modes (the 938-case corpus, 3,488 executions), appends one entry per execution to a hash-chained audit log, verifies the chain, and writes the report to <code>target/eval-report/</code> (or <code>$FERRITE_EVAL_OUT_DIR</code>):</p>
 <dl class="defs">
   <dt>EVAL_REPORT.md</dt><dd>The metrics tables: per-mode, per-tier, mode-pair tests with Holm correction and effect sizes, the consent-policy sweep.</dd>
   <dt>eval_report.csv</dt><dd>One row per execution, for your own analysis.</dd>
   <dt>audit.db</dt><dd>The audit log the run produced; its chain is verified as part of the run.</dd>
+  <dt>corpus.db</dt><dd>The SQLite store of the cases and their execution records.</dd>
 </dl>
+<div class="callout warn">
+  <h4>Unset your model variables first</h4>
+  <p>The reproducible numbers come from the rules-only fingerprint with no model. If <code>FERRITE_MODEL_SMALL</code>, <code>FERRITE_MODEL_MAIN</code> and a provider key are set in your environment, the fingerprint's prediction layer makes <strong>live calls</strong> instead and the run is no longer reproducible. The scripted agent never calls a model either way.</p>
+</div>
 
 <h2>Run the runtime-guard experiment</h2>
 <pre><code>$ just guard-eval
@@ -42,19 +47,29 @@ $ cargo test --workspace</code></pre>
 <p>Runs one case file under every mode it defines and prints each layer's caught or missed verdict, the final outcome, and whether that matches what the case's authored ground truth implies. It is the quickest way to see <em>why</em> a particular attack was or was not contained.</p>
 
 <h2>Regenerate the corpus</h2>
-<pre><code>$ python3 scripts/gen_redteam_corpus.py</code></pre>
-<p>Writes the 909 generated cases to <code>crates/ferrite-eval/tests/corpus_redteam/</code> from the matrix described in <a href="{{ROOT}}docs/evaluation.html#the-corpus">Evaluation</a>. Labels come from the capability lowering table, not from running the defense. <code>corpus_redteam_validate</code> checks the table and every task's capability set against the real code.</p>
+<pre><code>$ python3 scripts/gen_redteam_corpus.py            # or: just redteam-corpus
+$ python3 scripts/gen_redteam_corpus.py --check    # or: just redteam-corpus-check</code></pre>
+<p>Writes the 909 generated cases to <code>crates/ferrite-eval/tests/corpus_redteam/</code> from the matrix described in <a href="{{ROOT}}docs/evaluation.html#the-corpus">Evaluation</a>. Labels come from the capability lowering table, not from running the defense. <code>corpus_redteam_validate</code> checks the table and every task's capability set against the real code. <code>--check</code> fails if the files on disk differ from a fresh generation; on the current tree it reports that all 909 files match.</p>
+
+<h2>Check the AgentDojo import</h2>
+<p>The 1,046-case AgentDojo corpus (see <a href="{{ROOT}}docs/evaluation.html#agentdojo-in-full">Evaluation</a>) is checked in. Its structure is verified offline by <code>cargo test -p ferrite-eval --test agentdojo_full_validate</code>. Verifying that it matches AgentDojo needs the dataset, which is not in this repository:</p>
+<pre><code>$ git clone https://github.com/ethz-spylab/agentdojo /tmp/agentdojo
+$ git -C /tmp/agentdojo checkout 089ed468cf3ed0322acc66b0211f26d9d90dbf60
+$ python3 scripts/import_agentdojo.py --src /tmp/agentdojo --check</code></pre>
+<p>It parses AgentDojo's task files and never runs any of its code. Without <code>--check</code> it rewrites the corpus; an importer run against another commit refuses unless you pass <code>--allow-other-commit</code>, and the output must not be committed.</p>
 
 <h2>Try a defense mode in the app</h2>
 <p>The defense mode is read once at startup from <code>FERRITE_DEFENSE</code>: <code>on</code> (the default), <code>off</code>, <code>sanitizer_only</code> or <code>loop_only</code>. These are the same four conditions the evaluation compares, so you can reproduce the contrast on a page you control.</p>
 
-<h2>The optional live-provider run</h2>
-<p>With a model configured, the fingerprint's prediction layer makes real network calls instead of running rules-only:</p>
+<h2>The optional live-provider runs</h2>
+<p>There are two ways to involve a real model. Neither is reproducible byte for byte, because a live model's answer is not pinned the way a scripted corpus is, and neither is ever blended into the headline numbers.</p>
+<p><strong>The fingerprint's prediction layer, in the same evaluation:</strong></p>
 <pre><code>$ FERRITE_MODEL_SMALL=&lt;a tag your account serves&gt; \
   FERRITE_MODEL_MAIN=&lt;a tag your account serves&gt; \
   OLLAMA_API_KEY=&lt;your key&gt; \
   cargo run -p ferrite-eval --example eval</code></pre>
-<p>This run is <strong>not</strong> reproducible byte for byte: a live model's answer is not pinned the way a scripted corpus is. It is reported separately and is never blended into the headline numbers. <code>just models</code> lists the tags your key can reach.</p>
+<p><code>just models</code> lists the tags your key can reach.</p>
+<p><strong>A real model as the agent</strong> is a separate runner, with batches, a cost preview and resume: see <a href="{{ROOT}}docs/live-evaluation.html">Live evaluation</a>. It has not been run against a real provider yet.</p>
 
 <div class="callout note">
   <h4>What “reproduced” should mean</h4>

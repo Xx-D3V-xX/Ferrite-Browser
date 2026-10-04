@@ -15,6 +15,7 @@ description: Ferrite is a browser for AI agents that contains a hijacked agent b
       </div>
       <div class="hero-note">
         <span>{{icon:check}}Bring your own model: Ollama or Gemini</span>
+        <span>{{icon:check}}macOS, Windows and Linux</span>
         <span>{{icon:check}}Open source</span>
         <span>{{icon:check}}Research prototype, with <a href="{{ROOT}}docs/limits.html">its limits published</a></span>
       </div>
@@ -80,15 +81,60 @@ description: Ferrite is a browser for AI agents that contains a hijacked agent b
           <li>{{icon:check}}<span><b>Unforgeable by content.</b> The prompt is drawn by the browser, not the page, and only your own words feed the prediction.</span></li>
           <li>{{icon:check}}<span><b>Fail to empty.</b> A model error, a timeout or a missing key empties the prediction, so more actions ask you, never fewer.</span></li>
           <li>{{icon:check}}<span><b>No script escape hatch.</b> Running arbitrary JavaScript can synthesize any other action, so it is never part of any prediction at any scope.</span></li>
+          <li>{{icon:check}}<span><b>It asks again during the real run.</b> The dry run cannot see a page that only exists in the real run, so an action outside the prediction pauses the agent with <i>Don’t allow</i>, <i>Allow once</i> or <i>Allow for task</i>.</span></li>
         </ul>
         <p style="margin-top:22px"><a class="btn btn-ghost btn-sm" href="{{ROOT}}docs/how-it-works.html">Read the full design {{icon:arrow}}</a></p>
       </div>
-      <figure class="shot" style="margin:0 auto">
-        <img class="theme-shot-light" src="{{ROOT}}static/img/consent-light.png" width="360" height="554" alt="Ferrite's consent panel listing two unexpected actions: using js.execute and contacting attacker.example, each with Reject and Approve buttons." loading="lazy">
-        <img class="theme-shot-dark" src="{{ROOT}}static/img/consent-dark.png" width="360" height="554" alt="Ferrite's consent panel listing two unexpected actions: using js.execute and contacting attacker.example, each with Reject and Approve buttons." loading="lazy">
-        <figcaption>The real consent panel, rendered from the app.</figcaption>
+      <figure class="shot" style="margin:0 auto;max-width:386px">
+        <img class="theme-shot-light" src="{{ROOT}}static/img/approval-light.png" width="386" height="725" alt="Ferrite's review panel titled Review before running, listing two unexpected actions: using js.execute, already rejected, and contacting attacker.example, still undecided. Each has Reject and Approve buttons; Proceed with approved is disabled until both are decided." loading="lazy">
+        <img class="theme-shot-dark" src="{{ROOT}}static/img/approval-dark.png" width="386" height="725" alt="Ferrite's review panel titled Review before running, listing two unexpected actions: using js.execute, already rejected, and contacting attacker.example, still undecided. Each has Reject and Approve buttons; Proceed with approved is disabled until both are decided." loading="lazy">
+        <figcaption>The review panel, drawn by the app's own interface code from sample state (a dry run that reached for <code>js.execute</code> and <code>attacker.example</code>). A coloured rule shows where each item stands: amber undecided, red rejected, green approved.</figcaption>
       </figure>
     </div>
+  </div>
+</section>
+
+<!-- ═══ The browser ═══ -->
+<section id="browser">
+  <div class="wrap">
+    <div class="sec-head">
+      <span class="eyebrow">The browser</span>
+      <h2>A browser around the defense, with tools for when a page misbehaves.</h2>
+      <p>Ferrite renders with the Servo engine and wraps it in an ordinary browser: tabs, an address bar that searches Google, find, zoom, bookmarks, and an agent panel on the side. It is a young engine, so some sites will look wrong. When one does, you can see why.</p>
+    </div>
+
+    <figure class="shot wide" style="margin-top:8px">
+      <img class="theme-shot-light" src="{{ROOT}}static/img/browser-light.png" width="1280" height="800" alt="The Ferrite window: a tab strip with four tabs, a toolbar with back, forward, reload, the address bar, the Agent button, an audit shield and a menu, and this website rendered below." loading="lazy">
+      <img class="theme-shot-dark" src="{{ROOT}}static/img/browser-dark.png" width="1280" height="800" alt="The Ferrite window in its dark theme: a tab strip with four tabs, a toolbar with back, forward, reload, the address bar, the Agent button, an audit shield and a menu, and this website rendered below." loading="lazy">
+      <figcaption>The tab strip and toolbar, drawn by the app's own interface code from sample state (the other tabs are placeholders). The page is a real engine render of this website, served from localhost. Rendered on Linux.</figcaption>
+    </figure>
+
+    <div class="cards c3" style="margin-top:34px">
+      <div class="card"><div class="ico">{{icon:terminal}}</div><h3>DevTools</h3><p>Console, Network and Engine tabs in a bottom panel. <kbd>Cmd</kbd>+<kbd>Opt</kbd>+<kbd>I</kbd> on macOS, <kbd>Ctrl</kbd>+<kbd>Shift</kbd>+<kbd>I</kbd> elsewhere, or <kbd>Cmd/Ctrl</kbd>+<kbd>J</kbd>. <kbd>F12</kbd> opens the audit log instead.</p></div>
+      <div class="card"><div class="ico">{{icon:layers}}</div><h3>Page controls</h3><p>Dropdowns, <code>alert</code>/<code>confirm</code>/<code>prompt</code>, colour and file pickers and right-click menus are drawn by Ferrite as overlays. The page is blocked until you answer, and its text is shown as plain text.</p></div>
+      <div class="card"><div class="ico">{{icon:list}}</div><h3>Logs you can send</h3><p>Launched without a terminal, Ferrite writes a log file, and a crash leaves the page frozen under a banner with Reload. A script gathers the log, crash reports and system details into one zip.</p></div>
+    </div>
+
+    <p class="tiny" style="margin-top:22px">Pages are drawn on the CPU, except on macOS, where Ferrite tries the GPU first and falls back to the CPU if a startup self-test fails (<code>FERRITE_RENDERER=gpu|cpu|auto</code> overrides the choice). The GPU path has never run on a real GPU or on a Mac, and no speed-up has been measured.</p>
+
+    <div style="margin-top:72px;max-width:760px">
+      <span class="eyebrow">DevTools</span>
+      <h2 style="margin:14px 0 14px">See what the page said, and what it asked for.</h2>
+      <p class="muted">The Console keeps every message the page printed, at every level, per tab, with a filter, level chips and a prompt that runs JavaScript in the page. The Network tab lists each request as it starts. The Engine tab lists panics and pages whose script thread died.</p>
+      <ul class="checks">
+        <li>{{icon:check}}<span><b>Copy, save or open the folder.</b> A tab can be copied as text or saved as a log file in the app's log folder.</span></li>
+        <li>{{icon:check}}<span><b>Resizable panels.</b> Drag the edge of the agent, library, settings, DevTools or audit panel; double-click it to reset. Sizes are remembered.</span></li>
+        <li>{{icon:block}}<span><b>The Network tab is incomplete.</b> It shows method, type and URL, but not status, size or timing: the engine does not report them yet.</span></li>
+      </ul>
+      <p style="margin-top:22px"><a class="btn btn-ghost btn-sm" href="{{ROOT}}docs/debugging.html">Debugging and logs {{icon:arrow}}</a></p>
+    </div>
+    <figure class="shot wide">
+      <img class="theme-shot-light" src="{{ROOT}}static/img/devtools-light.png" width="1280" height="800" alt="Ferrite with the DevTools Console open under a shop page. It lists six messages (a log, an info, a warning, a debug line and two errors), then a typed expression and its result." loading="lazy">
+      <img class="theme-shot-dark" src="{{ROOT}}static/img/devtools-dark.png" width="1280" height="800" alt="Ferrite with the DevTools Console open under a shop page in the dark theme. It lists six messages (a log, an info, a warning, a debug line and two errors), then a typed expression and its result." loading="lazy">
+      <figcaption>The Console. The six page messages are what the engine really reported for a local demo page; the typed <code>document.title</code> row and its result are sample state.</figcaption>
+    </figure>
+
+    <p style="margin-top:56px"><a class="btn btn-ghost btn-sm" href="{{ROOT}}docs/using-the-browser.html">Using the browser: shortcuts, panels, page controls {{icon:arrow}}</a></p>
   </div>
 </section>
 
@@ -111,7 +157,7 @@ description: Ferrite is a browser for AI agents that contains a hijacked agent b
     <div class="split" style="margin-top:64px;align-items:start">
       <div>
         <h3 style="margin-bottom:6px">Attack success rate by defense mode</h3>
-        <p class="tiny" style="margin-bottom:22px">809 attacks per mode. Lines mark Wilson 95% intervals. Lower is better.</p>
+        <p class="tiny" style="margin-bottom:22px">809 attacks (806 scored in the two isolated modes). Lines mark Wilson 95% intervals. Lower is better.</p>
         <div class="bars" role="img" aria-label="Attack success rate: Off 100 percent, SanitizerOnly 16.7, LoopOnly 15.1, full stack 7.8">
           <div class="bar"><div class="name">Off<small>no defense</small></div><div class="track"><div class="fill ember" style="--w:100%"></div></div><div class="val">100%</div></div>
           <div class="bar"><div class="name">Sanitizer only<small>text filter alone</small></div><div class="track"><div class="fill" style="--w:16.7%"></div><div class="ci" style="--lo:14.3%;--hi:19.5%"></div></div><div class="val">16.7%</div></div>
@@ -130,7 +176,12 @@ description: Ferrite is a browser for AI agents that contains a hijacked agent b
       </div>
     </div>
 
-    <div class="callout warn" style="margin-top:56px">
+    <div class="cards c2" style="margin-top:56px">
+      <div class="card"><div class="ico">{{icon:flask}}</div><h3>A real model in the loop</h3><p>The numbers above come from a scripted agent. A separate runner, <code>live_eval</code>, puts a real model in the agent's seat and in the predictor's: Gemini or Ollama, in batches under a hard call cap, with rate-limit backoff and resume. <code>--plan</code> prices a selection first and calls nothing. <strong>No real model has been run through it yet</strong>, so there are no results to show. <a href="{{ROOT}}docs/live-evaluation.html">How it works</a></p></div>
+      <div class="card"><div class="ico">{{icon:scale}}</div><h3>All of AgentDojo, imported</h3><p>1,046 cases (949 attacks and 97 benign twins) from AgentDojo v1.2.2 at a pinned commit, parsed and never executed, with labels from the specification rather than from Ferrite's own output. They feed the live runner and are <strong>not part of the 938-case headline corpus</strong>, which still holds only three external cases. <a href="{{ROOT}}docs/evaluation.html#agentdojo-in-full">Details and caveats</a></p></div>
+    </div>
+
+    <div class="callout warn" style="margin-top:40px">
       <h4>Read this before you quote a number</h4>
       <ul style="margin:8px 0 0">
         <li><strong>The agent is scripted, not a real model.</strong> The corpus runner makes the agent carry out each case's authored deviation, so the numbers say nothing about whether a real model would take the bait. That is the base model's robustness, and Ferrite does not claim it.</li>
@@ -157,13 +208,13 @@ description: Ferrite is a browser for AI agents that contains a hijacked agent b
           <li>{{icon:check}}<span><b>Models come from your account.</b> “Load models” asks the provider what your key can use, which also checks that the key works.</span></li>
           <li>{{icon:check}}<span><b>One model or two.</b> A small fast model predicts what the task needs; a stronger one drives the browser. Use one for both if you prefer.</span></li>
         </ul>
-        <p class="tiny" style="margin-top:18px">The agent sends page content to whichever model you choose, because it needs it to act. Environment variables still override the saved choice, for CI and power users.</p>
+        <p class="tiny" style="margin-top:18px">The agent sends page content to whichever model you choose, because it needs it to act. Environment variables still override the saved choice, for CI and power users. Only Ollama and Gemini are supported: there is no OpenAI-compatible or Anthropic backend yet.</p>
         <p style="margin-top:18px"><a class="btn btn-ghost btn-sm" href="{{ROOT}}docs/models-and-settings.html">Settings reference {{icon:arrow}}</a></p>
       </div>
-      <figure class="shot" style="margin:0 auto">
-        <img class="theme-shot-light" src="{{ROOT}}static/img/settings-light.png" width="380" height="900" alt="Ferrite's Settings drawer showing a connected Ollama Cloud provider, a saved key, a loaded model list and a Save button." loading="lazy">
-        <img class="theme-shot-dark" src="{{ROOT}}static/img/settings-dark.png" width="380" height="900" alt="Ferrite's Settings drawer showing a connected Ollama Cloud provider, a saved key, a loaded model list and a Save button." loading="lazy">
-        <figcaption>The real Settings drawer, rendered from the app.</figcaption>
+      <figure class="shot" style="margin:0 auto;max-width:380px">
+        <img class="theme-shot-light" src="{{ROOT}}static/img/settings-light.png" width="380" height="915" alt="Ferrite's Settings drawer showing a connected Ollama Cloud provider, a saved key, a loaded model list, a Save and use button, and Appearance and Compatibility sections." loading="lazy">
+        <img class="theme-shot-dark" src="{{ROOT}}static/img/settings-dark.png" width="380" height="915" alt="Ferrite's Settings drawer in the dark theme showing a connected Ollama Cloud provider, a saved key, a loaded model list, a Save and use button, and Appearance and Compatibility sections." loading="lazy">
+        <figcaption>The Settings drawer, rendered from sample state (the model names are placeholders, not recommendations).</figcaption>
       </figure>
     </div>
   </div>
@@ -195,16 +246,22 @@ description: Ferrite is a browser for AI agents that contains a hijacked agent b
       <div class="platform" data-platform="linux" data-suffix="linux-x64.tar.gz">
         <div class="os">{{icon:terminal}}Linux</div>
         <div class="meta" data-meta>x64 · tar.gz</div>
-        <p class="how">Extract, then run <code>./ferrite</code>, or <code>./install.sh</code> to add a launcher entry. Needs a graphical session.</p>
+        <p class="how">Extract, then run <code>./ferrite</code>, or <code>./install.sh</code> to add a launcher entry. Needs a graphical session (X11 or Wayland) with OpenGL/EGL, and a few system libraries listed in the package's <code>README.txt</code>.</p>
         <a class="btn btn-primary" data-btn href="{{REPO}}/releases/tag/latest" rel="noopener">{{icon:download}}Download for Linux</a>
       </div>
     </div>
 
+    <div class="callout warn" style="margin-top:40px">
+      <h4>Check which commit a build comes from</h4>
+      <p>The release page names the commit. The build published on 2026-10-02 (commit <code>f4ed744</code>) predates the DevTools panel, resizable panels, page-control overlays, the crash banner, the GPU renderer, the display-scale fix, Google address-bar search and the log-collection script shown on this site. They are in the source and arrive in the next build that CI publishes. Until then, build from source to try them.</p>
+    </div>
+
     <h3 style="margin:56px 0 6px">Or build it from source</h3>
-    <p class="muted">You need a recent Rust toolchain. The first build compiles the Servo engine, which takes a while.</p>
+    <p class="muted">You need a recent Rust toolchain (the repository pins stable) and a C toolchain with <code>cmake</code> and <code>pkg-config</code>. The first build compiles the Servo engine: plan on 20 to 60 minutes and 10 GB or more.</p>
 <pre><code>$ git clone https://github.com/rayanjainn/Ferrite-Browser
 $ cd Ferrite-Browser
 $ cargo run --release -p ferrite-shell --features ferrite-servo/servo</code></pre>
-    <p class="tiny">Without the Servo feature the whole defense, the evaluation harness and the test suite still build and run (<code>cargo test --workspace</code>), with no network and no API key.</p>
+    <p class="tiny">With <a href="https://github.com/casey/just" rel="noopener"><code>just</code></a> installed, <code>just setup-servo</code> then <code>just run-fast --no-model-check</code> does the same through the helper scripts; connect a model from Settings once it opens. <a href="{{ROOT}}docs/run-it.html">Run it from source</a> lists every recipe and what it needs.</p>
+    <p class="tiny">Without the Servo feature the whole defense, the evaluation harness and the test suite still build and run (<code>just test</code>, or <code>cargo test --workspace</code>), with no network and no API key. That build opens the interface but cannot render web pages.</p>
   </div>
 </section>

@@ -1,0 +1,85 @@
+<!--
+title: Debugging and logs
+order: 6
+group: Use
+summary: Find out why a page misbehaves: the DevTools Console, Network and Engine tabs, where the log file is, how to collect logs and a crash report to send, and what Ferrite cannot tell you yet.
+-->
+<p class="lede">A page that looks wrong, a site that will not open, an app that froze: this page is how to find out what the page or the engine said about it, and what to send when you ask for help. Ferrite keeps a console and a request log per tab, a log file for runs without a terminal, and a script that gathers everything into one zip.</p>
+
+<div class="callout note">
+  <h4>Which build has this</h4>
+  <p>The log file is in the build published on 2026-10-02 (commit <code>f4ed744</code>). DevTools, the crash banner and the log-collection script are newer and are not in it yet; build from source to use them (<a href="{{ROOT}}docs/run-it.html">Run it from source</a>). Screenshots here were rendered on Linux.</p>
+</div>
+
+<h2>DevTools</h2>
+<p>Open the panel with <kbd>Cmd</kbd>+<kbd>Opt</kbd>+<kbd>I</kbd> on macOS or <kbd>Ctrl</kbd>+<kbd>Shift</kbd>+<kbd>I</kbd> elsewhere, with <kbd>Cmd/Ctrl</kbd>+<kbd>J</kbd>, or from the menu (<em>Developer tools</em>). It is a bottom drawer with three tabs; counts show on the tab labels. Drag its top edge to resize it.</p>
+<p><kbd>F12</kbd> does <strong>not</strong> open DevTools. It opens the <em>Audit</em> panel (the model-call timeline and the hash-chained security log), so a habit from Chrome will show you something else. Whether <kbd>F12</kbd> should open DevTools is an open decision.</p>
+
+<figure class="shot wide">
+  <img class="theme-shot-light" src="{{ROOT}}static/img/devtools-light.png" width="1280" height="800" alt="Ferrite with the DevTools Console open under a shop page. It lists six messages (a log, an info, a warning, a debug line and two errors), then a typed expression and its result." loading="lazy">
+  <img class="theme-shot-dark" src="{{ROOT}}static/img/devtools-dark.png" width="1280" height="800" alt="Ferrite with the DevTools Console open under a shop page in the dark theme. It lists six messages (a log, an info, a warning, a debug line and two errors), then a typed expression and its result." loading="lazy">
+  <figcaption>The Console. The six page messages are what the engine really reported for a local demo page (found by running the page through <code>page_shot</code>); the typed <code>document.title</code> row and its result are sample state.</figcaption>
+</figure>
+
+<h3>Console</h3>
+<ul>
+  <li>Every message the active tab's page printed, at every level (log, info, warn, error, debug), plus uncaught exceptions, which carry the file, line and column. Each tab has its own log.</li>
+  <li>A filter box, level chips with counts (All, Errors, Warnings, Info, Debug) and a <em>Preserve log</em> checkbox. Without it, a navigation starts the log afresh; with it, the log is kept and the navigation is marked.</li>
+  <li>Identical consecutive messages fold into one row with a count; long messages fold to a few lines with <em>Show more</em>.</li>
+  <li>A prompt, <em>Run JavaScript on this page</em>: type an expression and press <kbd>Enter</kbd> or <em>Run</em>; <kbd>↑</kbd> and <kbd>↓</kbd> recall earlier input (the last 100). This is <strong>you</strong> running script in the page, not the agent.</li>
+  <li>Bounds: at most 5,000 rows per tab, 4,000 characters per message and 8 MiB of message text per tab; the oldest rows go first.</li>
+</ul>
+
+<h3>Network</h3>
+<figure class="shot wide">
+  <img class="theme-shot-light" src="{{ROOT}}static/img/devtools-network-light.png" width="1280" height="302" alt="The DevTools Network tab listing five requests (a document, a stylesheet, a script, an image and a fetch) with a notice that status, size and timing are not reported by the engine yet." loading="lazy">
+  <img class="theme-shot-dark" src="{{ROOT}}static/img/devtools-network-dark.png" width="1280" height="302" alt="The DevTools Network tab in the dark theme listing five requests (a document, a stylesheet, a script, an image and a fetch) with a notice that status, size and timing are not reported by the engine yet." loading="lazy">
+  <figcaption>The Network tab. The five requests are the ones the engine reported for the local demo page; the times shown are sample state.</figcaption>
+</figure>
+<p>Each request the tab made, <em>as it starts</em>: relative time, method, type and URL, with a filter box and type chips (Doc, JS, CSS, Img, Font, Media, Other). <code>fetch()</code> and XHR requests fall under <em>Other</em>.</p>
+<div class="callout warn">
+  <h4>What the Network tab cannot tell you</h4>
+  <p>There is <strong>no status code, size or duration</strong>, and so no waterfall: the engine's response callback is not wired up yet, and the panel says so. A request that fails or returns 404 is listed like any other. For a failed load, look in the Console, which is where the page reports it.</p>
+</div>
+
+<h3>Engine</h3>
+<p>Panics on engine threads and pages whose script thread died, this session, each with the thread, message and location, and a backtrace you can show or hide. The engine's own threads panic quietly: without this tab the symptom is a page that simply stops answering.</p>
+
+<h3>Header buttons</h3>
+<dl class="defs">
+  <dt>Copy all</dt><dd>Copies everything in the current tab to the clipboard as text.</dd>
+  <dt>Save log…</dt><dd>Writes the current tab to <code>ferrite-&lt;console|network|engine&gt;-tab&lt;N&gt;-&lt;date-time&gt;.log</code> in the log folder (below).</dd>
+  <dt>Open log folder</dt><dd>Opens that folder in Finder, Explorer or your file manager.</dd>
+</dl>
+<p>Warnings and errors from the console are also written to the log file, as lines like <code>[console:error] tab 1: …</code>, at most 20 per tick of the interface so one noisy page cannot flood it.</p>
+
+<h2>The log file</h2>
+<p>A browser launched from Finder, a Start menu or a launcher has no terminal, so its standard error would go nowhere. Ferrite points it at a file instead. Launched from a terminal, it prints to the terminal and writes <strong>no file</strong>.</p>
+<div class="table-wrap"><table>
+<thead><tr><th>OS</th><th>Folder</th><th>Files</th></tr></thead>
+<tbody>
+<tr><td>macOS</td><td><code>~/Library/Logs/Ferrite/</code> (Console.app shows it under <em>Log Reports</em>)</td><td><code>ferrite.log</code>, and the previous run as <code>ferrite.previous.log</code></td></tr>
+<tr><td>Linux</td><td><code>$XDG_STATE_HOME/ferrite/</code>, otherwise <code>~/.local/state/ferrite/</code></td><td>the same two names</td></tr>
+<tr><td>Windows</td><td><code>%LOCALAPPDATA%\Ferrite\logs</code> is where DevTools saves logs</td><td><strong>No <code>ferrite.log</code> is written on Windows</strong>: redirecting standard error to a file is Unix-only in the current code. Run it from a terminal to see the output.</td></tr>
+</tbody></table></div>
+<p>The file starts with a banner naming the version, OS, architecture and process id. Panics always carry a backtrace (<code>RUST_BACKTRACE=1</code> is set for you when you have not set it). If the interface stops ticking for 8 seconds, one line says so (<code>the UI has not responded for …</code>), and one more when it recovers. When you close the window, the process ends within 3 seconds whatever the engine is doing, and says so in the log if it had to. Whether that watchdog also covers <kbd>Cmd</kbd>+<kbd>Q</kbd> on macOS, which goes through the system menu, is not known.</p>
+<p>The first line to look for on a new machine is the renderer line (see <a href="{{ROOT}}docs/run-it.html#the-renderer-gpu-or-cpu">the renderer</a>): it says whether the GPU or the CPU is drawing pages, and why.</p>
+
+<h2>Collecting logs to send</h2>
+<pre><code>$ bash scripts/collect-logs.sh                                      # from a checkout
+$ bash /Applications/Ferrite.app/Contents/Resources/collect-logs.sh  # from the macOS app</code></pre>
+<p>(or <code>just collect-logs</code> in a checkout.) It writes one zip, <code>ferrite-logs-&lt;date-time&gt;.zip</code>, to your Desktop (your home folder if there is none), and prints its path. It contains:</p>
+<ul>
+  <li><code>ferrite.log</code> and <code>ferrite.previous.log</code>, or a <code>NO-LOG.txt</code> saying there is none;</li>
+  <li>on macOS, the three newest Ferrite crash reports from <code>~/Library/Logs/DiagnosticReports</code>;</li>
+  <li>on macOS, if Ferrite is running <em>right now</em>, a 5-second stack sample of it: <strong>run the script while the app is frozen</strong>;</li>
+  <li><code>system.txt</code>: on macOS the OS version, hardware and display listing; elsewhere <code>uname</code> and the CPU.</li>
+</ul>
+<p>Nothing is uploaded, but the log can contain page URLs and console errors, so read it before you send it. The script needs <code>bash</code> and <code>zip</code>; it does not support Windows, and the sampling part is macOS only. The bundled copy is in the macOS app only. After a crash on macOS (exit code 139), <code>just crash-report</code> prints the exception and the crashing thread's stack from the newest report, with only Python's standard library.</p>
+
+<h2>Reporting a page that does not work</h2>
+<p>Useful, in order of usefulness: the address; the Console and Engine tabs (<em>Copy all</em>); whether the page shows the crash banner; the <code>[ferrite-render]</code> line and the first lines of the log; and the zip above. <code>page_shot</code> (see <a href="{{ROOT}}docs/run-it.html#looking-at-a-page-without-the-app">Run it from source</a>) reproduces a page load without the app.</p>
+<div class="callout warn">
+  <h4>GitHub still needs your log</h4>
+  <p>On the owner's Mac, GitHub does not open and the cause is unknown. The first log was empty because the app printed nothing; a script-thread panic that was fixed in a vendored engine patch could not be reproduced, so it is not proven to be the cause. The sandbox this was investigated in blocks GitHub's asset host, so the real page could not be loaded there. What would settle it is the log (or the collect-logs zip) from a build that has the console and request logging, captured right after loading GitHub. The same goes for a Google results page pinned to the left edge, which is believed to be the missing display scale but has never been seen directly.</p>
+</div>

@@ -1,0 +1,100 @@
+<!--
+title: Run it from source
+order: 3
+group: Start
+summary: Build and run Ferrite from source with just or plain cargo, which recipe to use when, the GPU and CPU renderer switch, and how the macOS, Windows and Linux release builds are made.
+-->
+<p class="lede">Two ways to a running browser: download a build, or build it yourself. This page is the second, plus how the downloadable builds are made. Every command below was read from the repository's <code>justfile</code>, scripts or workflows; where something has not been run, it says so.</p>
+
+<h2>Two builds</h2>
+<div class="table-wrap"><table>
+<thead><tr><th>Build</th><th>What it is for</th><th>Cost</th></tr></thead>
+<tbody>
+<tr><td><strong>Without Servo</strong> (the default)</td><td>The interface, the agent loop, the defense and the evaluation. <strong>It cannot render web pages</strong>: the engine stub refuses to start.</td><td>About two minutes cold, and no network or API key for the test suite.</td></tr>
+<tr><td><strong>With Servo</strong> (<code>--features ferrite-servo/servo</code>)</td><td>Real web rendering. This is what the downloadable builds are, in the release profile.</td><td>The first build takes 20 to 60 minutes and 10 GB or more of disk. Later builds are incremental.</td></tr>
+</tbody></table></div>
+<p>You need <code>git</code>, a Rust toolchain (the repository pins <em>stable</em> with <code>rustfmt</code>, <code>clippy</code> and <code>llvm-tools</code>), <code>python3</code>, and a C toolchain with <code>cmake</code> and <code>pkg-config</code>. On Linux the Servo build also needs the engine's own system libraries; the setup script points to the list but does not install them. <a href="https://github.com/casey/just" rel="noopener"><code>just</code></a> is the command surface (<code>just --list</code> prints every recipe); each recipe is a thin wrapper, so you can run the plain command instead.</p>
+<div class="callout note">
+  <h4>Windows</h4>
+  <p>The build, test, evaluation and probe recipes are plain <code>cargo</code> or <code>python3</code> commands. The local helper recipes (<code>setup*</code>, <code>run-local</code>, <code>run-fast</code>, <code>run-all</code>, <code>models-local</code>, <code>laya-*</code>, <code>doctor</code>, <code>collect-logs</code>, <code>crash-report</code>) call bash scripts and have not been run on Windows. On Windows use the downloaded build, or <code>cargo run --release -p ferrite-shell --features ferrite-servo/servo</code>.</p>
+</div>
+
+<h2>The shortest path to real pages</h2>
+<pre><code>$ cargo run --release -p ferrite-shell --features ferrite-servo/servo</code></pre>
+<p>It opens the browser. No environment is needed: connect a model afterwards from Settings (<kbd>Cmd/Ctrl</kbd>+<kbd>,</kbd>). With <code>just</code>, the equivalent through the helper scripts is:</p>
+<pre><code>$ just setup-servo            # checks your toolchain, builds with Servo, writes .ferrite/env.local
+$ just run-fast --no-model-check</code></pre>
+
+<h2>First-time setup</h2>
+<div class="table-wrap"><table>
+<thead><tr><th>Recipe</th><th>What it does</th></tr></thead>
+<tbody>
+<tr><td><code>just setup</code></td><td>Checks the toolchain, builds <code>ferrite-shell</code> without Servo, optionally sets up the local Laya server, and creates <code>.ferrite/env.local</code> from <code>scripts/local.env.example</code> (never overwritten). Safe to re-run: each step checks first. With neither <code>--with-servo</code> nor <code>--no-servo</code>, an interactive run asks; a non-interactive one builds without Servo.</td></tr>
+<tr><td><code>just setup-servo</code></td><td>The same, with the real engine. Ctrl-C is safe: re-running continues where cargo left off.</td></tr>
+<tr><td><code>just setup-all</code></td><td>Servo and Laya together, all inside the repository folder.</td></tr>
+<tr><td><code>just doctor</code></td><td>A read-only checklist: tools, build, configuration, Laya and disk. It never prints a key. <code>--fix-hints</code> says how to fix each problem.</td></tr>
+</tbody></table></div>
+<p>Flags pass through, for example <code>just setup --dry-run --yes</code> prints every action it would take and runs none. The scripts never use <code>sudo</code>: they offer to install <code>rustup</code> and Homebrew packages only after you say yes or pass <code>--yes</code>. All local state lives under <code>$FERRITE_HOME</code>, which the scripts default to the repository's gitignored <code>.ferrite/</code>, so <code>rm -rf .ferrite</code> removes it.</p>
+
+<h2>Which run recipe</h2>
+<div class="table-wrap"><table>
+<thead><tr><th>You want</th><th>Run</th><th>Notes</th></tr></thead>
+<tbody>
+<tr><td>Real pages, every day, fast</td><td><code>just run-fast</code></td><td>Release profile with Servo. The engine runs several times faster optimised; the exact speed-up of this recipe has not been measured.</td></tr>
+<tr><td>Real pages, working on Ferrite</td><td><code>just run-all</code></td><td>Dev profile with Servo, plus Laya if it is set up.</td></tr>
+<tr><td>Whatever setup built last</td><td><code>just run-local</code></td><td>Reads <code>env.local</code>, starts Laya if it is set up.</td></tr>
+<tr><td>The interface only</td><td><code>just run</code></td><td>Without Servo: no web rendering. Arguments after <code>run</code> go to the binary.</td></tr>
+<tr><td>A downloaded build</td><td>double-click, or <code>./ferrite</code></td><td>See below.</td></tr>
+</tbody></table></div>
+<p>The helper recipes load <code>$FERRITE_HOME/env.local</code> (plain <code>KEY=VALUE</code> lines read as data, never executed; only <code>FERRITE_*</code>, <code>OLLAMA_*</code>, <code>GEMINI_*</code> and <code>RUST_LOG</code> are honoured, and anything already exported in your shell wins). They then check that <code>FERRITE_MODEL_SMALL</code> and <code>FERRITE_MODEL_MAIN</code> are set and <strong>exit with instructions if they are not</strong>. Pass <code>--no-model-check</code> to open the browser anyway and connect a model from Settings instead. Other flags: <code>--no-laya</code>, <code>--servo</code> or <code>--no-servo</code>, <code>--wait SECONDS</code>, <code>--dry-run</code>.</p>
+<p>Model names are never defaulted, because providers retire them. <code>just models-local</code> lists the tags your Ollama endpoint serves (it needs a key, or a local Ollama).</p>
+<div class="callout warn">
+  <h4>A downloaded app does not read env.local</h4>
+  <p>The packaged apps ignore <code>env.local</code> and any <code>FERRITE_*</code> variable you did not export before launching them. Connect a model from the Settings drawer. (The <code>README.txt</code> inside the Linux package still says to put your key in <code>~/.ferrite/env.local</code>; that is out of date, the app never reads that file.)</p>
+</div>
+
+<h2>The renderer: GPU or CPU</h2>
+<p>Pages are drawn by the engine into an off-screen buffer. Which context it uses is chosen once per run, and the choice is written to the log:</p>
+<pre><code>[ferrite-render] GPU rendering (&lt;renderer name&gt;)
+[ferrite-render] the GPU path did not pass its self-test (&lt;error&gt;); using the CPU renderer
+[ferrite-render] CPU rendering (FERRITE_RENDERER=gpu to try the GPU)</code></pre>
+<dl class="defs">
+  <dt><code>FERRITE_RENDERER=auto</code></dt><dd>The default. <strong>Tries the GPU on macOS only</strong>, where the CPU path is Apple's generic software OpenGL, the likely reason pages felt slow. On Linux and Windows it uses the CPU renderer.</dd>
+  <dt><code>gpu</code></dt><dd>Try the GPU on any platform. The context proves itself first by clearing to a colour and reading it back, and falls back to the CPU renderer on any failure.</dd>
+  <dt><code>cpu</code></dt><dd>Never use the GPU. <code>hardware</code> and <code>software</code> are accepted spellings of <code>gpu</code> and <code>cpu</code>.</dd>
+</dl>
+<div class="callout warn">
+  <h4>Never run on a real GPU</h4>
+  <p>The GPU path is pixel-identical to the CPU path on Mesa's software OpenGL, which is all it has been run on. It has not run on a real GPU or on a Mac, and no speed-up has been measured. The first thing to check on a new build is that <code>[ferrite-render]</code> line in the log. The same release also tells the engine the window's display scale (a Retina page was previously laid out twice as wide as it looks) and sizes the style, layout and worker thread pools to the core count; neither has been timed on real hardware.</p>
+</div>
+
+<h2>Release builds</h2>
+<p>The downloadable builds come from two GitHub workflows, both started by hand:</p>
+<ol>
+  <li><strong>CI</strong> is manual only (Actions, <em>Run workflow</em>); there is no push, pull-request or schedule trigger. On Linux, Windows and macOS it runs format, lint (all targets, warnings denied), the full test suite and a Servo-free build, with unused-dependency, licence and doc-drift checks on Linux. Only if that passes everywhere does a second job build the <strong>release binary with Servo</strong> on each OS and package it.</li>
+  <li><strong>Release</strong> runs by itself when a manual CI run finishes, and publishes only if that run succeeded on every job. It replaces the rolling prerelease tagged <code>latest</code>, whose notes name the commit, branch and CI run. It never checks out or runs the CI run's code.</li>
+</ol>
+<div class="table-wrap"><table>
+<thead><tr><th>Platform</th><th>File</th><th>Contents and first launch</th></tr></thead>
+<tbody>
+<tr><td>macOS (Apple silicon)</td><td><code>ferrite-&lt;commit&gt;-macos-arm64.zip</code></td><td><code>Ferrite.app</code>, ad-hoc signed but <strong>not notarized</strong>, with the log-collection script in <code>Contents/Resources</code>. The first launch is blocked: open System Settings, Privacy &amp; Security, and click <em>Open Anyway</em>, or run <code>xattr -dr com.apple.quarantine /Applications/Ferrite.app</code>.</td></tr>
+<tr><td>Windows (x64)</td><td><code>ferrite-&lt;commit&gt;-windows-x64.zip</code></td><td><code>ferrite.exe</code> with its icon embedded. SmartScreen may ask once: choose <em>Run anyway</em>.</td></tr>
+<tr><td>Linux (x64)</td><td><code>ferrite-&lt;commit&gt;-linux-x64.tar.gz</code></td><td><code>ferrite</code>, an icon, a <code>.desktop</code> entry, <code>README.txt</code> and <code>install.sh</code>, which copies it into <code>~/.local</code>. Needs a graphical session (X11 or Wayland) with OpenGL/EGL and the shared libraries <code>README.txt</code> names (fontconfig, freetype, libxkbcommon, X11 and Wayland client libraries).</td></tr>
+</tbody></table></div>
+<p>Packaging is <code>scripts/package.sh &lt;macos|windows|linux&gt; &lt;label&gt; &lt;binary&gt;</code>; CI passes the short commit hash as the label. <strong>Not verified by the project:</strong> the packaged Windows and Linux apps on real machines. The macOS app is the one the owner runs, and it has been reported to crash and to need a force-quit; see <a href="{{ROOT}}docs/limits.html">Limits</a>. The latest published release was built from commit <code>f4ed744</code> on 2026-10-02 and does not yet contain the page controls, DevTools, resizable panels, crash banner, GPU renderer or the display-scale fix; it does contain the log file.</p>
+
+<h2>Checks before you change anything</h2>
+<div class="table-wrap"><table>
+<thead><tr><th>Recipe</th><th>What it does</th></tr></thead>
+<tbody>
+<tr><td><code>just check</code></td><td><code>cargo fmt --all --check</code>, <code>cargo clippy --workspace --all-targets -- -D warnings</code> and <code>cargo machete</code> (unused dependencies). It does not build Servo.</td></tr>
+<tr><td><code>just test</code></td><td><code>cargo test --workspace</code>. It needs no network and no API key. If you are short on disk, test one crate at a time (<code>cargo test -p ferrite-ui</code>): linking the whole workspace is what runs out of space.</td></tr>
+<tr><td><code>just audit</code></td><td><code>cargo deny check</code>: licences, advisories, duplicate versions. It needs the network for the advisory database.</td></tr>
+<tr><td><code>just ci</code></td><td><code>check</code> then <code>test</code>: the local equivalent of CI's lint and test job.</td></tr>
+</tbody></table></div>
+
+<h2>Looking at a page without the app</h2>
+<p><code>page_shot</code> loads a URL in the real engine and prints what happened (title, load time, console messages, a count of requests by kind) and writes a PNG. It needs the Servo build.</p>
+<pre><code>$ cargo run -p ferrite-servo --features servo --example page_shot -- \
+    https://example.com 8000 out.png 1280 800 1</code></pre>
+<p>The arguments are the URL, how long to run the engine in milliseconds, the output file, the frame size in device pixels and the display scale (<code>2</code> renders as a Retina screen would, so a 1280-pixel frame is a 640 CSS-pixel viewport). The other probes (<code>probe-input</code>, <code>probe-web-api</code>, <code>probe-engine</code>, <code>probe-controls</code>, <code>probe-profile</code>) drive the same real engine headlessly against local pages; <code>just --list</code> names them. They are not part of CI.</p>

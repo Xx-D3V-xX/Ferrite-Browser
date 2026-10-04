@@ -29,24 +29,29 @@ summary: What Ferrite is, the idea behind its defense against indirect prompt in
 <tr><td><code>ferrite-model</code></td><td>The model-provider seam: Mock, Replay, Ollama and Gemini backends, with cache, throttle, budget and trace decorators, plus the persisted <a href="{{ROOT}}docs/models-and-settings.html">settings</a>.</td></tr>
 <tr><td><code>ferrite-ipi</code></td><td>The defense itself: fingerprint, sanitizer, dry run, synthetic twin, comparator, runtime guard.</td></tr>
 <tr><td><code>ferrite-audit-log</code></td><td>The SHA-256 hash-chained, SQLite-backed audit log.</td></tr>
-<tr><td><code>ferrite-engine</code>, <code>-engine-servo</code>, <code>-servo</code></td><td>The engine-agnostic browser trait, and the Servo-backed implementations the live app runs.</td></tr>
+<tr><td><code>ferrite-engine</code>, <code>-engine-servo</code>, <code>-servo</code></td><td>The engine-agnostic browser trait, and the Servo-backed implementations the live app runs, including the per-tab console and request logs, page controls, crash notices and the GPU rendering context.</td></tr>
 <tr><td><code>ferrite-agent</code></td><td>The plan-act-observe loop and the agent's context handling.</td></tr>
-<tr><td><code>ferrite-ui</code>, <code>ferrite-shell</code></td><td>The Iced interface (tabs, address bar, agent sidebar, consent panel, settings) and the binary.</td></tr>
-<tr><td><code>ferrite-eval</code></td><td>The evaluation harness: corpus, adjudication, metrics. Servo-free, so it runs anywhere.</td></tr>
+<tr><td><code>ferrite-ui</code>, <code>ferrite-shell</code></td><td>The Iced interface (tab strip, toolbar, agent panel, review and approval cards, DevTools, page-control overlays, settings) and the binary.</td></tr>
+<tr><td><code>ferrite-eval</code></td><td>The evaluation harness (corpus, adjudication, metrics) and the live runner that puts a real model in the loop. Servo-free, so it runs anywhere.</td></tr>
 </tbody></table></div>
 
 <h2>Where the project stands</h2>
 <p>The planned rebuild is complete: every charter ran, every defect in the tracked register was fixed or explicitly ratified as intended behavior, and the evaluation reports real numbers from a real corpus with nothing fabricated. <strong>That does not mean feature-complete or ready to trust in production.</strong> Ferrite is a research prototype. The things to keep in mind are on one page, <a href="{{ROOT}}docs/limits.html">Limits</a>, and the headline ones are:</p>
 <ul>
-  <li>The evaluation agent is scripted, so the results describe the architecture, not any particular model's behavior.</li>
+  <li>The evaluation agent is scripted, so the results describe the architecture, not any particular model's behavior. A runner for real models exists, and <strong>no real model has been run through it yet</strong>.</li>
   <li>The corpus is self-authored and generated from templates, so the confidence intervals are optimistic.</li>
   <li>Attacks that stay inside the prediction, using the same capability at the task's own site, are a structural residual.</li>
+  <li>The newest browser work (DevTools, page controls, the GPU renderer, panel resizing) was checked on Linux under a virtual display. <strong>None of it has run on a Mac or on a real GPU</strong>, and the build on the releases page predates most of it.</li>
 </ul>
 
 <h2>Where to go next</h2>
 <div class="cards c2" style="margin-top:18px">
-  <div class="card"><h3><a href="{{ROOT}}docs/getting-started.html">Getting started</a></h3><p>Install, connect a model in Settings, run a first task, and learn what a consent prompt is asking.</p></div>
+  <div class="card"><h3><a href="{{ROOT}}docs/getting-started.html">Getting started</a></h3><p>Install, connect a model in Settings, run a first task, and learn what a review card is asking.</p></div>
+  <div class="card"><h3><a href="{{ROOT}}docs/run-it.html">Run it from source</a></h3><p>Setup, the run recipes, release builds on all three platforms and the renderer switch.</p></div>
+  <div class="card"><h3><a href="{{ROOT}}docs/using-the-browser.html">Using the browser</a></h3><p>Tabs, the address bar, shortcuts, resizable panels, page controls and the crash banner.</p></div>
+  <div class="card"><h3><a href="{{ROOT}}docs/debugging.html">Debugging and logs</a></h3><p>DevTools, the log file, collecting logs to send, and what to include in a report.</p></div>
   <div class="card"><h3><a href="{{ROOT}}docs/how-it-works.html">How the defense works</a></h3><p>Capabilities, prediction, sanitizer, dry run, comparison, consent, the runtime guard and the audit log.</p></div>
   <div class="card"><h3><a href="{{ROOT}}docs/evaluation.html">Evaluation</a></h3><p>The four-mode protocol, the corpus, the results, and what they do not show.</p></div>
   <div class="card"><h3><a href="{{ROOT}}docs/reproduce.html">Reproduce it</a></h3><p>Two commands re-run the whole evaluation offline and write the reports.</p></div>
+  <div class="card"><h3><a href="{{ROOT}}docs/live-evaluation.html">Live evaluation</a></h3><p>Run the corpus with Gemini or Ollama in the loop, in batches your quota can survive.</p></div>
 </div>

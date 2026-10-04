@@ -2,7 +2,7 @@
 title: Getting started
 order: 2
 group: Start
-summary: Install Ferrite, connect your own model in Settings, run a first task, and understand the consent prompt.
+summary: Install Ferrite, connect your own model in Settings, run a first task, and understand the review and approval cards.
 -->
 <p class="lede">From download to a first contained agent task in a few minutes. You bring the model; Ferrite brings the browser and the defense.</p>
 
@@ -15,12 +15,12 @@ summary: Install Ferrite, connect your own model in Settings, run a first task, 
 <tr><td>Windows (x64)</td><td><code>ferrite-&lt;commit&gt;-windows-x64.zip</code></td><td>Unzip and run <code>ferrite.exe</code>. If SmartScreen appears, choose <em>Run anyway</em>.</td></tr>
 <tr><td>Linux (x64)</td><td><code>ferrite-&lt;commit&gt;-linux-x64.tar.gz</code></td><td>Extract, then <code>./ferrite</code>, or <code>./install.sh</code> to add a launcher entry. Needs a graphical session.</td></tr>
 </tbody></table></div>
-<p>Prefer to build it yourself? See <a href="{{ROOT}}index.html#download">Build it from source</a>.</p>
+<p>Prefer to build it yourself, or want the newest features? See <a href="{{ROOT}}docs/run-it.html">Run it from source</a>. The release page names the commit each build comes from, and a build can lag the source: the one published on 2026-10-02 (<code>f4ed744</code>) predates DevTools, page-control overlays, resizable panels, the crash banner and the GPU renderer.</p>
 
 <h2>2. Connect a model</h2>
 <p>The agent needs a language model. Until you connect one, the agent panel shows <strong>No AI model connected</strong> with an <em>Open settings</em> button, and the browser itself works as a normal browser.</p>
 <ol>
-  <li>Click the <strong>gear</strong> in the toolbar (or <em>Open settings</em> in the agent panel).</li>
+  <li>Open Settings: the toolbar's menu (the three dots) has a <strong>Settings</strong> row, <kbd>Cmd/Ctrl</kbd>+<kbd>,</kbd> opens it, and the agent panel's <em>Open settings</em> button does too.</li>
   <li>Under <strong>AI model</strong>, choose a provider: <em>Ollama Cloud</em>, <em>Ollama (this computer)</em> or <em>Google Gemini</em>.</li>
   <li>For a hosted provider, paste your API key. Get one at <code>ollama.com/settings/keys</code> or <code>aistudio.google.com/apikey</code>. For local Ollama there is no key; check the server address and that Ollama is running.</li>
   <li>Press <strong>Load models</strong>. Ferrite asks the provider what your key can use, which also confirms the key works. If it fails, the message says why (rejected key, unreachable server, timeout).</li>
@@ -33,22 +33,39 @@ summary: Install Ferrite, connect your own model in Settings, run a first task, 
 </div>
 <p>Details, including where keys and settings are stored and how environment variables interact, are in <a href="{{ROOT}}docs/models-and-settings.html">Models and settings</a>.</p>
 
-<h2>3. Run a task</h2>
+<h2>3. Browse, and run a task</h2>
+<p>Ferrite works as a normal browser first. Type an address, or anything else, in the address bar: an address with a scheme is opened as typed, a bare host such as <code>example.com</code> gets <code>https://</code> (<code>localhost</code> and IP addresses get <code>http://</code>), and anything else is a <strong>Google search</strong>. <a href="{{ROOT}}docs/using-the-browser.html">Using the browser</a> has the shortcuts, panels and page controls.</p>
+<p>To give the agent a task:</p>
 <ol>
-  <li>Open the <strong>Agent</strong> panel (toolbar, or <kbd>Ctrl</kbd>+<kbd>Shift</kbd>+<kbd>O</kbd> for a new chat).</li>
+  <li>Open the <strong>Agent</strong> panel (the toolbar button, or <kbd>Cmd/Ctrl</kbd>+<kbd>Shift</kbd>+<kbd>A</kbd>; <kbd>Cmd/Ctrl</kbd>+<kbd>Shift</kbd>+<kbd>O</kbd> starts a new chat).</li>
   <li>Describe what you want in plain words, for example <em>“Summarize the top stories on Hacker News”</em>.</li>
-  <li>Watch the activity feed: each step shows what the agent did and what came back.</li>
+  <li>Watch the activity feed: each step shows what the agent did and what came back. The answer is rendered as Markdown.</li>
 </ol>
 <p>Ferrite derives the task's expected fingerprint from <em>your words only</em>. Earlier agent answers and page text never feed it, so a poisoned page cannot widen what it is allowed to do.</p>
 
-<h2>4. When the consent prompt appears</h2>
-<p>If the agent attempts something outside what your request implied, a panel titled <strong>Unexpected activity detected</strong> lists each item in plain language, for example:</p>
+<figure class="shot narrow">
+  <img class="theme-shot-light" src="{{ROOT}}static/img/agent-light.png" width="386" height="725" alt="The agent panel after a finished task: the request, a collapsed list of two steps, and the agent's answer as a numbered list with a Copy button." loading="lazy">
+  <img class="theme-shot-dark" src="{{ROOT}}static/img/agent-dark.png" width="386" height="725" alt="The agent panel in the dark theme after a finished task: the request, a collapsed list of two steps, and the agent's answer as a numbered list with a Copy button." loading="lazy">
+  <figcaption>The agent panel after a task, rendered from sample state (a made-up answer about a local demo page).</figcaption>
+</figure>
+
+<h2>4. When a review or approval card appears</h2>
+<p>There are two moments where Ferrite stops and asks you, both drawn by the app and neither able to be written by a page.</p>
+<h3>Before the run: “Review before running”</h3>
+<p>If the dry run shows the agent attempting something outside what your request implied, the panel lists each item in plain language, for example:</p>
 <ul>
-  <li><em>Used tool: js.execute</em>. Arbitrary JavaScript is always reviewed; nothing in your request could have authorized it.</li>
-  <li><em>Contacted https://attacker.example</em>. This origin is not authorized. Your request authorized <code>https://news.ycombinator.com</code>.</li>
+  <li><em>Used tool: js.execute</em>, with the note that arbitrary JavaScript is always reviewed and nothing in your request could have authorized it.</li>
+  <li><em>Contacted https://attacker.example</em>. This origin is not authorized. Your request authorized the origin you were browsing, which the card names.</li>
 </ul>
-<p>Approve or reject each item, then <strong>Proceed with approved</strong> or <strong>Cancel</strong>. Rejected items are blocked for the run. If you are unsure, reject: a rejected legitimate action costs you a retry, an approved malicious one can cost much more. The <em>Show dry-run evidence</em> toggle reveals what the rehearsal recorded.</p>
-<p>The <strong>Audit</strong> panel (<kbd>F12</kbd>) shows the hash-chained log and the model-activity trace.</p>
+<p>Each item has <strong>Reject</strong> and <strong>Approve</strong>. A rule down the card's left edge shows where it stands: amber while undecided, green once approved, red once rejected; the card itself stays neutral. <strong>Proceed with approved</strong> stays disabled until every item is decided, and <strong>Cancel</strong> (<kbd>Esc</kbd>) drops the whole task. Rejected items are blocked for the run. If you are unsure, reject: a rejected legitimate action costs you a retry, an approved malicious one can cost much more. <em>Show dry-run evidence</em> reveals what the rehearsal recorded.</p>
+<h3>During the run: “The agent needs your approval”</h3>
+<p>The dry run cannot see a page that only exists in the real run, so every real action is checked again. One outside the prediction pauses the agent with a card that names only the action and the site, never text the page wrote: <strong>Don’t allow</strong> (<kbd>Esc</kbd>), <strong>Allow once</strong> or <strong>Allow for task</strong>.</p>
+<figure class="shot narrow">
+  <img class="theme-shot-light" src="{{ROOT}}static/img/runtime-light.png" width="386" height="265" alt="The approval card at the bottom of the agent panel: the agent needs your approval to navigate to attacker.example, with Don't allow, Allow once and Allow for task buttons." loading="lazy">
+  <img class="theme-shot-dark" src="{{ROOT}}static/img/runtime-dark.png" width="386" height="265" alt="The approval card at the bottom of the agent panel in the dark theme: the agent needs your approval to navigate to attacker.example, with Don't allow, Allow once and Allow for task buttons." loading="lazy">
+  <figcaption>The approval card, rendered from sample state.</figcaption>
+</figure>
+<p>The <strong>Audit</strong> panel (the shield in the toolbar, or <kbd>F12</kbd>) shows the hash-chained log and the model-activity trace. <kbd>F12</kbd> opens this panel, not DevTools; <a href="{{ROOT}}docs/debugging.html">DevTools</a> is <kbd>Cmd</kbd>+<kbd>Opt</kbd>+<kbd>I</kbd> on macOS and <kbd>Ctrl</kbd>+<kbd>Shift</kbd>+<kbd>I</kbd> elsewhere.</p>
 
 <h2>5. When the agent reaches a sign-in page</h2>
 <p>Ferrite does not type passwords, one-time codes or card numbers, and it will not let the agent do so either. When a step lands on a page with a password field (or a well-known sign-in page such as Google's), the run <strong>pauses before any model call</strong> and the agent panel shows a card: <em>Sign in to accounts.google.com</em>.</p>
@@ -59,10 +76,13 @@ summary: Install Ferrite, connect your own model in Settings, run a first task, 
 <p>You are asked once per site: a multi-page sign-in on the same host does not ask at every page, and coming back to the site later asks again. The page script also refuses, as a second line of defense, to type into any password or one-time-code field.</p>
 
 <h2>Where your data lives</h2>
-<p>Everything is under one data directory: <code>$FERRITE_HOME</code> if set, otherwise <code>~/.local/share/ferrite</code> on every platform. It holds the browser profile (cookies and storage persist across restarts), saved chats, bookmarks, <code>settings.json</code> and the activity log. API keys are <em>not</em> there; they go to your operating system's credential store.</p>
+<p>Everything is under one data directory: <code>$FERRITE_HOME</code> if set, otherwise <code>~/.local/share/ferrite</code> on every platform. (The <code>just run-*</code> helpers set <code>FERRITE_HOME</code> to a gitignored <code>.ferrite</code> folder inside the repository.) It holds the browser profile (cookies and storage persist across restarts), saved chats, bookmarks, <code>settings.json</code>, the sizes of your panels and the model-activity trace. API keys are <em>not</em> there; they go to your operating system's credential store. The app's <strong>log file</strong> is in a separate folder: see <a href="{{ROOT}}docs/debugging.html#the-log-file">Debugging and logs</a>.</p>
 
 <h2>Troubleshooting</h2>
 <dl class="defs">
+  <dt>“This page stopped responding”</dt><dd>The page's script thread died inside the engine. The page stays on screen, frozen, under a banner: <strong>Reload</strong> starts a fresh session for the same address, <strong>Details</strong> shows the reason and a backtrace you can copy. The crash is also in DevTools' Engine tab and in the log. See <a href="{{ROOT}}docs/debugging.html">Debugging and logs</a>.</dd>
+  <dt>Pages never load</dt><dd>You may be running a build without Servo (the terminal or the log then says <code>Servo unavailable</code>). The default <code>cargo run</code> opens the interface but cannot render pages; add <code>--features ferrite-servo/servo</code>, or use a downloaded build. See <a href="{{ROOT}}docs/run-it.html">Run it from source</a>.</dd>
+  <dt>A dropdown, dialog or file input does something unexpected</dt><dd>Ferrite draws those itself. The file picker is a card where you type or paste a path, because there is no native file dialog yet. See <a href="{{ROOT}}docs/using-the-browser.html#what-a-page-can-ask-the-browser-for">page controls</a>.</dd>
   <dt>macOS: “Ferrite” Not Opened</dt><dd>Builds are not yet notarized by Apple, so Gatekeeper blocks the first launch (it does not mean the file is damaged). Click <em>Done</em>, open <strong>System Settings → Privacy &amp; Security</strong>, scroll to <em>Security</em>, and click <strong>Open Anyway</strong> next to Ferrite, then confirm with your password. You only need to do this once. The older right-click → Open trick no longer works on macOS 15 and later. From a terminal, <code>xattr -dr com.apple.quarantine /Applications/Ferrite.app</code> does the same thing.</dd>
   <dt>Google or GitHub says the browser “may not be secure”, or blocks sign-in</dt><dd>These sites decide from the whole session, and Ferrite is a young engine. Two things are in your hands. In <strong>Settings → Compatibility</strong>, keep <em>Firefox-compatible</em> selected (the default; it applies after a restart). And sign in yourself when the agent pauses. Neither is a guarantee: Google in particular may still refuse an engine it does not recognize. See <a href="{{ROOT}}docs/limits.html">Limits</a>.</dd>
   <dt>No AI model connected</dt><dd>Open Settings and finish steps 2 to 6 above. The agent fails closed without a model: it will not act without one.</dd>

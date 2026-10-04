@@ -31,6 +31,19 @@ DIST = HERE / "dist"
 
 REPO = "https://github.com/rayanjainn/Ferrite-Browser"
 SITE_NAME = "Ferrite"
+# The date the pages were last checked against the source, commands and
+# docs/EVALUATION.md. Bump it whenever a page is re-audited (see README.md).
+DOCS_AS_OF = "2026-10-04"
+
+
+def app_version() -> str:
+    """The shell crate's version, so the footer never drifts from Cargo.toml."""
+    manifest = HERE.parent / "crates" / "ferrite-shell" / "Cargo.toml"
+    try:
+        m = re.search(r'^version\s*=\s*"([^"]+)"', manifest.read_text(encoding="utf-8"), re.M)
+    except OSError:
+        m = None
+    return m.group(1) if m else "0.1.0"
 
 # Inline icons: 24x24, stroke-based, tinted by currentColor.
 ICONS = {
@@ -180,6 +193,7 @@ def pager(docs: list[dict], i: int, root: str) -> str:
 
 def sub_tokens(text: str, root: str) -> str:
     text = text.replace("{{ROOT}}", root).replace("{{REPO}}", REPO)
+    text = text.replace("{{VERSION}}", app_version()).replace("{{ASOF}}", DOCS_AS_OF)
     return render_icons(text)
 
 
