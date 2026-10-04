@@ -22,7 +22,9 @@ use crate::tokens::{
     raised_bar_style, tint, tip, SP_MD, SP_SM, SP_XS, TEXT_BODY, TEXT_CAPTION, TEXT_SMALL,
 };
 use crate::widgets::PressProbe;
-use crate::{font_weight, FerriteBrowser, FerriteBrowserMessage, Palette, JS_INPUT_ID, MOD_LABEL};
+use crate::{
+    font_weight, FerriteBrowser, FerriteBrowserMessage, Palette, DEVTOOLS_SHORTCUT, JS_INPUT_ID,
+};
 
 /// Padding at a row's left and right edge.
 const EDGE: f32 = 12.0;
@@ -127,13 +129,8 @@ fn chip_style(
     }
 }
 
-fn pill<'a>(
-    palette: &'static Palette,
-    label: String,
-    fill: Color,
-) -> Element<'a, FerriteBrowserMessage> {
+fn pill<'a>(label: String, fill: Color) -> Element<'a, FerriteBrowserMessage> {
     let ink = on_fill(fill);
-    let _ = palette;
     container(text(label).size(TEXT_CAPTION).color(ink))
         .padding([0.0, 6.0])
         .style(move |_: &Theme| container::Style {
@@ -265,10 +262,10 @@ fn header<'a>(
 
     let mut console_badges = Vec::new();
     if errors > 0 {
-        console_badges.push(pill(palette, errors.to_string(), palette.danger));
+        console_badges.push(pill(errors.to_string(), palette.danger));
     }
     if warnings > 0 {
-        console_badges.push(pill(palette, warnings.to_string(), palette.warn));
+        console_badges.push(pill(warnings.to_string(), palette.warn));
     }
     let network_badges = if requests > 0 {
         vec![text(requests.to_string())
@@ -279,7 +276,7 @@ fn header<'a>(
         vec![]
     };
     let engine_badges = if panics > 0 {
-        vec![pill(palette, panics.to_string(), palette.danger)]
+        vec![pill(panics.to_string(), palette.danger)]
     } else {
         vec![]
     };
@@ -328,7 +325,7 @@ fn header<'a>(
             ui.tab == DevTab::Engine,
             engine_badges,
         ),
-        text(format!("{MOD_LABEL}+J"))
+        text(DEVTOOLS_SHORTCUT)
             .size(TEXT_CAPTION)
             .color(palette.text_dim)
             .into(),
@@ -733,7 +730,6 @@ fn console_row<'a>(
     ];
     if r.count > 1 {
         cells.push(pill(
-            palette,
             r.count.to_string(),
             mix(palette.text_dim, palette.surface, 0.55),
         ));
@@ -1054,7 +1050,7 @@ fn engine_row<'a>(
             .font(mono())
             .color(palette.text_dim)
             .into(),
-        pill(palette, label.to_string(), tone),
+        pill(label.to_string(), tone),
         text(e.thread.clone())
             .size(TEXT_SMALL)
             .font(font_weight(iced::font::Weight::Semibold))

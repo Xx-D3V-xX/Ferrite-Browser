@@ -40,7 +40,7 @@ use crate::tokens::{
 use crate::widgets::PressProbe;
 use crate::{
     font_weight, pulse_alpha, AppTheme, FerriteBrowser, FerriteBrowserMessage as Msg, LibraryTab,
-    Palette, ADDRESS_BAR_ID, MOD_LABEL,
+    Palette, ADDRESS_BAR_ID, DEVTOOLS_SHORTCUT, MOD_LABEL,
 };
 
 // ── Geometry ─────────────────────────────────────────────────────────────
@@ -1129,8 +1129,8 @@ pub(crate) fn menu_overlay(state: &FerriteBrowser) -> Option<Element<'_, Msg>> {
     rows.push(menu_divider(palette));
     rows.push(menu_item(
         Icon::Console,
-        "JavaScript console",
-        Some(format!("{MOD_LABEL}+J")),
+        "Developer tools",
+        Some(DEVTOOLS_SHORTCUT.to_string()),
         MenuCommand::JsConsole,
         palette,
     ));

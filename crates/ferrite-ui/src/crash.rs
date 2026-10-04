@@ -83,6 +83,11 @@ pub(crate) fn update(state: &mut FerriteBrowser, msg: Msg) -> Task<FerriteBrowse
     Task::none()
 }
 
+/// Whether tab `tab`'s page has died and the person has not yet reloaded it.
+pub(crate) fn is_crashed(state: &FerriteBrowser, tab: usize) -> bool {
+    state.tab_diag.get(tab).is_some_and(|d| d.crash.is_some())
+}
+
 /// Gives tab `tab` a fresh session and loads its address again. The dead
 /// session is dropped; if a new one cannot be made the tab shows the error page
 /// rather than keeping a session that will never answer.

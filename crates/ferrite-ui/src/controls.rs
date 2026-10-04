@@ -802,14 +802,26 @@ pub(crate) fn active_control(state: &FerriteBrowser) -> Option<&PendingControl> 
 /// Answers tab `tab`'s control exactly once: it is taken out of the tab before
 /// the engine hears anything, so a second answer finds nothing to answer.
 pub(crate) fn answer(state: &mut FerriteBrowser, tab: usize, answer: ControlAnswer) {
-    let Some(pending) = state.tab_diag.get_mut(tab).and_then(|d| d.control.take()) else {
+    if state
+        .tab_diag
+        .get_mut(tab)
+        .and_then(|d| d.control.take())
+        .is_none()
+    {
         return;
-    };
-    let _ = pending;
+    }
     if let Some(session) = state.servo_sessions.get_mut(&tab) {
         session.answer_control(answer);
     }
     crate::wake(state);
+}
+
+/// Whether the engine's control is no longer the one `pending` shows: it was
+/// withdrawn, replaced by another, or a new one arrived while none showed.
+/// What the person has done to `pending` (ticked options, typed text) is UI
+/// state and plays no part; only the engine's own description is compared.
+pub(crate) fn differs(pending: Option<&PendingControl>, engine: Option<&PageControl>) -> bool {
+    pending.map(|p| &p.control) != engine
 }
 
 /// Dismisses tab `tab`'s control if the page has moved on from the address it

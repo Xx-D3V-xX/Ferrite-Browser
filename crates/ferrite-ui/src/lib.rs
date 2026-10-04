@@ -82,7 +82,8 @@
 //   macOS : Cmd+T/W/R/L/J/F/D, Cmd+=/-/0 (zoom), Cmd+[ / ] (back/forward),
 //           Cmd+Shift+[ / ] and Ctrl+Tab (previous/next tab), Cmd+1-8/9 (tab
 //           by number / last), Cmd+Shift+A (agent), Cmd+Shift+O (new agent
-//           chat), Cmd+, (settings), F5, F12, Alt+←/→, Esc
+//           chat), Cmd+, (settings), Cmd+Opt+I (developer tools; Ctrl+Shift+I
+//           elsewhere), F5, F12 (audit log), Alt+←/→, Esc
 //   other : the same with Ctrl in place of Cmd
 //
 // Esc is context-sensitive (C3d): it closes the find bar first if one is
@@ -690,6 +691,13 @@ impl<'a> ferrite_ipi::dry_run::DryRunDriver for BrowserLoopDryRunDriver<'a> {
 const MOD_LABEL: &str = "Cmd";
 #[cfg(not(target_os = "macos"))]
 const MOD_LABEL: &str = "Ctrl";
+
+/// Chrome's chord for developer tools, as the menu and the panel's header
+/// spell it (`handle_key_press` accepts it; Cmd/Ctrl+J opens the same panel).
+#[cfg(target_os = "macos")]
+const DEVTOOLS_SHORTCUT: &str = "Cmd+Opt+I";
+#[cfg(not(target_os = "macos"))]
+const DEVTOOLS_SHORTCUT: &str = "Ctrl+Shift+I";
 
 // ---------------------------------------------------------------------------
 // Fonts
@@ -2248,7 +2256,11 @@ pub fn update(
             state.new_tab_search_input = String::new();
             state.is_loading = true;
             state.address_bar_focused = false;
-            if let Some(session) = state.servo_sessions.get(&state.active_tab) {
+            if crash::is_crashed(state, state.active_tab) {
+                // The page's script thread is dead and may not take a
+                // navigation; the address is loaded in a fresh session.
+                crash::reload(state, state.active_tab);
+            } else if let Some(session) = state.servo_sessions.get(&state.active_tab) {
                 session.navigate(&url);
             }
             // Let go of the address bar so keys reach the page again.
@@ -2270,6 +2282,11 @@ pub fn update(
         }
         FerriteBrowserMessage::Reload => {
             controls::dismiss_tab(state, state.active_tab);
+            if crash::is_crashed(state, state.active_tab) {
+                // A dead page answers no reload; it gets a fresh session.
+                crash::reload(state, state.active_tab);
+                return Task::none();
+            }
             if let Some(session) = state.servo_sessions.get(&state.active_tab) {
                 session.reload();
             }
@@ -6175,6 +6192,15 @@ fn tile_monogram(label: &str) -> String {
 // Subscription
 // ---------------------------------------------------------------------------
 
+/// Whether `modifiers` hold what Cmd+I (macOS) / Ctrl+I (elsewhere) needs to
+/// become the developer-tools chord: Option on macOS, Shift elsewhere.
+fn devtools_chord(modifiers: keyboard::Modifiers) -> bool {
+    #[cfg(target_os = "macos")]
+    return modifiers.alt();
+    #[cfg(not(target_os = "macos"))]
+    return modifiers.shift();
+}
+
 /// A pure `Key + Modifiers -> Message` mapping — `iced::keyboard::on_key_press`
 /// requires a plain `fn` pointer (verified against the pinned `iced_futures`
 /// 0.13.2 source: it takes `fn(Key, Modifiers) -> Option<Message>`, not a
@@ -6203,6 +6229,7 @@ fn handle_key_press(
             "r" => Some(FerriteBrowserMessage::Reload),
             "l" => Some(FerriteBrowserMessage::FocusAddressBar),
             "j" => Some(FerriteBrowserMessage::ToggleJsConsole),
+            "i" | "I" if devtools_chord(modifiers) => Some(FerriteBrowserMessage::ToggleJsConsole),
             "f" => Some(FerriteBrowserMessage::OpenFindBar),
             // Cmd/Ctrl+Shift+O: new agent chat. With Shift held the OS
             // reports the shifted character, so both cases are accepted; a

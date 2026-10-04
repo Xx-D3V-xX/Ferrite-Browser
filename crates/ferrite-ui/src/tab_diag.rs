@@ -4,10 +4,11 @@
 //!
 //! [`drain_all`] is the per-tick work. It is O(new entries): each session's
 //! queues are emptied (an empty queue is one `RefCell` borrow), the entries are
-//! appended to that tab's log, and nothing is cloned when nothing happened. It
-//! asks a session for its pending control only while the tab has none (the
-//! engine hands over a copy each time), so a long `<select>` is not copied sixty
-//! times a second while it is open.
+//! appended to that tab's log, and nothing is cloned when nothing happened. A
+//! tab with no pending control and no control in the engine costs the same
+//! borrow; while one is pending the engine's copy is compared with the one
+//! being shown, so a control the engine withdrew (the page removed the
+//! `<select>`, an `alert()` was cancelled) or replaced is not left on screen.
 
 use iced::widget::scrollable;
 use iced::Task;
@@ -79,16 +80,17 @@ pub(crate) fn drain_all(state: &mut FerriteBrowser) -> Task<FerriteBrowserMessag
             crate::wake_flag(&mut state.busy_ticks);
         }
 
-        if diag.control.is_none() {
-            if let Some(control) = session.page_control() {
+        let engine_control = session.page_control();
+        if controls::differs(diag.control.as_ref(), engine_control.as_ref()) {
+            diag.control = engine_control.map(|control| {
                 let mut pending = PendingControl::new(control, area);
                 pending.page_url = session.current_url().to_string();
                 if index == active {
                     tasks.push(controls::focus_task(&pending));
                 }
-                diag.control = Some(pending);
-                crate::wake_flag(&mut state.busy_ticks);
-            }
+                pending
+            });
+            crate::wake_flag(&mut state.busy_ticks);
         }
     }
     if skipped > 0 {
