@@ -390,3 +390,7 @@ dl.defs dd { margin: 0; color: var(--text-2); }
   .site-header, .side, .toc, .site-footer, .copy { display: none; }
   .docs { display: block; } body { background: #fff; color: #000; }
 }
+
+/* Wide result tables (live results): let long "k/n = p% [lo-hi]" cells wrap. */
+.table-wrap.tight table { font-size: 0.82rem; }
+.table-wrap.tight td.num, .table-wrap.tight th.num { white-space: normal; min-width: 7.5em; }
