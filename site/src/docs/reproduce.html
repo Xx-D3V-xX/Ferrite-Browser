@@ -76,7 +76,15 @@ $ python3 scripts/import_agentdojo.py --src /tmp/agentdojo --check</code></pre>
   OLLAMA_API_KEY=&lt;your key&gt; \
   cargo run -p ferrite-eval --example eval</code></pre>
 <p><code>just models</code> lists the tags your key can reach.</p>
-<p><strong>A real model as the agent</strong> is a separate runner. It has batches, a cost preview and resume. See <a href="{{ROOT}}docs/live-evaluation.html">Live evaluation</a>. The owner has run it once, on <code>gemma4:31b</code>. The results are in <a href="{{ROOT}}docs/evaluation.html#live-results">Evaluation: Live results</a>. The record gives these settings for that run: provider <code>ollama</code>, model <code>gemma4:31b</code> for both roles, corpus <code>all</code> (1,984 cases), seed 1, modes <code>off</code> and <code>guard</code>, several batches of 100 cases, and a 2000 ms pause. The record does not give the call cap. This command is built from those settings. It is not copied from the owner's shell:</p>
+<p><strong>A real model as the agent</strong> is a separate runner. It has batches, a cost preview and resume. See <a href="{{ROOT}}docs/live-evaluation.html">Live evaluation</a>. The owner has run it once, on <code>gemma4:31b</code>. The results are in <a href="{{ROOT}}docs/evaluation.html#live-results">Evaluation: Live results</a>. The record gives these settings for that run:</p>
+<ul>
+  <li>Provider <code>ollama</code>.</li>
+  <li>Model <code>gemma4:31b</code> for both roles.</li>
+  <li>Corpus <code>all</code> (1,984 cases), seed 1.</li>
+  <li>Modes <code>off</code> and <code>guard</code>.</li>
+  <li>Several batches of 100 cases, with a 2000 ms pause.</li>
+</ul>
+<p>The record does not give the call cap. The command below is built from those settings. It is not copied from the owner's shell:</p>
 <pre><code>$ cargo run --release -p ferrite-eval --example live_eval -- \
     --provider ollama --model gemma4:31b --corpus all --seed 1 \
     --modes off,guard --batch-size 100 --max-calls &lt;N&gt; --pause-ms 2000

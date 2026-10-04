@@ -104,7 +104,7 @@ $ just run-fast --no-model-check</code></pre>
 <h2>Run the live evaluation with a real model</h2>
 <p>The live runner puts a real AI model in the evaluation loop. It needs a key (or a local Ollama) and a model tag. A model tag is the exact name of a model on the provider, such as <code>gemma4:31b</code>. Ferrite never has a default tag. A key comes from <code>OLLAMA_API_KEY</code> or <code>FERRITE_GEMINI_API_KEY</code>, or from the OS keyring. You never pass a key as a flag. <a href="{{ROOT}}docs/live-evaluation.html">Live evaluation</a> explains the method and every flag. Start with the plan, which calls nothing and needs no key:</p>
 <pre><code>$ just live-eval-plan --provider ollama --model gemma4:31b --corpus all --seed 1 --batch-size 100</code></pre>
-<p>This is the exact command the owner used for the live run in <a href="{{ROOT}}docs/limits.html">Limits</a>. The owner ran it once for each batch of 100 cases:</p>
+<p>This is a command like the one the owner used for the live run in <a href="{{ROOT}}docs/limits.html">Limits</a>. The owner ran it in batches of 100 cases. The first batch used the default <code>--max-calls</code> of 100, which stopped after 18 cases. The value 800 below is a suggestion for finishing a batch of 100 cases. It is not a recorded value:</p>
 <pre><code>$ just live-eval --provider ollama --model gemma4:31b --corpus all --seed 1 --batch-size 100 --max-calls 800 --pause-ms 2000</code></pre>
 <ul>
   <li><code>--corpus all</code> is all 1,984 cases (the 938-case corpus and the 1,046-case AgentDojo import).</li>
@@ -114,7 +114,7 @@ $ just run-fast --no-model-check</code></pre>
 </ul>
 <div class="callout note">
   <h4>Tip: --batch-size and --max-calls count different things</h4>
-  <p><code>--batch-size</code> counts <strong>cases</strong>. <code>--max-calls</code> counts <strong>model calls</strong> that reach the provider, and the default is 100. One case can need several calls. So a batch of 100 cases can need more than the default 100 calls. The owner set <code>--max-calls</code> to 800. If the cap is reached, the run stops with exit code 3. Nothing is lost. The case in flight stays pending, and you run the same command again.</p>
+  <p><code>--batch-size</code> counts <strong>cases</strong>. <code>--max-calls</code> counts <strong>model calls</strong> that reach the provider, and the default is 100. One case can need several calls. So a batch of 100 cases can need more than the default 100 calls. A value of 800 should let a batch of 100 cases finish. If the cap is reached, the run stops with exit code 3. Nothing is lost. The case in flight stays pending, and you run the same command again.</p>
 </div>
 <p>The exit codes tell a script why the run ended:</p>
 <div class="table-wrap"><table>

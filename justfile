@@ -215,7 +215,7 @@ agentdojo-check src:
 # A real model in the evaluation loop, in resumable batches (docs/EVALUATION.md section 9,
 # docs/COMMANDS.md section 6 lists every flag). --provider gemini|ollama|mock and a model
 # tag are required; keys come from the environment or the OS keyring only. Results go to
-# target/live-eval. Run live-eval-plan first. Never run against a real provider yet (T-278).
+# target/live-eval. Run live-eval-plan first. One full run exists, with ollama gemma4:31b (docs/results/).
 # Example: just live-eval --provider mock --model x --batch-size 12
 # Run the live evaluation: a real model in the loop, in resumable batches (run live-eval-plan first).
 live-eval *ARGS:
