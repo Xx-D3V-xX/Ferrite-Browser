@@ -9,7 +9,7 @@ publish = false
 # Enable Servo engine integration:
 #   cargo build -p ferrite-servo --features servo
 #   cargo build -p ferrite-shell --features ferrite-servo/servo
-servo = ["dep:servo"]
+servo = ["dep:servo", "dep:euclid"]
 
 [dependencies]
 ferrite-audit-log = { workspace = true }
@@ -26,10 +26,16 @@ url = { workspace = true }
 # Optional — only resolved when the `servo` feature is enabled.
 # The crates.io package `servo`; Rust imports use `use servo::...`.
 servo = { workspace = true, optional = true }
-
+# The unit-typed `Scale` the engine's HiDPI API takes (same version the engine uses).
+euclid = { version = "0.22", optional = true }
 # cargo-machete can't see the `use servo::...` imports inside
 # #[cfg(feature = "servo")] blocks without building with that feature
 # enabled (it does static analysis without --with-metadata by default) —
 # false-positive "unused dependency" without this.
 [package.metadata.cargo-machete]
-ignored = ["servo"]
+ignored = ["servo", "euclid"]
+
+[dev-dependencies]
+# `examples/page_shot.rs` writes a PNG of what the engine rendered. Already in
+# the lockfile (the engine itself decodes PNGs with it).
+png = "0.17"

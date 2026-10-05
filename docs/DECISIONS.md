@@ -626,3 +626,30 @@ absent in this Servo and are listed by the probe as gaps.
 **Not changed.** The rules and the model layer that build the prediction, the comparator, and the evaluation: no reported number moves. Whether a navigation task should *predict* clicks and form fills is a separate, open choice (it would reduce prompts and change the claim).
 
 **Limits.** A person who allows everything gets no protection from this card, which is the human limit already published; a click on a link is judged at the page's own origin before the request is made (ADR-014's stated limit).
+
+## ADR-021 — Render on the GPU where it has been shown to work, and prove it at start-up; fall back to the CPU
+
+**Date:** 2026-10-03. **Status:** SUPERSEDED on 2026-10-05: the GPU renderer was removed (`docs/TO-DO.md` T-281, T-305). On an Apple M1 its self-test passed, but with it Google never finished loading and could not be scrolled or clicked, and the engine's WebGL thread panicked; the owner chose the CPU renderer only. The text below is kept as the record of the decision. Implemented in `e97ca27`; the code can be restored from that commit.
+
+**Context.** The engine's own offscreen rendering context asks the graphics stack for the software adapter. On macOS that is Apple's generic software OpenGL, which rasterised every page on the CPU; that was taken to be a large part of why pages felt slow on the owner's Mac (not measured). Using the GPU instead has a cost of its own: a context that opens but draws nothing (a driver quirk, a headless session) would leave every tab blank, which is worse than slow.
+
+**Decision.**
+
+1. **A GPU offscreen context (`crates/ferrite-servo/src/gpu_context.rs`), adapted from the engine's own MPL-2.0 code, with the engine's rendering-context interface unchanged.** Nothing outside `ferrite-servo` knows which one is in use.
+2. **It must pass a self-test before it is used:** clear to a known colour and read the pixel back. Any failure selects the CPU renderer instead and says why. A page is never shown through a context that has not proved it draws.
+3. **One switch, one log line.** `FERRITE_RENDERER=gpu|cpu|auto`, default `auto`. `auto` tries the GPU **on macOS only**, because that is where the CPU renderer is the known problem and where the owner's reports come from; on Linux and Windows `auto` keeps the CPU renderer until the GPU path has been run there. The choice and the reason are printed once per process as `[ferrite-render] ...`, so a log from any machine says which renderer ran.
+4. **Same pixels.** The GPU path was checked pixel-identical to the CPU path on Mesa's software GL (Linux), which says the plumbing is right and nothing about a real GPU.
+
+**Not claimed.** That it is faster, or that it starts, on a real Mac GPU: it has never run on one. The self-test proves the context can draw a colour, not that WebRender's full pipeline is correct on that driver. The thread-pool sizing that shipped in the same commit (T-282) is likewise unmeasured. The first evidence will be the `[ferrite-render]` line in the owner's `ferrite.log`; `FERRITE_RENDERER=cpu` is the escape hatch if it misbehaves.
+
+## ADR-022 — Carry a one-function patch to `servo-script` as a vendored crate, not a fork of the engine
+
+**Date:** 2026-10-03. **Status:** live; remove when the engine is upgraded to a release containing the fix. Implemented in `e97ca27`. **Extended 2026-10-05:** the same method is used for two more crates, `servo-webgl` (the upstream WebGL swap fix, servo/servo#48620) and `servo-layout` (an infinite loop in the containing-block walk, which froze the Google results page); each has a `FERRITE-PATCHES.md`. All three are plain copies of the crates.io release plus the listed changes.
+
+**Context.** A page that reads `location.ancestorOrigins` on a document the parser did not create panics the engine's script thread (`expect("Must always have ancestor origins initialized")`, T-270). The thread dies, the page stops responding, and the app can hang on quit (T-274). The property is unforgeable, so a script injected into the page cannot intercept it (T-270), and there was no newer engine release with the fix.
+
+**Decision.** `vendor/servo-script` holds `servo-script` 0.6.0 as published on crates.io (MPL-2.0, file headers intact) with exactly one change: `GetAncestorOrigins` returns an empty list when the document has none. The workspace uses it through `[patch.crates-io]` and lists `vendor` in `exclude`, so it is not a workspace member and its own lints and tests are not part of `just check` or `just test` (it is of course compiled, as the engine's dependency). Every change is listed in `vendor/servo-script/FERRITE-PATCHES.md`; adding a second change needs a new entry there and a reason here.
+
+**Why not the alternatives.** Forking the whole engine would mean tracking Servo's git tree (the position ADR-013 moved away from). A page-level shim cannot reach an unforgeable property. Doing nothing leaves the script thread killable by any page.
+
+**Not claimed.** That this was what stopped GitHub opening for the owner: the panic was never reproduced, and GitHub cannot be reached from the build environment (T-283, T-290). The vendored copy adds about a full crate of third-party source to the repository and must be re-derived by hand on an engine upgrade.

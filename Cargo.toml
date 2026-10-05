@@ -1,4 +1,5 @@
 [workspace]
+exclude = ["vendor"]
 members = [
   "crates/ferrite-core",
   "crates/ferrite-model",
@@ -168,3 +169,11 @@ panic = "unwind"
 [profile.bench]
 inherits = "release"
 debug = "line-tables-only"
+
+# The engine's script, WebGL and layout crates with Ferrite's fixes
+# (vendor/servo-script, vendor/servo-webgl and vendor/servo-layout, each with a
+# FERRITE-PATCHES.md).
+[patch.crates-io]
+servo-script = { path = "vendor/servo-script" }
+servo-webgl = { path = "vendor/servo-webgl" }
+servo-layout = { path = "vendor/servo-layout" }

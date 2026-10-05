@@ -278,6 +278,235 @@ pub fn audit_guard_decision(primitive: &str, origin: Option<&str>, allowed: bool
 #[cfg(feature = "servo")]
 const SVG_COMPAT_JS: &str = include_str!("svg_compat.js");
 
+/// The display's scale factor (physical pixels per CSS pixel at 100% zoom),
+/// as `f32` bits. Pages are laid out in CSS pixels: a Retina display must tell
+/// the engine its scale, or every page is laid out as if the screen were twice
+/// as wide as it looks (tiny text, desktop layouts at 2560 px, and Google
+/// results pinned to the left edge).
+static DISPLAY_SCALE_BITS: std::sync::atomic::AtomicU32 =
+    std::sync::atomic::AtomicU32::new(0x3f80_0000); // 1.0
+
+/// Records the display's scale; sessions apply it when created and when
+/// [`HeadlessServoSession::apply_display_scale`] is called.
+pub fn set_display_scale(scale: f32) {
+    if scale.is_finite() && scale >= 0.5 {
+        DISPLAY_SCALE_BITS.store(scale.to_bits(), std::sync::atomic::Ordering::Relaxed);
+    }
+}
+
+/// The display scale last recorded (1.0 until the UI knows it).
+#[must_use]
+pub fn display_scale() -> f32 {
+    f32::from_bits(DISPLAY_SCALE_BITS.load(std::sync::atomic::Ordering::Relaxed))
+}
+
+/// Which WebGL a page gets.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum WebGlMode {
+    /// None: `getContext('webgl')` returns null and a page falls back.
+    Off,
+    /// WebGL 1 only (the default).
+    V1,
+    /// WebGL 1 and 2.
+    V2,
+}
+
+/// Which WebGL pages get, and the reason, from `FERRITE_WEBGL=off|webgl1|on|auto`
+/// (default auto, which is WebGL 1 only). WebGL 2 is off by default because the
+/// engine's WebGL 2 `drawBuffers`/`readBuffer` on the default framebuffer leave a
+/// GL error pending, which on macOS made the next buffer swap fail and killed the
+/// WebGL thread (servo/servo#48550, fixed upstream in #48620; the vendored
+/// `servo-webgl` has the swap half of that fix). `off` is the way out if a page's
+/// WebGL ever freezes it. `on` turns WebGL 2 back on.
+#[must_use]
+pub fn webgl_decision(setting: Option<&str>) -> (WebGlMode, &'static str) {
+    match setting.map(|s| s.trim().to_ascii_lowercase()).as_deref() {
+        Some("on" | "1" | "true" | "yes" | "webgl2") => (WebGlMode::V2, "FERRITE_WEBGL=on"),
+        Some("webgl1") => (WebGlMode::V1, "FERRITE_WEBGL=webgl1"),
+        Some("off" | "0" | "false" | "no") => (WebGlMode::Off, "FERRITE_WEBGL=off"),
+        _ => (
+            WebGlMode::V1,
+            "WebGL 2 is off by default; FERRITE_WEBGL=on turns it on",
+        ),
+    }
+}
+
+#[cfg(test)]
+mod webgl_decision_tests {
+    use super::{webgl_decision, WebGlMode};
+
+    #[test]
+    fn auto_is_webgl_1_only() {
+        assert_eq!(webgl_decision(None).0, WebGlMode::V1);
+        assert_eq!(webgl_decision(Some("")).0, WebGlMode::V1);
+        assert_eq!(webgl_decision(Some("auto")).0, WebGlMode::V1);
+        assert_eq!(webgl_decision(Some("webgl1")).0, WebGlMode::V1);
+    }
+
+    #[test]
+    fn the_setting_turns_it_on_or_off() {
+        assert_eq!(webgl_decision(Some(" ON ")).0, WebGlMode::V2);
+        assert_eq!(webgl_decision(Some("webgl2")).0, WebGlMode::V2);
+        assert_eq!(webgl_decision(Some("off")).0, WebGlMode::Off);
+        assert_eq!(webgl_decision(Some("0")).0, WebGlMode::Off);
+    }
+
+    #[test]
+    fn the_reason_names_the_setting_when_one_was_given() {
+        assert_eq!(webgl_decision(Some("off")).1, "FERRITE_WEBGL=off");
+        assert!(webgl_decision(None).1.contains("FERRITE_WEBGL=on"));
+    }
+}
+
+/// How often a page's script thread is asked whether it is still there.
+const WATCH_INTERVAL: std::time::Duration = std::time::Duration::from_secs(2);
+/// How long an unanswered question can wait before the page counts as stalled.
+const WATCH_STALL_AFTER: std::time::Duration = std::time::Duration::from_secs(5);
+
+/// What a [`ScriptWatch`] step wants done.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum WatchEvent {
+    /// Nothing.
+    Quiet,
+    /// Ask the page's script thread a trivial question now.
+    SendProbe,
+    /// The question has gone unanswered for this long: the page's script is busy
+    /// or stuck. Scrolling and clicking go through that thread, so they stop too.
+    Stalled(std::time::Duration),
+    /// The page answered after having been reported stalled; it took this long.
+    Recovered(std::time::Duration),
+}
+
+/// Watches whether a page's script thread still answers. A page that never
+/// finishes loading and cannot be scrolled or clicked, but still paints, has a
+/// script thread that is busy or stuck; nothing else in the app can tell that
+/// from a page that is merely slow, so the log would say nothing.
+#[derive(Debug, Default)]
+pub struct ScriptWatch {
+    sent_at: Option<std::time::Instant>,
+    next_at: Option<std::time::Instant>,
+    stalled: bool,
+}
+
+impl ScriptWatch {
+    /// One look at the clock. `answered` is whether the outstanding question,
+    /// if there is one, has been answered.
+    pub fn step(&mut self, now: std::time::Instant, answered: bool) -> WatchEvent {
+        if let Some(sent) = self.sent_at {
+            let waited = now.saturating_duration_since(sent);
+            if answered {
+                self.sent_at = None;
+                self.next_at = Some(now + WATCH_INTERVAL);
+                return if std::mem::take(&mut self.stalled) {
+                    WatchEvent::Recovered(waited)
+                } else {
+                    WatchEvent::Quiet
+                };
+            }
+            if !self.stalled && waited >= WATCH_STALL_AFTER {
+                self.stalled = true;
+                return WatchEvent::Stalled(waited);
+            }
+            return WatchEvent::Quiet;
+        }
+        if self.next_at.is_none_or(|at| now >= at) {
+            self.sent_at = Some(now);
+            return WatchEvent::SendProbe;
+        }
+        WatchEvent::Quiet
+    }
+
+    /// Forget the outstanding question: the page navigated, so its answer will
+    /// never come and the silence means nothing.
+    pub fn reset(&mut self) {
+        *self = Self::default();
+    }
+}
+
+#[cfg(test)]
+mod script_watch_tests {
+    use super::{ScriptWatch, WatchEvent};
+    use std::time::{Duration, Instant};
+
+    fn secs(base: Instant, s: u64) -> Instant {
+        base + Duration::from_secs(s)
+    }
+
+    #[test]
+    fn it_asks_at_once_then_every_two_seconds() {
+        let t0 = Instant::now();
+        let mut w = ScriptWatch::default();
+        assert_eq!(w.step(t0, false), WatchEvent::SendProbe);
+        assert_eq!(w.step(secs(t0, 1), true), WatchEvent::Quiet);
+        assert_eq!(w.step(secs(t0, 2), false), WatchEvent::Quiet);
+        assert_eq!(w.step(secs(t0, 3), false), WatchEvent::SendProbe);
+    }
+
+    #[test]
+    fn a_question_unanswered_for_five_seconds_is_a_stall_reported_once() {
+        let t0 = Instant::now();
+        let mut w = ScriptWatch::default();
+        assert_eq!(w.step(t0, false), WatchEvent::SendProbe);
+        assert_eq!(w.step(secs(t0, 4), false), WatchEvent::Quiet);
+        assert_eq!(
+            w.step(secs(t0, 5), false),
+            WatchEvent::Stalled(Duration::from_secs(5))
+        );
+        assert_eq!(w.step(secs(t0, 9), false), WatchEvent::Quiet);
+    }
+
+    #[test]
+    fn answering_after_a_stall_reports_the_recovery_once() {
+        let t0 = Instant::now();
+        let mut w = ScriptWatch::default();
+        let _ = w.step(t0, false);
+        let _ = w.step(secs(t0, 6), false);
+        assert_eq!(
+            w.step(secs(t0, 8), true),
+            WatchEvent::Recovered(Duration::from_secs(8))
+        );
+        assert_eq!(w.step(secs(t0, 9), false), WatchEvent::Quiet);
+    }
+
+    #[test]
+    fn a_reset_forgets_the_question() {
+        let t0 = Instant::now();
+        let mut w = ScriptWatch::default();
+        let _ = w.step(t0, false);
+        w.reset();
+        assert_eq!(w.step(secs(t0, 1), false), WatchEvent::SendProbe);
+    }
+}
+
+/// Whether pages get `IntersectionObserver`, from
+/// `FERRITE_INTERSECTION_OBSERVER=on|off` (default on). Servo ships it off, and
+/// Ferrite turns it on because lazy-loading and framework routers call it. It is
+/// also what runs the engine's containing-block walk on every frame, where a bug
+/// (since fixed in `vendor/servo-layout`) froze the Google results page; `off`
+/// is the quick way to find out whether a stuck page is that kind of problem.
+#[must_use]
+pub fn intersection_observer_enabled(setting: Option<&str>) -> bool {
+    !matches!(
+        setting.map(|s| s.trim().to_ascii_lowercase()).as_deref(),
+        Some("off" | "0" | "false" | "no")
+    )
+}
+
+#[cfg(test)]
+mod intersection_observer_setting_tests {
+    use super::intersection_observer_enabled;
+
+    #[test]
+    fn it_is_on_unless_turned_off() {
+        assert!(intersection_observer_enabled(None));
+        assert!(intersection_observer_enabled(Some("")));
+        assert!(intersection_observer_enabled(Some("on")));
+        assert!(!intersection_observer_enabled(Some("off")));
+        assert!(!intersection_observer_enabled(Some(" OFF ")));
+        assert!(!intersection_observer_enabled(Some("0")));
+    }
+}
+
 /// A process-wide counter for frame numbers, so two tabs never share one.
 #[cfg(feature = "servo")]
 pub(crate) fn next_frame_seq() -> u64 {
@@ -478,6 +707,26 @@ mod inner {
         SERVO_ENGINE.with(|cell| drop(cell.borrow_mut().take()));
     }
 
+    /// Makes the rendering context for one tab: always the CPU (software)
+    /// renderer. A GPU renderer was tried and removed: on an Apple M1 with it,
+    /// Google never finished loading and could not be scrolled or clicked, while
+    /// the CPU renderer worked (`docs/DECISIONS.md` ADR-021, `docs/TO-DO.md`
+    /// T-281 and T-305). Says once, in the log, what it uses.
+    fn make_rendering_context(size: PhysicalSize<u32>) -> Result<Rc<dyn RenderingContext>, String> {
+        static REPORTED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+        if !REPORTED.swap(true, std::sync::atomic::Ordering::Relaxed) {
+            eprintln!("[ferrite-render] CPU rendering (software); there is no GPU renderer");
+            if std::env::var_os("FERRITE_RENDERER").is_some() {
+                eprintln!(
+                    "[ferrite-render] FERRITE_RENDERER is ignored: there is only the CPU renderer"
+                );
+            }
+        }
+        SoftwareRenderingContext::new(size)
+            .map(|cpu| Rc::new(cpu) as Rc<dyn RenderingContext>)
+            .map_err(|e| format!("SoftwareRenderingContext: {e:?}"))
+    }
+
     /// The page content every tab is given: the SVG compatibility script.
     fn user_content_manager(servo: &Servo) -> Rc<servo::UserContentManager> {
         USER_CONTENT.with(|cell| {
@@ -517,10 +766,30 @@ mod inner {
                 // is a compile-time feature of the `servo` crate — see the
                 // workspace Cargo.toml — its `dom_crypto_subtle_enabled`
                 // preference is already on.)
+                let cores = std::thread::available_parallelism().map_or(4, |n| n.get());
+                let (webgl_mode, webgl_why) =
+                    super::webgl_decision(std::env::var("FERRITE_WEBGL").ok().as_deref());
+                eprintln!(
+                    "[ferrite-webgl] {} ({webgl_why})",
+                    match webgl_mode {
+                        super::WebGlMode::Off => "off",
+                        super::WebGlMode::V1 => "WebGL 1 only",
+                        super::WebGlMode::V2 => "WebGL 1 and 2",
+                    }
+                );
+                let observer_on = super::intersection_observer_enabled(
+                    std::env::var("FERRITE_INTERSECTION_OBSERVER")
+                        .ok()
+                        .as_deref(),
+                );
+                eprintln!(
+                    "[ferrite-observer] IntersectionObserver {}",
+                    if observer_on { "on" } else { "off" }
+                );
                 let mut prefs = servo::Preferences {
                     dom_indexeddb_enabled: true,
                     dom_cookiestore_enabled: true,
-                    dom_intersection_observer_enabled: true,
+                    dom_intersection_observer_enabled: observer_on,
                     // Web APIs that sign-in and anti-abuse scripts probe for
                     // (and that ordinary sites use) and that Servo ships off
                     // by default. Each is a real implementation being turned
@@ -528,7 +797,11 @@ mod inner {
                     dom_permissions_enabled: true,
                     dom_notification_enabled: true,
                     dom_async_clipboard_enabled: true,
-                    dom_webgl2_enabled: true,
+                    dom_webgl2_enabled: webgl_mode == super::WebGlMode::V2,
+                    // No runtime off-switch exists for WebGL 1 (it is a compile-time
+                    // feature); forcing context creation to fail makes
+                    // `getContext('webgl')` return null, which pages handle.
+                    webgl_testing_context_creation_error: webgl_mode == super::WebGlMode::Off,
                     // Seen failing on GitHub (`e.adoptedStyleSheets is undefined`,
                     // dozens of times while its components start) and Google
                     // (`document.fonts.load is not a function`): both ship off.
@@ -559,6 +832,14 @@ mod inner {
                     dom_sanitizer_enabled: true,
                     dom_visual_viewport_enabled: true,
                     dom_exec_command_enabled: true,
+                    // Style and layout fan out over this many threads; the
+                    // engine's default is 3 whatever the machine (its own
+                    // source calls that a TODO). WebRender's raster pool and
+                    // the worker pools are capped the same way, by the cores
+                    // there are.
+                    layout_threads: cores.clamp(3, 8) as i64,
+                    thread_pool_webrender_workers_max: cores.clamp(4, 8) as u64,
+                    thread_pool_workers_max: cores.clamp(4, 8) as u64,
                     ..servo::Preferences::default()
                 };
                 // Some sites (Google's sign-in among them) decide whether a
@@ -640,6 +921,148 @@ mod inner {
     /// Latest favicon (width, height, RGBA8) shared between Servo's delegate and the session.
     type SharedFavicon = Rc<std::cell::RefCell<Option<(u32, u32, Vec<u8>)>>>;
 
+    /// What the engine is waiting on a person for, with a plain-data view of
+    /// it for the UI.
+    type SharedControl =
+        Rc<std::cell::RefCell<Option<(crate::diag::PageControl, servo::EmbedderControl)>>>;
+
+    /// `#rrggbb` of an engine colour.
+    fn hex_of(c: servo::RgbColor) -> String {
+        format!("#{:02x}{:02x}{:02x}", c.red, c.green, c.blue)
+    }
+
+    fn rect_of(r: servo::DeviceIntRect) -> crate::diag::DeviceRect {
+        crate::diag::DeviceRect {
+            x: r.min.x as f32,
+            y: r.min.y as f32,
+            width: r.width() as f32,
+            height: r.height() as f32,
+        }
+    }
+
+    /// The UI-facing description of an engine control, or `None` for one that
+    /// needs no UI (an input-method request).
+    fn describe_control(control: &servo::EmbedderControl) -> Option<crate::diag::PageControl> {
+        use crate::diag::{DialogKind, MenuItemView, PageControl, SelectOptionView};
+        Some(match control {
+            servo::EmbedderControl::SelectElement(select) => {
+                let chosen = select.selected_options();
+                let mut options = Vec::new();
+                for entry in select.options() {
+                    match entry {
+                        servo::SelectElementOptionOrOptgroup::Option(o) => {
+                            options.push(SelectOptionView {
+                                index: o.id,
+                                label: o.label.clone(),
+                                disabled: o.is_disabled,
+                                selected: chosen.contains(&o.id),
+                                group: None,
+                            });
+                        }
+                        servo::SelectElementOptionOrOptgroup::Optgroup {
+                            label,
+                            options: group,
+                        } => {
+                            for o in group {
+                                options.push(SelectOptionView {
+                                    index: o.id,
+                                    label: o.label.clone(),
+                                    disabled: o.is_disabled,
+                                    selected: chosen.contains(&o.id),
+                                    group: Some(label.clone()),
+                                });
+                            }
+                        }
+                    }
+                }
+                PageControl::Select {
+                    options,
+                    multiple: select.allow_select_multiple(),
+                    anchor: rect_of(select.position()),
+                }
+            }
+            servo::EmbedderControl::SimpleDialog(dialog) => match dialog {
+                servo::SimpleDialog::Alert(a) => PageControl::Dialog {
+                    kind: DialogKind::Alert,
+                    message: a.message().to_string(),
+                    default: String::new(),
+                },
+                servo::SimpleDialog::Confirm(c) => PageControl::Dialog {
+                    kind: DialogKind::Confirm,
+                    message: c.message().to_string(),
+                    default: String::new(),
+                },
+                servo::SimpleDialog::Prompt(p) => PageControl::Dialog {
+                    kind: DialogKind::Prompt,
+                    message: p.message().to_string(),
+                    default: p.current_value().to_string(),
+                },
+            },
+            servo::EmbedderControl::FilePicker(f) => PageControl::File {
+                multiple: f.allow_select_multiple(),
+                accept: f.filter_patterns().iter().map(|p| p.0.clone()).collect(),
+            },
+            servo::EmbedderControl::ColorPicker(c) => PageControl::Color {
+                current: c
+                    .current_color()
+                    .map_or_else(|| "#000000".to_string(), hex_of),
+                anchor: rect_of(c.position()),
+            },
+            servo::EmbedderControl::ContextMenu(m) => {
+                let mut next = 0usize;
+                let items = m
+                    .items()
+                    .iter()
+                    .map(|item| match item {
+                        servo::ContextMenuItem::Item { label, enabled, .. } => {
+                            let index = next;
+                            next += 1;
+                            MenuItemView {
+                                index: Some(index),
+                                label: label.clone(),
+                                enabled: *enabled,
+                            }
+                        }
+                        servo::ContextMenuItem::Separator => MenuItemView {
+                            index: None,
+                            label: String::new(),
+                            enabled: false,
+                        },
+                    })
+                    .collect();
+                PageControl::Menu {
+                    items,
+                    anchor: rect_of(m.position()),
+                }
+            }
+            servo::EmbedderControl::InputMethod(_) => return None,
+        })
+    }
+
+    fn cursor_of(cursor: servo::Cursor) -> crate::diag::PageCursor {
+        use crate::diag::PageCursor as C;
+        use servo::Cursor as S;
+        match cursor {
+            S::None => C::Hidden,
+            S::Pointer | S::Alias => C::Pointer,
+            S::Text | S::VerticalText => C::Text,
+            S::Crosshair | S::Cell => C::Crosshair,
+            S::Grab => C::Grab,
+            S::Grabbing => C::Grabbing,
+            S::Move | S::AllScroll => C::Move,
+            S::NotAllowed | S::NoDrop => C::NotAllowed,
+            S::Wait | S::Progress => C::Wait,
+            S::Help => C::Help,
+            S::ZoomIn => C::ZoomIn,
+            S::ZoomOut => C::ZoomOut,
+            S::EResize | S::WResize | S::EwResize | S::ColResize => C::ResizeHorizontal,
+            S::NResize | S::SResize | S::NsResize | S::RowResize => C::ResizeVertical,
+            S::NeResize | S::SwResize | S::NeswResize => C::ResizeDiagonalUp,
+            S::NwResize | S::SeResize | S::NwseResize => C::ResizeDiagonalDown,
+            S::Default | S::ContextMenu | S::Copy => C::Default,
+        }
+    }
+
     struct HeadlessServoDelegate;
     impl ServoDelegate for HeadlessServoDelegate {}
 
@@ -675,6 +1098,16 @@ mod inner {
         /// converted from whatever `servo::PixelFormat` the page's icon
         /// decoded to.
         favicon: SharedFavicon,
+        /// Every console message, any level (the DevTools-style console).
+        console_log: Rc<std::cell::RefCell<std::collections::VecDeque<crate::diag::ConsoleEntry>>>,
+        /// Every request the engine announced for this tab.
+        net_log: Rc<std::cell::RefCell<std::collections::VecDeque<crate::diag::NetEvent>>>,
+        /// The one thing the page is waiting on a person for.
+        control: SharedControl,
+        /// The pointer the page asked for.
+        cursor: Rc<std::cell::Cell<crate::diag::PageCursor>>,
+        /// Set when the page's script thread or process died.
+        crash: Rc<std::cell::RefCell<Option<crate::diag::CrashNote>>>,
         /// Set when the engine says it has a new frame; cleared when the
         /// session has read that frame back. Reading pixels is by far the most
         /// expensive thing a tick does, so an unchanged page costs nothing.
@@ -695,12 +1128,60 @@ mod inner {
             request.deny();
         }
 
+        /// A `<select>`, an `alert()`/`confirm()`/`prompt()`, a file or colour
+        /// picker or a context menu: kept for the UI to show. A newer one
+        /// replaces (and so dismisses) an older one.
+        fn show_embedder_control(&self, _webview: servo::WebView, control: servo::EmbedderControl) {
+            match describe_control(&control) {
+                Some(view) => *self.control.borrow_mut() = Some((view, control)),
+                None => drop(control),
+            }
+        }
+
+        fn hide_embedder_control(&self, _webview: servo::WebView, id: servo::EmbedderControlId) {
+            let mut slot = self.control.borrow_mut();
+            if slot.as_ref().is_some_and(|(_, c)| c.id() == id) {
+                *slot = None;
+            }
+        }
+
+        fn notify_cursor_changed(&self, _webview: servo::WebView, cursor: servo::Cursor) {
+            self.cursor.set(cursor_of(cursor));
+        }
+
+        /// A page's script thread panicked. The page stops answering; say so
+        /// instead of leaving it looking merely slow.
+        fn notify_crashed(
+            &self,
+            _webview: servo::WebView,
+            reason: String,
+            backtrace: Option<String>,
+        ) {
+            eprintln!("[ferrite-engine] a page crashed: {reason}");
+            if let Some(bt) = &backtrace {
+                eprintln!("{bt}");
+            }
+            *self.crash.borrow_mut() = Some(crate::diag::CrashNote {
+                at_ms: crate::diag::now_ms(),
+                reason,
+                backtrace,
+            });
+        }
+
         fn notify_new_frame_ready(&self, webview: servo::WebView) {
             webview.paint();
             self.frame_ready.set(true);
         }
 
         fn notify_load_status_changed(&self, webview: servo::WebView, status: servo::LoadStatus) {
+            // One line per step a page's load takes, so a page that never
+            // finishes shows how far it got (started, head parsed, complete).
+            eprintln!(
+                "[ferrite-load] {status:?} {}",
+                webview
+                    .url()
+                    .map_or_else(|| "<unknown>".to_string(), |u| u.to_string())
+            );
             match status {
                 servo::LoadStatus::Complete => {
                     let url = webview
@@ -754,11 +1235,29 @@ mod inner {
             level: servo::ConsoleLogLevel,
             message: String,
         ) {
-            // Only capture error-level messages to keep the list focused on
-            // actionable JS failures.
-            if matches!(level, servo::ConsoleLogLevel::Error) {
-                self.console_errors.borrow_mut().push(message);
+            use crate::diag::{push_bounded, ConsoleEntry, ConsoleLevel};
+            let mapped = match level {
+                servo::ConsoleLogLevel::Debug | servo::ConsoleLogLevel::Trace => {
+                    ConsoleLevel::Debug
+                }
+                servo::ConsoleLogLevel::Log | servo::ConsoleLogLevel::Dir => ConsoleLevel::Log,
+                servo::ConsoleLogLevel::Info => ConsoleLevel::Info,
+                servo::ConsoleLogLevel::Warn => ConsoleLevel::Warn,
+                servo::ConsoleLogLevel::Error => ConsoleLevel::Error,
+            };
+            // The error list the app has always printed stays errors only.
+            if mapped == ConsoleLevel::Error {
+                self.console_errors.borrow_mut().push(message.clone());
             }
+            push_bounded(
+                &mut self.console_log.borrow_mut(),
+                ConsoleEntry {
+                    at_ms: crate::diag::now_ms(),
+                    level: mapped,
+                    source: crate::diag::source_of(&message),
+                    message,
+                },
+            );
         }
 
         /// A page asked for a new WebView (`window.open`, `target="_blank"`,
@@ -784,6 +1283,16 @@ mod inner {
 
         fn load_web_resource(&self, _webview: servo::WebView, load: servo::WebResourceLoad) {
             let url = load.request().url.to_string();
+            crate::diag::push_bounded(
+                &mut self.net_log.borrow_mut(),
+                crate::diag::NetEvent {
+                    at_ms: crate::diag::now_ms(),
+                    method: load.request().method.to_string(),
+                    url: url.chars().take(2000).collect(),
+                    kind: format!("{:?}", load.request().destination),
+                    is_main_frame: load.request().is_for_main_frame,
+                },
+            );
             if let Err(e) = self.audit_log.borrow_mut().append(
                 AuditEventKind::CapabilityGranted,
                 uuid::Uuid::new_v4(),
@@ -811,7 +1320,7 @@ mod inner {
     pub struct HeadlessServoSession {
         servo: servo::Servo,
         webview: servo::WebView,
-        rendering_context: Rc<SoftwareRenderingContext>,
+        rendering_context: Rc<dyn RenderingContext>,
         width: u32,
         height: u32,
         /// Cached last frame as raw RGBA bytes (width × height × 4).
@@ -845,8 +1354,20 @@ mod inner {
         shared_console_errors: Rc<std::cell::RefCell<Vec<String>>>,
         /// Shared favicon cell — written by `HeadlessDelegate`, read in `sync_and_read()`.
         shared_favicon: SharedFavicon,
+        shared_control: SharedControl,
+        shared_cursor: Rc<std::cell::Cell<crate::diag::PageCursor>>,
+        shared_crash: Rc<std::cell::RefCell<Option<crate::diag::CrashNote>>>,
+        /// Console messages of every level, drained by `take_console_entries`.
+        shared_console_log:
+            Rc<std::cell::RefCell<std::collections::VecDeque<crate::diag::ConsoleEntry>>>,
+        /// Requests made, drained by `take_net_events`.
+        shared_net_log: Rc<std::cell::RefCell<std::collections::VecDeque<crate::diag::NetEvent>>>,
         /// Most recently synced favicon (updated in `sync_and_read()`).
         last_favicon: Option<(u32, u32, Vec<u8>)>,
+        /// Whether the page's script thread still answers (see [`super::ScriptWatch`]).
+        script_watch: super::ScriptWatch,
+        /// Set by the callback of the outstanding probe.
+        probe_answered: Rc<std::cell::Cell<bool>>,
     }
 
     impl HeadlessServoSession {
@@ -908,11 +1429,7 @@ mod inner {
         fn assemble(
             width: u32,
             height: u32,
-            make: impl FnOnce(
-                &Servo,
-                Rc<SoftwareRenderingContext>,
-                Rc<HeadlessDelegate>,
-            ) -> servo::WebView,
+            make: impl FnOnce(&Servo, Rc<dyn RenderingContext>, Rc<HeadlessDelegate>) -> servo::WebView,
         ) -> Result<Self, String> {
             // ── rustls crypto provider ─────────────────────────────────────
             let _ = aws_lc_rs::default_provider().install_default();
@@ -931,12 +1448,19 @@ mod inner {
                 Rc::new(std::cell::RefCell::new(Vec::new()));
             let shared_favicon: SharedFavicon = Rc::new(std::cell::RefCell::new(None));
             let frame_ready = Rc::new(std::cell::Cell::new(true));
+            let shared_control: SharedControl = Rc::default();
+            let shared_cursor: Rc<std::cell::Cell<crate::diag::PageCursor>> = Rc::default();
+            let shared_crash: Rc<std::cell::RefCell<Option<crate::diag::CrashNote>>> =
+                Rc::default();
+            let shared_console_log: Rc<
+                std::cell::RefCell<std::collections::VecDeque<crate::diag::ConsoleEntry>>,
+            > = Rc::default();
+            let shared_net_log: Rc<
+                std::cell::RefCell<std::collections::VecDeque<crate::diag::NetEvent>>,
+            > = Rc::default();
 
             // ── Rendering context ──────────────────────────────────────────
-            let rendering_context = Rc::new(
-                SoftwareRenderingContext::new(PhysicalSize { width, height })
-                    .map_err(|e| format!("SoftwareRenderingContext: {:?}", e))?,
-            );
+            let rendering_context = make_rendering_context(PhysicalSize { width, height })?;
             rendering_context
                 .make_current()
                 .map_err(|e| format!("make_current: {:?}", e))?;
@@ -956,10 +1480,16 @@ mod inner {
                 page_title: shared_page_title.clone(),
                 console_errors: shared_console_errors.clone(),
                 favicon: shared_favicon.clone(),
+                control: shared_control.clone(),
+                cursor: shared_cursor.clone(),
+                crash: shared_crash.clone(),
+                console_log: shared_console_log.clone(),
+                net_log: shared_net_log.clone(),
                 frame_ready: frame_ready.clone(),
             });
             let webview = make(&servo, rendering_context.clone(), delegate);
 
+            webview.set_hidpi_scale_factor(euclid::Scale::new(super::display_scale()));
             webview.resize(PhysicalSize { width, height });
             servo.spin_event_loop();
 
@@ -982,7 +1512,14 @@ mod inner {
                 last_page_title: None,
                 shared_console_errors,
                 shared_favicon,
+                shared_control,
+                shared_cursor,
+                shared_crash,
+                shared_console_log,
+                shared_net_log,
                 last_favicon: None,
+                script_watch: super::ScriptWatch::default(),
+                probe_answered: Rc::default(),
             })
         }
 
@@ -1093,7 +1630,14 @@ mod inner {
         pub fn sync_state(&mut self) {
             // Sync load status, URL, and page title from delegate callbacks.
             self.last_load_status = self.shared_load_status.borrow().clone();
-            self.current_url = self.shared_url.borrow().clone();
+            let new_url = self.shared_url.borrow().clone();
+            if new_url != self.current_url {
+                // A new page: the old probe's answer will never come.
+                self.script_watch.reset();
+                self.probe_answered = Rc::default();
+            }
+            self.current_url = new_url;
+            self.watch_script_thread();
             self.last_page_title = self.shared_page_title.borrow().clone();
             self.last_favicon = self.shared_favicon.borrow().clone();
             // Without this the delegate's history was written and never read, so
@@ -1101,6 +1645,53 @@ mod inner {
             // empty history in a real Servo build (found by the first real
             // `--features servo` compile, as a dead-code warning on this field).
             self.last_history = self.shared_history.borrow().clone();
+        }
+
+        /// Asks the page's script thread a trivial question every two seconds
+        /// and says, in the tab's console and the log, when it stops answering
+        /// and when it answers again. It never waits for the answer.
+        fn watch_script_thread(&mut self) {
+            use super::WatchEvent;
+            use crate::diag::{push_bounded, ConsoleEntry, ConsoleLevel};
+            let event = self
+                .script_watch
+                .step(std::time::Instant::now(), self.probe_answered.get());
+            let note = |level: ConsoleLevel, message: String| {
+                push_bounded(
+                    &mut self.shared_console_log.borrow_mut(),
+                    ConsoleEntry {
+                        at_ms: crate::diag::now_ms(),
+                        level,
+                        source: None,
+                        message,
+                    },
+                );
+            };
+            match event {
+                WatchEvent::Quiet => {}
+                WatchEvent::SendProbe => {
+                    let answered: Rc<std::cell::Cell<bool>> = Rc::default();
+                    self.probe_answered = answered.clone();
+                    self.webview
+                        .evaluate_javascript("0", move |_| answered.set(true));
+                }
+                WatchEvent::Stalled(waited) => note(
+                    ConsoleLevel::Warn,
+                    format!(
+                        "Ferrite: this page's script has not answered for {} s. It is busy or \
+                         stuck, and scrolling and clicking need it. ({})",
+                        waited.as_secs(),
+                        self.current_url
+                    ),
+                ),
+                WatchEvent::Recovered(waited) => note(
+                    ConsoleLevel::Info,
+                    format!(
+                        "Ferrite: this page's script answered again after {} s.",
+                        waited.as_secs()
+                    ),
+                ),
+            }
         }
 
         /// The render-surface size this session was last asked to have,
@@ -1223,6 +1814,112 @@ mod inner {
         /// Drains and returns all JS console errors collected since the last call.
         pub fn take_console_errors(&mut self) -> Vec<String> {
             std::mem::take(&mut *self.shared_console_errors.borrow_mut())
+        }
+
+        /// Every console message (any level) since the last call, oldest first.
+        pub fn take_console_entries(&mut self) -> Vec<crate::diag::ConsoleEntry> {
+            self.shared_console_log.borrow_mut().drain(..).collect()
+        }
+
+        /// Tells the engine the display's current scale (see [`set_display_scale`]).
+        pub fn apply_display_scale(&self) {
+            self.webview
+                .set_hidpi_scale_factor(euclid::Scale::new(super::display_scale()));
+        }
+
+        /// What the page is waiting on a person for, if anything.
+        pub fn page_control(&self) -> Option<crate::diag::PageControl> {
+            self.shared_control
+                .borrow()
+                .as_ref()
+                .map(|(v, _)| v.clone())
+        }
+
+        /// Answers (or dismisses) the page's pending control.
+        pub fn answer_control(&mut self, answer: crate::diag::ControlAnswer) {
+            use crate::diag::ControlAnswer as A;
+            let Some((_, control)) = self.shared_control.borrow_mut().take() else {
+                return;
+            };
+            match (control, answer) {
+                (servo::EmbedderControl::SelectElement(mut select), A::Select(chosen)) => {
+                    select.select(chosen);
+                    select.submit();
+                }
+                (servo::EmbedderControl::SimpleDialog(servo::SimpleDialog::Alert(a)), _) => {
+                    a.confirm();
+                }
+                (
+                    servo::EmbedderControl::SimpleDialog(servo::SimpleDialog::Confirm(c)),
+                    A::Accept(_),
+                ) => {
+                    c.confirm();
+                }
+                (servo::EmbedderControl::SimpleDialog(servo::SimpleDialog::Confirm(c)), _) => {
+                    c.dismiss();
+                }
+                (
+                    servo::EmbedderControl::SimpleDialog(servo::SimpleDialog::Prompt(mut p)),
+                    A::Accept(text),
+                ) => {
+                    if let Some(text) = text {
+                        p.set_current_value(&text);
+                    }
+                    p.confirm();
+                }
+                (servo::EmbedderControl::SimpleDialog(servo::SimpleDialog::Prompt(p)), _) => {
+                    p.dismiss();
+                }
+                (servo::EmbedderControl::FilePicker(mut f), A::Files(paths)) => {
+                    f.select(&paths);
+                    f.submit();
+                }
+                (servo::EmbedderControl::FilePicker(f), _) => f.dismiss(),
+                (servo::EmbedderControl::ColorPicker(mut c), A::Color(text)) => {
+                    if let Some((red, green, blue)) = crate::diag::parse_hex_color(&text) {
+                        c.select(Some(servo::RgbColor { red, green, blue }));
+                    }
+                    c.submit();
+                }
+                (servo::EmbedderControl::ContextMenu(menu), A::Menu(index)) => {
+                    let action = menu
+                        .items()
+                        .iter()
+                        .filter_map(|item| match item {
+                            servo::ContextMenuItem::Item {
+                                action,
+                                enabled: true,
+                                ..
+                            } => Some(*action),
+                            servo::ContextMenuItem::Item { .. } => None,
+                            servo::ContextMenuItem::Separator => None,
+                        })
+                        .nth(index);
+                    match action {
+                        Some(action) => menu.select(action),
+                        None => menu.dismiss(),
+                    }
+                }
+                (servo::EmbedderControl::ContextMenu(menu), _) => menu.dismiss(),
+                // Anything else (a mismatched answer, a colour picker closed,
+                // a select closed): dropping it tells the engine "no change".
+                (other, _) => drop(other),
+            }
+        }
+
+        /// The pointer the page currently asks for.
+        pub fn cursor(&self) -> crate::diag::PageCursor {
+            self.shared_cursor.get()
+        }
+
+        /// Takes the crash note, if the page died since the last call.
+        pub fn take_crash(&mut self) -> Option<crate::diag::CrashNote> {
+            self.shared_crash.borrow_mut().take()
+        }
+
+        /// Every request announced since the last call, oldest first.
+        pub fn take_net_events(&mut self) -> Vec<crate::diag::NetEvent> {
+            self.shared_net_log.borrow_mut().drain(..).collect()
         }
 
         /// Navigate to `url`, drive the event loop for up to `timeout_secs`, and
@@ -1620,6 +2317,30 @@ impl HeadlessServoSession {
 
     pub fn take_console_errors(&mut self) -> Vec<String> {
         vec![]
+    }
+
+    pub fn take_console_entries(&mut self) -> Vec<crate::diag::ConsoleEntry> {
+        Vec::new()
+    }
+
+    pub fn take_net_events(&mut self) -> Vec<crate::diag::NetEvent> {
+        Vec::new()
+    }
+
+    pub fn apply_display_scale(&self) {}
+
+    pub fn page_control(&self) -> Option<crate::diag::PageControl> {
+        None
+    }
+
+    pub fn answer_control(&mut self, _answer: crate::diag::ControlAnswer) {}
+
+    pub fn cursor(&self) -> crate::diag::PageCursor {
+        crate::diag::PageCursor::Default
+    }
+
+    pub fn take_crash(&mut self) -> Option<crate::diag::CrashNote> {
+        None
     }
 
     pub fn test_js_compat(&mut self, url: &str) -> JSCompatResult {

@@ -1,0 +1,124 @@
+<!--
+title: Live evaluation
+order: 12
+group: Evaluation
+summary: Run the evaluation with a real model (Gemini or Ollama) in the agent's seat. It works in batches a quota can survive, with a cost preview, resume after a crash, and the full AgentDojo import as its default corpus. It has been run once, on one model.
+-->
+<p class="lede">The headline evaluation is scripted. Its agent does what each case's attack says. The live runner is the other half. It puts a <strong>real model</strong> in the agent's seat. Then the question is what a model really does under an injection, and what Ferrite does about it. An injection is hidden text that tries to give the AI new orders. You run the runner on your machine, with your own keys, in batches your quota can survive.</p>
+
+<div class="callout note">
+  <h4>It has been run once</h4>
+  <p>The owner ran it once on a real model. The model was <code>gemma4:31b</code> on Ollama, in both roles, over all 1,984 cases. That gave 3,968 runs, with 0 failures. The results are in <a href="{{ROOT}}docs/evaluation.html#live-results">Evaluation: Live results</a>. Before that run, every behaviour of the runner was tested offline. The tests used a deterministic <code>mock</code> provider and a loopback fake server. The step and token estimates that the cost preview prints are still estimates. This site has not compared them with the real run. Nothing here changes the headline numbers on the <a href="{{ROOT}}docs/evaluation.html">Evaluation</a> page.</p>
+</div>
+
+<p>Some words on this page need a short explanation. The full list is on <a href="{{ROOT}}docs/glossary.html">Words we use</a>.</p>
+<dl class="defs">
+  <dt>Fingerprint</dt><dd>The list of tools and websites a task is expected to need.</dd>
+  <dt>Guard</dt><dd>The check that stops an action outside that list.</dd>
+  <dt>Dry run</dt><dd>A practice run that does nothing real.</dd>
+  <dt>Consent gate</dt><dd>A question asked to the user before the action runs.</dd>
+  <dt>Residual</dt><dd>An attack that looks exactly like the normal task.</dd>
+</dl>
+
+<h2>What it runs</h2>
+<p>For each case, the runner drives the app's own agent loop. It uses the same action schema, system prompt and parser. It runs against the dry-run engine. The injection is planted in the page or tool output that the agent reads. Two roles can each be a model or not. You choose each role on its own:</p>
+<div class="table-wrap"><table>
+<thead><tr><th>Role</th><th><code>llm</code> (default)</th><th>Other</th></tr></thead>
+<tbody>
+<tr><td>Predictor (<code>--predictor</code>)</td><td>The small-tier model proposes the fingerprint's <code>may_use</code> set, as in the app</td><td><code>rules</code>: only the rule layer</td></tr>
+<tr><td>Agent (<code>--agent</code>)</td><td>The main-tier model chooses actions</td><td><code>scripted</code>: the worst-case script, with no calls</td></tr>
+</tbody></table></div>
+<p>The defense differs for each case. The modes in <code>--modes</code> set it (default <code>off,guard</code>):</p>
+<dl class="defs">
+  <dt>off</dt><dd>No defense. This is the baseline.</dd>
+  <dt>guard</dt><dd>The runtime guard refuses every action outside the predicted fingerprint. The sanitizer is off.</dd>
+  <dt>full</dt><dd>The guard, plus the sanitizer on what the agent reads.</dd>
+  <dt>dryrun</dt><dd>Stage one only: the plan on a clean synthetic page, compared with the prediction. This shows the consent burden, which is how many questions the user would be asked.</dd>
+</dl>
+<p>The simulated user refuses every deviation. This is the best case for containment.</p>
+
+<h2>Providers and keys</h2>
+<p>The runner reuses the app's model layer and adds no HTTP stack. So it supports what that layer supports:</p>
+<div class="table-wrap"><table>
+<thead><tr><th><code>--provider</code></th><th>What it is</th><th>Key</th></tr></thead>
+<tbody>
+<tr><td><code>gemini</code></td><td>Google Gemini</td><td><code>FERRITE_GEMINI_API_KEY</code>, or the OS keyring (service <code>ferrite</code>)</td></tr>
+<tr><td><code>ollama</code></td><td>Ollama Cloud, or a local server with <code>--base-url http://localhost:11434</code></td><td><code>OLLAMA_API_KEY</code>, or the keyring. A local server needs none</td></tr>
+<tr><td><code>mock</code></td><td>A deterministic stand-in with no network. It tests the pipeline and says nothing about any model</td><td>none</td></tr>
+</tbody></table></div>
+<p><strong>OpenAI-compatible and Anthropic endpoints are not supported</strong>, because the model layer has no backend for them. Adding one means changing the model layer, not the runner. (You can reach a hosted server that also speaks Ollama's <code>/api/chat</code> with <code>--base-url</code>.)</p>
+<p>The runner reads keys from the environment or the keyring (the OS credential store), and nowhere else. It never accepts a key as a flag. It never prints or writes a key. Error text kept in a result passes through a redactor. The redactor removes the key values the process holds. Model tags are configuration with no default. Use <code>--model TAG</code> for both roles. Or use <code>--small-model</code> and <code>--main-model</code>. Or use the <code>FERRITE_LIVE_*</code> and <code>FERRITE_MODEL_*</code> variables.</p>
+
+<h2>Cost first: <code>--plan</code></h2>
+<p><code>--plan</code> prints what a selection would cost. It calls nothing, so it needs no key:</p>
+<pre><code>$ cargo run --release -p ferrite-eval --example live_eval -- \
+    --plan --provider gemini --model &lt;tag&gt; --corpus agentdojo</code></pre>
+<p>The output lists the cases and runs in the window. It lists how many are already stored. It lists the fingerprint predictions. It lists the agent steps (typical and worst case). It gives a rough token count (characters divided by four). It also says how many invocations the call cap implies. For the full AgentDojo import at the default two modes, it prints <strong>2,092 runs and about 7,300 model calls typical (51,254 at most)</strong>. That is roughly 74 invocations at the default cap of 100 calls. These are estimates from the corpus and the step limit. Only a real run shows what a model really takes, what the cache absorbs, and the provider's own tokenizer.</p>
+
+<h2>Batches, limits and resuming</h2>
+<ul>
+  <li><strong>Selection.</strong> <code>--corpus agentdojo|redteam|core|pilot|agentdojo-hand|all</code> (default <code>agentdojo</code>), <code>--suite agentdojo/banking</code>, <code>--only attack|benign</code>, <code>--seed S</code> (a shuffle you can repeat, so a small batch samples every suite), <code>--offset</code> and <code>--limit</code>.</li>
+  <li><strong>Batches.</strong> <code>--batch-size N</code> runs the next N cases that still have work to do. Run the same command again for the next batch. <code>--batch-index K</code> takes slice K of the whole ordering instead.</li>
+  <li><strong>A hard call cap.</strong> <code>--max-calls N</code> (default 100) caps the requests that reach the provider, retries included. When the cap is spent, the case in flight is dropped and not recorded. It stays pending. The runner writes a partial-results ledger and exits with code 3.</li>
+  <li><strong>Rate limits.</strong> <code>--pause-ms</code> spaces the calls. The runner retries a 429, a server error or a timeout, up to <code>--max-attempts</code> times (default 5). It waits longer each time, with random jitter. It honours the provider's <code>Retry-After</code>, capped at 90 seconds by default, so it does not sleep through an hour-long daily quota. After 3 failed calls in a row (<code>--max-consecutive-failures</code>), the invocation stops with exit code 4. The provider is saying no, so come back later.</li>
+  <li><strong>Failures are not scores.</strong> A call that never got an answer is stored as an error and left out of every rate. This covers a rate limit, an outage, a rejected key or a timeout. <code>--retry-failed</code> redoes it. A model that answers badly <em>is</em> a result. This covers an action that cannot be parsed, an empty reply, or an unusable fingerprint. The fingerprint falls back to empty, and the case is scored as such.</li>
+  <li><strong>Resume.</strong> Results go to an append-only file, one line per case and mode. The file is synced before the next case starts. It lives under <code>target/live-eval/results/</code>. A crash, <kbd>Ctrl</kbd>+<kbd>C</kbd> or a closed laptop loses at most the case in flight. Run the same command again, and it skips what is stored. This works as long as the settings that change behaviour (models, modes, steps, predictor, agent) give the same hash. Model responses are also cached at temperature 0. So re-running an unchanged case is free, and it does not count against the cap.</li>
+</ul>
+<div class="table-wrap"><table>
+<thead><tr><th>Exit code</th><th>Meaning</th></tr></thead>
+<tbody>
+<tr><td>0</td><td>The batch finished cleanly. Go on to the next one.</td></tr>
+<tr><td>1</td><td>An internal or I/O failure.</td></tr>
+<tr><td>2</td><td>Usage or configuration: a bad flag, a missing key or tag.</td></tr>
+<tr><td>3</td><td>The call cap was reached. Nothing is lost.</td></tr>
+<tr><td>4</td><td>The provider kept failing. Wait, then run it again.</td></tr>
+<tr><td>5</td><td>The batch finished but some cases failed. Run it again with <code>--retry-failed</code> after a pause.</td></tr>
+</tbody></table></div>
+
+<h2>What to run first</h2>
+<pre><code># 1. nothing is called; no key needed
+$ cargo run --release -p ferrite-eval --example live_eval -- --plan \
+    --provider gemini --model &lt;tag&gt; --corpus agentdojo --seed 1 --batch-size 10
+
+# 2. one small real batch (key in FERRITE_GEMINI_API_KEY or the keyring)
+$ cargo run --release -p ferrite-eval --example live_eval -- \
+    --provider gemini --model &lt;tag&gt; --corpus agentdojo --seed 1 \
+    --batch-size 10 --max-calls 100 --pause-ms 4000
+
+# 3. read what happened, then repeat step 2 for the next batch
+$ cargo run --release -p ferrite-eval --example live_eval -- --report</code></pre>
+<p>First do a <code>--provider mock --model x</code> run once. You will see the whole flow with no key. If you have <code>just</code>, then <code>just live-eval …</code> and <code>just live-eval-plan …</code> pass the same flags to the same program.</p>
+
+<h2>The report</h2>
+<p><code>--report</code> (optionally <code>--compare gemini:&lt;tag&gt;,ollama:&lt;tag&gt;</code>) writes <code>REPORT.md</code> and <code>report.csv</code> from the stored results. It makes one group for each provider and model pair. Every rate has a 95% Wilson range (a range that shows how uncertain the rate is). Rows with few observations say so. The report covers:</p>
+<ul>
+  <li>Attack runs for each mode: tried, executed, blocked of tried, and final answer.</li>
+  <li>Baseline against defense, case by case: McNemar's exact test and Cohen's <em>h</em>.</li>
+  <li>Benign tasks: false positives and the consent burden.</li>
+  <li>Fingerprint precision and recall.</li>
+  <li>Breakdowns by suite, attack class, ground truth and carrier.</li>
+  <li>Cost: calls, cache hits, rate-limit answers and tokens.</li>
+</ul>
+<p>A residual attack uses the task's own primitive at its own origin. The report counts residual attacks as a floor, not a failure. Some attacks have no attacker string to recognize. The report counts them and leaves them out of attack rates. The first report is summarized on <a href="{{ROOT}}docs/evaluation.html#live-results">Evaluation: Live results</a>.</p>
+
+<h2 id="agentdojo-corpus">The AgentDojo corpus</h2>
+<p>The runner's default corpus is the full AgentDojo import. It has <strong>1,046 cases</strong>: 949 attacks and 97 benign twins. They come from <a href="https://github.com/ethz-spylab/agentdojo" rel="noopener">AgentDojo</a> v1.2.2 (MIT) at commit <code>089ed468cf3ed0322acc66b0211f26d9d90dbf60</code>. <a href="{{ROOT}}docs/evaluation.html#agentdojo-in-full">Evaluation: AgentDojo in full</a> says how it is built, and what it does and does not mean. These are the runner's plan counts for each suite:</p>
+<div class="table-wrap"><table>
+<thead><tr><th>Suite</th><th class="num">User tasks × injection tasks</th><th class="num">Attack cases</th><th class="num">Benign twins</th><th class="num">Cases</th></tr></thead>
+<tbody>
+<tr><td>workspace</td><td class="num">40 × 14</td><td class="num">560</td><td class="num">40</td><td class="num">600</td></tr>
+<tr><td>travel</td><td class="num">20 × 7</td><td class="num">140</td><td class="num">20</td><td class="num">160</td></tr>
+<tr><td>banking</td><td class="num">16 × 9</td><td class="num">144</td><td class="num">16</td><td class="num">160</td></tr>
+<tr><td>slack</td><td class="num">21 × 5</td><td class="num">105</td><td class="num">21</td><td class="num">126</td></tr>
+<tr class="hl"><td>All</td><td class="num"></td><td class="num">949</td><td class="num">97</td><td class="num">1,046</td></tr>
+</tbody></table></div>
+
+<h2>What this does not establish</h2>
+<ul>
+  <li>The labels come from AgentDojo's ground-truth calls, mapped onto Ferrite's primitives. They do not come from AgentDojo's own checks.</li>
+  <li>It uses one attack template (<code>important_instructions</code>) and one try per case, at temperature 0.</li>
+  <li>The environment is synthetic. “Task success” is estimated by the agent giving a final answer.</li>
+  <li>The simulated user refuses every deviation.</li>
+  <li>Only one real model has been run so far (<code>gemma4:31b</code>). It says nothing about other models.</li>
+  <li>The numbers are Ferrite's own measurement. They are <strong>not comparable</strong> to published AgentDojo utility or security scores.</li>
+</ul>

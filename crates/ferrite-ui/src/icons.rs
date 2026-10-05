@@ -118,6 +118,18 @@ pub enum Icon {
     Shield,
     /// The find bar's "previous match".
     ChevronUp,
+    /// DevTools: an informational console message.
+    Info,
+    /// DevTools: a debug-level console message.
+    Bug,
+    /// DevTools: clear the log.
+    Ban,
+    /// DevTools: open the log folder.
+    Folder,
+    /// DevTools: the Network tab.
+    Network,
+    /// A tick mark (a checked option in a page's `<select>`).
+    Check,
 }
 
 // C3c left a note here that a bookmark/star icon was drawn but deliberately
@@ -176,6 +188,12 @@ pub fn icon_bytes(kind: Icon) -> &'static [u8] {
         Icon::Minus => include_bytes!("../assets/icons/minus.svg"),
         Icon::Shield => include_bytes!("../assets/icons/shield.svg"),
         Icon::ChevronUp => include_bytes!("../assets/icons/chevron-up.svg"),
+        Icon::Info => include_bytes!("../assets/icons/info.svg"),
+        Icon::Bug => include_bytes!("../assets/icons/bug.svg"),
+        Icon::Ban => include_bytes!("../assets/icons/ban.svg"),
+        Icon::Folder => include_bytes!("../assets/icons/folder.svg"),
+        Icon::Network => include_bytes!("../assets/icons/network.svg"),
+        Icon::Check => include_bytes!("../assets/icons/check.svg"),
     }
 }
 
@@ -200,7 +218,7 @@ pub fn icon<'a, Message: 'a>(kind: Icon, size: f32, color: Color) -> Element<'a,
 mod tests {
     use super::*;
 
-    const ALL: [Icon; 40] = [
+    const ALL: [Icon; 46] = [
         Icon::Back,
         Icon::Forward,
         Icon::Reload,
@@ -241,6 +259,12 @@ mod tests {
         Icon::Minus,
         Icon::Shield,
         Icon::ChevronUp,
+        Icon::Info,
+        Icon::Bug,
+        Icon::Ban,
+        Icon::Folder,
+        Icon::Network,
+        Icon::Check,
     ];
 
     /// Every icon variant embeds real, well-formed SVG data — catches a

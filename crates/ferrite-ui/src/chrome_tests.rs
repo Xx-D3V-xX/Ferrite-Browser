@@ -63,6 +63,45 @@ fn picking_a_menu_row_closes_the_menu_and_does_the_thing() {
 }
 
 #[test]
+fn developer_tools_open_with_chromes_chord_and_still_with_the_console_key() {
+    #[cfg(target_os = "macos")]
+    let chord = cmd() | Modifiers::ALT;
+    #[cfg(not(target_os = "macos"))]
+    let chord = cmd() | Modifiers::SHIFT;
+    assert!(matches!(
+        press("i", chord),
+        Some(FerriteBrowserMessage::ToggleJsConsole)
+    ));
+    // With Shift held the OS may report the capital.
+    assert!(matches!(
+        press("I", chord),
+        Some(FerriteBrowserMessage::ToggleJsConsole)
+    ));
+    assert!(matches!(
+        press("j", cmd()),
+        Some(FerriteBrowserMessage::ToggleJsConsole)
+    ));
+    // A bare Cmd/Ctrl+I is not bound, and F12 stays the audit log's key.
+    assert!(press("i", cmd()).is_none());
+    assert!(matches!(
+        handle_key_press(Key::Named(Named::F12), Modifiers::empty()),
+        Some(FerriteBrowserMessage::ToggleAuditPanel)
+    ));
+}
+
+#[test]
+fn the_menu_lists_developer_tools_under_the_chord_the_keys_accept() {
+    assert!(matches!(
+        MenuCommand::JsConsole.message(),
+        FerriteBrowserMessage::ToggleJsConsole
+    ));
+    #[cfg(target_os = "macos")]
+    assert_eq!(DEVTOOLS_SHORTCUT, "Cmd+Opt+I");
+    #[cfg(not(target_os = "macos"))]
+    assert_eq!(DEVTOOLS_SHORTCUT, "Ctrl+Shift+I");
+}
+
+#[test]
 fn the_menu_opens_each_library_tab_and_closes_the_other_drawers() {
     for tab in [
         LibraryTab::Bookmarks,

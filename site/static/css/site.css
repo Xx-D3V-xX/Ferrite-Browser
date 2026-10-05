@@ -219,6 +219,14 @@ section.tint { background: var(--bg-soft); border-block: 1px solid var(--line); 
 .shots { display: flex; gap: 22px; justify-content: center; align-items: flex-start; flex-wrap: wrap; }
 .shot { margin: 0; }
 .shot img { border-radius: 14px; border: 1px solid var(--line-strong); box-shadow: var(--shadow-lg); background: var(--surface); }
+.shot img { height: auto; }
+.shot.wide { margin: 28px 0; }
+.shot.wide img { width: 100%; }
+.shot.narrow { max-width: 420px; margin-left: auto; margin-right: auto; }
+.shot.narrow img { width: 100%; }
+.shot.half { flex: 1 1 320px; min-width: 0; max-width: 490px; }
+.shot.half img { width: 100%; }
+.shots.stack { align-items: flex-start; margin: 28px 0; }
 .shot figcaption { margin-top: 12px; font-size: 0.84rem; color: var(--text-3); text-align: center; }
 .theme-shot-light { display: block; } .theme-shot-dark { display: none; }
 :root[data-theme="dark"] .theme-shot-light { display: none; } :root[data-theme="dark"] .theme-shot-dark { display: block; }
@@ -382,3 +390,7 @@ dl.defs dd { margin: 0; color: var(--text-2); }
   .site-header, .side, .toc, .site-footer, .copy { display: none; }
   .docs { display: block; } body { background: #fff; color: #000; }
 }
+
+/* Wide result tables (live results): let long "k/n = p% [lo-hi]" cells wrap. */
+.table-wrap.tight table { font-size: 0.82rem; }
+.table-wrap.tight td.num, .table-wrap.tight th.num { white-space: normal; min-width: 7.5em; }

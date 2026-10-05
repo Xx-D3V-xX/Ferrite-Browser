@@ -87,7 +87,9 @@ jobs:
         if: matrix.platform == 'linux'
         run: |
           cargo install cargo-machete --locked
-          cargo machete
+          # Only our own crates: vendor/ holds upstream Servo code whose
+          # dependency list is not ours to prune (machete misses macro uses).
+          cargo machete crates
 
       # Native install rather than EmbarkStudios/cargo-deny-action: that action
       # is a Docker container action (Linux runners only), and installing the

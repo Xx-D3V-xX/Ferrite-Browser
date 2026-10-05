@@ -32,6 +32,8 @@ case "$platform" in
     mkdir -p "$app/Contents/MacOS" "$app/Contents/Resources"
     install -m 755 "$binary" "$app/Contents/MacOS/ferrite"
     cp "$root/assets/icon/ferrite.icns" "$app/Contents/Resources/ferrite.icns"
+    # For a crash or a freeze: bash Ferrite.app/Contents/Resources/collect-logs.sh
+    install -m 755 "$root/scripts/collect-logs.sh" "$app/Contents/Resources/collect-logs.sh"
     sed -e "s/@VERSION@/$version/" -e "s/@LABEL@/$label/" \
         "$root/packaging/macos/Info.plist" > "$app/Contents/Info.plist"
     # Ad-hoc signature: not a Developer ID, but it lets the bundle run after the

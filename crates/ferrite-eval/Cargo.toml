@@ -17,6 +17,12 @@ ferrite-engine = { workspace = true }
 # B1 (docs/TO-DO.md T-221): tool_decision::ToolDecisionEngine::generate_fingerprint
 # now takes a &dyn ModelProvider explicitly — see harness.rs::run_one/try_real_provider.
 ferrite-model = { workspace = true }
+# The live runner (`src/live`) puts a real model in the agent's seat by driving
+# `ferrite_agent::browser_loop` (the action schema, system prompt and parser the
+# app uses) against the dry-run engine. `eval` sits above `agent` in the
+# dependency direction (`core <- {model, audit, engine} <- ipi <- agent <- {ui,
+# eval, cli}`), so this edge is legal.
+ferrite-agent = { workspace = true }
 uuid = { workspace = true }
 chrono = { workspace = true }
 tokio = { workspace = true }
@@ -28,3 +34,18 @@ thiserror = { workspace = true }
 # seeded RNG (adjudication::ConsentPolicy::deterministic_unit_draw) —
 # already a workspace dependency (ferrite-ipi), version pinned there.
 rand = { workspace = true }
+# The live runner's config hash (which results a re-run may reuse) is a SHA-256 of
+# the settings that change behaviour; `std`'s hasher is not stable across releases.
+sha2 = { workspace = true }
+hex = { workspace = true }
+
+[dev-dependencies]
+# Tests that run the live runner build the dry-run orchestrator with a fixed twin
+# key (`DryRunOrchestrator::with_test_twin_key`) so none of them touches the OS
+# keyring (R7).
+ferrite-ipi = { workspace = true, features = ["test-util"] }
+ferrite-core = { workspace = true, features = ["test-util"] }
+# Loopback-only fake model servers (`live::provider` tests): nothing leaves the
+# machine. The workspace tokio omits "net" on purpose (T-207); enabled here for
+# tests only, the same way `ferrite-agent` and `ferrite-model` do.
+tokio = { workspace = true, features = ["net"] }

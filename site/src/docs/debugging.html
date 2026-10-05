@@ -1,0 +1,101 @@
+<!--
+title: Debugging and logs
+order: 6
+group: Use
+summary: Find out why a page misbehaves: the DevTools Console, Network and Engine tabs, where the log file is, how to collect logs and a crash report to send, and what Ferrite cannot tell you yet.
+-->
+<p class="lede">A page may look wrong. A site may not open. The app may freeze. This page shows how to find out what the page or the engine said about it. It also says what to send when you ask for help. Ferrite keeps a console and a request log for each tab. It keeps a log file for runs without a terminal. A script gathers everything into one zip. Some words here are new. <a href="{{ROOT}}docs/glossary.html">Words we use</a> explains them.</p>
+
+<div class="callout note">
+  <h4>Which build has this</h4>
+  <p>The log file is in the build published on 2026-10-02 (commit <code>f4ed744</code>). DevTools, the crash banner and the log-collection script are newer. They are not in that build yet. To use them, build from source (<a href="{{ROOT}}docs/run-it.html">Run it from source</a>). The screenshots here were rendered on Linux.</p>
+</div>
+
+<h2>DevTools</h2>
+<p>DevTools is the panel for developers. It shows what a page and the engine report. You can open it in three ways. Press <kbd>Cmd</kbd>+<kbd>Opt</kbd>+<kbd>I</kbd> on macOS or <kbd>Ctrl</kbd>+<kbd>Shift</kbd>+<kbd>I</kbd> elsewhere. Press <kbd>Cmd/Ctrl</kbd>+<kbd>J</kbd>. Or use the menu (<em>Developer tools</em>). It is a bottom drawer with three tabs. Counts show on the tab labels. Drag its top edge to resize it.</p>
+<p><kbd>F12</kbd> does <strong>not</strong> open DevTools. It opens the <em>Audit</em> panel. That panel shows the model-call timeline and the security log. In the security log, each entry is tied to the one before it. If you use <kbd>F12</kbd> from habit in Chrome, you will see something else. Whether <kbd>F12</kbd> should open DevTools is an open decision.</p>
+
+<figure class="shot wide">
+  <img class="theme-shot-light" src="{{ROOT}}static/img/devtools-light.png" width="1280" height="800" alt="Ferrite with the DevTools Console open under a shop page. It lists six messages (a log, an info, a warning, a debug line and two errors), then a typed expression and its result." loading="lazy">
+  <img class="theme-shot-dark" src="{{ROOT}}static/img/devtools-dark.png" width="1280" height="800" alt="Ferrite with the DevTools Console open under a shop page in the dark theme. It lists six messages (a log, an info, a warning, a debug line and two errors), then a typed expression and its result." loading="lazy">
+  <figcaption>The Console. The six page messages are what the engine really reported for a local demo page (found by running the page through <code>page_shot</code>). The typed <code>document.title</code> row and its result are sample state.</figcaption>
+</figure>
+
+<h3>Console</h3>
+<ul>
+  <li>Every message that the active tab's page printed, at every level (log, info, warn, error, debug). Also uncaught exceptions, which carry the file, line and column. Each tab has its own log.</li>
+  <li>A filter box, level chips with counts (All, Errors, Warnings, Info, Debug) and a <em>Preserve log</em> checkbox. Without the checkbox, going to a new page starts the log again. With it, the log is kept and the new page is marked.</li>
+  <li>Identical messages in a row fold into one row with a count. Long messages fold to a few lines with <em>Show more</em>.</li>
+  <li>A prompt, <em>Run JavaScript on this page</em>. Type an expression and press <kbd>Enter</kbd> or <em>Run</em>. <kbd>↑</kbd> and <kbd>↓</kbd> recall earlier input (the last 100). This is <strong>you</strong> running script in the page, not the agent.</li>
+  <li>Limits: at most 5,000 rows per tab, 4,000 characters per message and 8 MiB of message text per tab. The oldest rows go first.</li>
+</ul>
+
+<h3>Network</h3>
+<figure class="shot wide">
+  <img class="theme-shot-light" src="{{ROOT}}static/img/devtools-network-light.png" width="1280" height="302" alt="The DevTools Network tab listing five requests (a document, a stylesheet, a script, an image and a fetch) with a notice that status, size and timing are not reported by the engine yet." loading="lazy">
+  <img class="theme-shot-dark" src="{{ROOT}}static/img/devtools-network-dark.png" width="1280" height="302" alt="The DevTools Network tab in the dark theme listing five requests (a document, a stylesheet, a script, an image and a fetch) with a notice that status, size and timing are not reported by the engine yet." loading="lazy">
+  <figcaption>The Network tab. The five requests are the ones the engine reported for the local demo page. The times shown are sample state.</figcaption>
+</figure>
+<p>The tab lists each request that the page made, <em>when it starts</em>. A row shows the relative time, method, type and URL. There is a filter box and there are type chips (Doc, JS, CSS, Img, Font, Media, Other). <code>fetch()</code> and XHR requests fall under <em>Other</em>.</p>
+<div class="callout warn">
+  <h4>What the Network tab cannot tell you</h4>
+  <p>There is <strong>no status code, size or duration</strong>. So there is no waterfall. The engine's response callback is not wired up yet, and the panel says so. A request that fails or returns 404 is listed like any other. For a failed load, look in the Console. That is where the page reports it.</p>
+</div>
+
+<h3>Engine</h3>
+<p>This tab lists two things from this session: panics on engine threads, and pages whose script thread died. A panic is a crash in the code. Each row shows the thread, the message and the location. It also has a backtrace that you can show or hide. A backtrace is a list of the code steps that led to the crash. The engine's own threads panic quietly. Without this tab, you only see a page that stops answering.</p>
+
+<h3>Header buttons</h3>
+<dl class="defs">
+  <dt>Copy all</dt><dd>Copies everything in the current tab to the clipboard as text.</dd>
+  <dt>Save log…</dt><dd>Writes the current tab to <code>ferrite-&lt;console|network|engine&gt;-tab&lt;N&gt;-&lt;date-time&gt;.log</code> in the log folder (see below).</dd>
+  <dt>Open log folder</dt><dd>Opens that folder in Finder, Explorer or your file manager.</dd>
+</dl>
+<p>Ferrite also writes console warnings and errors to the log file. They are lines like <code>[console:error] tab 1: …</code>. It writes at most 20 for each tick of the interface. So one noisy page cannot flood the file.</p>
+
+<h2>The log file</h2>
+<p>You may start the browser from Finder, a Start menu or a launcher. Then it has no terminal, so its standard error output would go nowhere. Ferrite sends that output to a file instead. If you start Ferrite from a terminal, it prints to the terminal and writes <strong>no file</strong>.</p>
+<div class="table-wrap"><table>
+<thead><tr><th>OS</th><th>Folder</th><th>Files</th></tr></thead>
+<tbody>
+<tr><td>macOS</td><td><code>~/Library/Logs/Ferrite/</code> (Console.app shows it under <em>Log Reports</em>)</td><td><code>ferrite.log</code>, and the previous run as <code>ferrite.previous.log</code></td></tr>
+<tr><td>Linux</td><td><code>$XDG_STATE_HOME/ferrite/</code>, otherwise <code>~/.local/state/ferrite/</code></td><td>the same two names</td></tr>
+<tr><td>Windows</td><td><code>%LOCALAPPDATA%\Ferrite\logs</code> is where DevTools saves logs</td><td><strong>No <code>ferrite.log</code> is written on Windows.</strong> In the current code, sending standard error to a file works on Unix only. Run Ferrite from a terminal to see the output.</td></tr>
+</tbody></table></div>
+<p>The file starts with a banner. The banner names the version, the OS, the architecture and the process id. Every panic carries a backtrace. (Ferrite sets <code>RUST_BACKTRACE=1</code> for you if you have not set it.) Suppose the interface stops ticking for 8 seconds. Then one line says so (<code>the UI has not responded for …</code>). One more line appears when it recovers. When you close the window, the process ends within 3 seconds, whatever the engine is doing. If the process had to be forced to end, the log says so. Nobody knows whether this watchdog also covers <kbd>Cmd</kbd>+<kbd>Q</kbd> on macOS, which goes through the system menu.</p>
+<p>On a new machine, look first for the renderer line and the WebGL line (see <a href="{{ROOT}}docs/run-it.html#the-renderer-and-webgl">the renderer and WebGL</a>). The renderer line says <code>CPU rendering</code>, because there is no GPU renderer. The WebGL line says whether pages get WebGL.</p>
+
+<h2>Collecting logs to send</h2>
+<pre><code>$ bash scripts/collect-logs.sh                                      # from a checkout
+$ bash /Applications/Ferrite.app/Contents/Resources/collect-logs.sh  # from the macOS app</code></pre>
+<p>(Or run <code>just collect-logs</code> in a checkout.) The script writes one zip, <code>ferrite-logs-&lt;date-time&gt;.zip</code>. It puts the zip on your Desktop, or in your home folder if you have no Desktop. It prints the path. The zip contains:</p>
+<ul>
+  <li><code>ferrite.log</code> and <code>ferrite.previous.log</code>, or a <code>NO-LOG.txt</code> that says there is no log.</li>
+  <li>On macOS, the three newest Ferrite crash reports from <code>~/Library/Logs/DiagnosticReports</code>.</li>
+  <li>On macOS, if Ferrite is running <em>right now</em>, a 5-second stack sample of it. A stack sample shows what the app is doing. <strong>Run the script while the app is frozen.</strong></li>
+  <li><code>system.txt</code>. On macOS it has the OS version, hardware and display listing. Elsewhere it has <code>uname</code> and the CPU.</li>
+</ul>
+<p>Nothing is uploaded. But the log can contain page URLs and console errors. So read it before you send it. The script needs <code>bash</code> and <code>zip</code>. It does not support Windows. The sampling part works on macOS only. The bundled copy is in the macOS app only. Suppose Ferrite crashes on macOS (exit code 139). Then <code>just crash-report</code> prints the exception and the stack of the crashing thread from the newest report. It uses only Python's standard library.</p>
+
+<h2>A page that never stops loading</h2>
+<p>Some pages paint fully but the stop button stays in the toolbar. You may also be unable to scroll or click. Ferrite writes two kinds of line to help.</p>
+<ul>
+  <li><strong>Load lines.</strong> The log has one <code>[ferrite-load]</code> line for each step of a page's load: <code>Started</code>, <code>HeadParsed</code> and <code>Complete</code>. A page that never reaches <code>Complete</code> shows how far it got. The stop button stays until <code>Complete</code>.</li>
+  <li><strong>A stuck script.</strong> Ferrite asks each page's script thread a trivial question every 2 seconds. It never waits for the answer. If there is no answer for 5 seconds, the Console tab shows <em>this page's script has not answered</em>, and the log shows the same as a <code>[console:warn]</code> line. Scrolling and clicking go through that thread. A stuck script freezes them while the page still paints. An info line says when the page answers again.</li>
+</ul>
+<p>While a page is stuck, open Activity Monitor and look at Ferrite's CPU. Near 100% means a script is busy. Near 0% means it is waiting for something. Then run <code>collect-logs.sh</code> in a second terminal. It includes a 5-second sample of the frozen app. (<code>ferrite.log</code> holds only the newest run. The run before it is <code>ferrite.previous.log</code>.) This was tested on Linux with a page that blocks its script for 9 seconds. It has not run on a Mac.</p>
+
+<h2>Reporting a page that does not work</h2>
+<p>Send these things, most useful first:</p>
+<ol>
+  <li>the address</li>
+  <li>the Console and Engine tabs (<em>Copy all</em>)</li>
+  <li>whether the page shows the crash banner</li>
+  <li>the <code>[ferrite-render]</code> line and the first lines of the log</li>
+  <li>the zip above</li>
+</ol>
+<p><code>page_shot</code> loads a page again without the app (see <a href="{{ROOT}}docs/run-it.html#looking-at-a-page-without-the-app">Run it from source</a>).</p>
+<div class="callout warn">
+  <h4>Some pages still need your log</h4>
+  <p>On the owner's Mac, GitHub now opens and Google shows a results page. But some pages never stopped loading, and the Google results page could not be scrolled or clicked. Three causes were found and fixed. The first was a WebGL panic (see the renderer and WebGL section). The second was icons that painted black on a dark theme. The third was an <strong>infinite loop in the engine's layout code</strong>. It was found from the collect-logs zip: the 5-second sample showed one script thread stuck inside one layout function. A page whose element sits inside a <code>display: contents</code> wrapper made it loop forever when a script observed that element with an IntersectionObserver that has an explicit root. A local test page froze the engine before the fix and loads in 20 ms after it. <strong>None of the three is confirmed on a Mac yet.</strong> Please try Google again with a build that has the fix.</p>
+</div>
