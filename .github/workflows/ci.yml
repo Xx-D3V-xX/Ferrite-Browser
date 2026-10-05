@@ -162,6 +162,11 @@ jobs:
       - name: Run the capture probe (camera, microphone, screen sharing)
         run: cargo run -p ferrite-servo --features servo,media --example capture_probe
 
+      - name: Run the Media Source Extensions probe
+        run: |
+          sudo apt-get install -y --no-install-recommends xvfb
+          xvfb-run -a cargo run -p ferrite-servo --features servo,media --example mse_probe
+
       - name: Run the capture probe against a real screen (X11)
         run: |
           sudo apt-get install -y --no-install-recommends xvfb
@@ -246,6 +251,100 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: ferrite-${{ matrix.platform }}
+          path: dist/*
+          if-no-files-found: error
+          retention-days: 90
+
+  # The same release with video and audio (the `media` feature): macOS and Windows
+  # packages carry their own GStreamer (scripts/bundle-gstreamer.py), the Linux one uses
+  # the system's. Experimental and unable to hold up the release: if this job fails, the
+  # normal packages above are published without it. release.yml attaches whichever
+  # `ferrite-media-*` artifacts exist.
+  build-servo-media-release:
+    name: Build Servo media release (${{ matrix.name }})
+    runs-on: ${{ matrix.os }}
+    needs: ci
+    continue-on-error: true
+
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            platform: linux
+            name: Linux
+            binary: ferrite-shell
+          - os: windows-latest
+            platform: windows
+            name: Windows
+            binary: ferrite-shell.exe
+          - os: macos-latest
+            platform: macos
+            name: macOS
+            binary: ferrite-shell
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install system dependencies (Linux)
+        if: matrix.platform == 'linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            build-essential clang cmake ninja-build pkg-config gperf python3 m4 \
+            libssl-dev libsqlite3-dev libfontconfig1-dev libfreetype-dev \
+            libharfbuzz-dev liblzma-dev libxkbcommon-dev libx11-dev \
+            libxcb-render0-dev libxcb-shape0-dev libxcb-xfixes0-dev \
+            libwayland-dev libegl1-mesa-dev libgl1-mesa-dev libgles2-mesa-dev \
+            libvulkan-dev libudev-dev libdbus-1-dev libglib2.0-dev libunwind-dev \
+            libgstreamer1.0-dev libgstreamer-plugins-base1.0-dev \
+            libgstreamer-plugins-bad1.0-dev
+
+      - name: Install system dependencies (macOS)
+        if: matrix.platform == 'macos'
+        run: |
+          brew update
+          brew install cmake pkg-config openssl gstreamer sqlite
+
+      - name: Install system dependencies (Windows)
+        if: matrix.platform == 'windows'
+        shell: pwsh
+        run: |
+          choco install -y cmake sqlite pkgconfiglite gstreamer gstreamer-devel
+          $root = "C:\gstreamer\1.0\msvc_x86_64"
+          "GSTREAMER_1_0_ROOT_MSVC_X86_64=$root" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+          "PKG_CONFIG_PATH=$root\lib\pkgconfig" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+          "$root\bin" | Out-File -FilePath $env:GITHUB_PATH -Append -Encoding utf8
+
+      - name: Install Rust stable
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache dependencies
+        uses: Swatinem/rust-cache@v2
+        with:
+          key: servo-media-${{ matrix.platform }}
+
+      - name: Build release binary (with Servo and media)
+        run: cargo build --release -p ferrite-shell --features ferrite-servo/servo,ferrite-servo/media
+
+      - name: Derive label
+        id: label
+        shell: bash
+        run: |
+          SHA="${{ github.sha }}"
+          echo "label=${SHA:0:7}" >> "$GITHUB_OUTPUT"
+
+      - name: Package
+        shell: bash
+        run: |
+          bash scripts/package.sh "${{ matrix.platform }}" "${{ steps.label.outputs.label }}" \
+            "target/release/${{ matrix.binary }}" dist media
+
+      - name: Upload package
+        uses: actions/upload-artifact@v4
+        with:
+          name: ferrite-media-${{ matrix.platform }}
           path: dist/*
           if-no-files-found: error
           retention-days: 90

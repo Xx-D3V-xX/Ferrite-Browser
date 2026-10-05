@@ -73,6 +73,14 @@ jobs:
           | macOS (Apple silicon) | \`ferrite-$SHORT-macos-arm64.zip\` | Unzip, drag \`Ferrite.app\` to Applications. Not notarized, so macOS blocks it once: open System Settings → Privacy & Security and click Open Anyway, or run \`xattr -dr com.apple.quarantine /Applications/Ferrite.app\`. |
           | Windows (x64) | \`ferrite-$SHORT-windows-x64.zip\` | Unzip and run \`ferrite.exe\`. SmartScreen may ask once; choose "Run anyway". |
           | Linux (x64) | \`ferrite-$SHORT-linux-x64.tar.gz\` | Extract, then \`./ferrite\` or \`./install.sh\`. Needs a graphical session; see \`README.txt\` inside. |
+
+          ### Media builds (experimental)
+          Files ending in \`-media\` are the same app with video, audio, WebRTC, camera,
+          microphone and screen sharing, and streaming players such as YouTube's (Media Source
+          Extensions). The macOS and Windows ones carry their own GStreamer, so they are large; the
+          Linux one needs GStreamer installed (see its \`README.txt\`). They have not been run on a
+          Mac or on Windows by the people who wrote them. If a media file is missing from the
+          list, its build failed and the normal packages were published without it.
           EOF
 
       - name: Delete existing "latest" release (if any)

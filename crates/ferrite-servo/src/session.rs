@@ -928,6 +928,10 @@ mod inner {
                     prefs.dom_webrtc_enabled = true;
                     prefs.dom_webrtc_transceiver_enabled = true;
                 }
+                // A release that carries its own GStreamer points it at the bundle before
+                // the engine starts GStreamer.
+                #[cfg(feature = "media")]
+                crate::bundle::use_bundled_gstreamer();
                 let servo = ServoBuilder::default()
                     .opts(opts)
                     .preferences(prefs)

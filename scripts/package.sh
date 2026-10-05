@@ -1,7 +1,11 @@
 #!/usr/bin/env bash
 # Packages the release binary for one platform into <out>/ (default: dist/).
 #
-#   scripts/package.sh <macos|windows|linux> <label> <path-to-binary> [out-dir]
+#   scripts/package.sh <macos|windows|linux> <label> <path-to-binary> [out-dir] [media]
+#
+# With `media` the binary is the `media` build (it links GStreamer): macOS and Windows
+# packages carry a GStreamer (scripts/bundle-gstreamer.py) and are named
+# ferrite-<label>-<platform>-media.*; the Linux one uses the system's.
 #
 #   macos    Ferrite.app (icon + Info.plist, ad-hoc signed when codesign exists)
 #            -> ferrite-<label>-macos-arm64.zip
@@ -17,6 +21,9 @@ platform="${1:?platform: macos|windows|linux}"
 label="${2:?label (short commit sha)}"
 binary="${3:?path to the built ferrite-shell binary}"
 out="${4:-dist}"
+media="${5:-}"
+suffix=""
+[ "$media" = "media" ] && suffix="-media"
 
 root="$(cd "$(dirname "$0")/.." && pwd)"
 [ -f "$binary" ] || { echo "binary not found: $binary" >&2; exit 1; }
@@ -36,12 +43,15 @@ case "$platform" in
     install -m 755 "$root/scripts/collect-logs.sh" "$app/Contents/Resources/collect-logs.sh"
     sed -e "s/@VERSION@/$version/" -e "s/@LABEL@/$label/" \
         "$root/packaging/macos/Info.plist" > "$app/Contents/Info.plist"
+    if [ -n "$suffix" ]; then
+      python3 "$root/scripts/bundle-gstreamer.py" macos "$app"
+    fi
     # Ad-hoc signature: not a Developer ID, but it lets the bundle run after the
     # one-time "open anyway" approval instead of being reported as damaged.
     if command -v codesign >/dev/null 2>&1; then
       codesign --force --deep --sign - "$app"
     fi
-    zip_name="ferrite-$label-macos-arm64.zip"
+    zip_name="ferrite-$label-macos-arm64$suffix.zip"
     if command -v ditto >/dev/null 2>&1; then
       ditto -c -k --sequesterRsrc --keepParent "$app" "$out/$zip_name"
     else
@@ -53,7 +63,10 @@ case "$platform" in
     stage="$work/ferrite-$label-windows-x64"
     mkdir -p "$stage"
     cp "$binary" "$stage/ferrite.exe"
-    zip_name="ferrite-$label-windows-x64.zip"
+    if [ -n "$suffix" ]; then
+      python3 "$root/scripts/bundle-gstreamer.py" windows "$stage"
+    fi
+    zip_name="ferrite-$label-windows-x64$suffix.zip"
     if command -v 7z >/dev/null 2>&1; then
       (cd "$work" && 7z a -tzip -bso0 "$out/$zip_name" "ferrite-$label-windows-x64")
     elif command -v zip >/dev/null 2>&1; then
@@ -71,7 +84,10 @@ case "$platform" in
     cp "$root/assets/icon/ferrite-512.png" "$stage/ferrite.png"
     cp "$root/packaging/linux/ferrite.desktop" "$root/packaging/linux/README.txt" "$stage/"
     install -m 755 "$root/packaging/linux/install.sh" "$stage/install.sh"
-    tar_name="ferrite-$label-linux-x64.tar.gz"
+    if [ -n "$suffix" ]; then
+      printf '\nThis is the media build: it needs GStreamer from your system (on Debian or Ubuntu:\nsudo apt install gstreamer1.0-plugins-base gstreamer1.0-plugins-good gstreamer1.0-plugins-bad\ngstreamer1.0-libav gstreamer1.0-nice).\n' >> "$stage/README.txt"
+    fi
+    tar_name="ferrite-$label-linux-x64$suffix.tar.gz"
     tar -C "$work" -czf "$out/$tar_name" "ferrite-$label-linux-x64"
     echo "$out/$tar_name"
     ;;
