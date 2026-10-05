@@ -111,13 +111,13 @@ conclusion from the evaluation numbers. In particular:
   Pages use features that Servo lacks (`:has()`, `@container`, `aspect-ratio` on
   blocks, ...). So some sites look wrong (`docs/TO-DO.md` T-264). The address bar
   searches Google. The agent's own search prompt still uses DuckDuckGo Lite.
-  Since 2026-10-03 the engine is told the display scale. Rendering uses a GPU
-  context where it passes a start-up self-test (macOS by default). Otherwise it
-  uses the CPU. Thread pools follow the core count (ADR-021, T-280 to T-282).
-- **Not verified on the owner's Mac or any real GPU** (as of the dated entries in
-  `docs/PROGRESS.md`). These were checked on Linux only (software rendering,
-  Xvfb):
-  - the GPU path;
+  Since 2026-10-03 the engine is told the display scale. Pages are drawn on the
+  CPU only. A GPU renderer was tried and removed on 2026-10-05, because on an
+  Apple M1 it left Google loading forever and unusable (ADR-021, T-281, T-305).
+  Thread pools follow the core count (T-280, T-282).
+- **Not verified on the owner's Mac** (as of the dated entries in
+  `docs/PROGRESS.md`; the CPU renderer and the Google and GitHub pages have now run
+  there). These were checked on Linux only (software rendering, Xvfb):
   - the display-scale fix;
   - the log file's location;
   - quitting;
@@ -187,7 +187,7 @@ crates/
 ├── ferrite-engine         BrowserEngine trait + MockEngine (always built, no feature flag)
 ├── ferrite-engine-servo   ServoEngine and BorrowedServoEngine, BrowserEngine over real Servo (feature `engine-servo`)
 ├── ferrite-agent          the agent loop (browser_loop), chats, page context, the optional Laya decider
-├── ferrite-servo          the live app's Servo integration (HeadlessServoSession, GPU context, diagnostics), feature `servo`
+├── ferrite-servo          the live app's Servo integration (HeadlessServoSession, diagnostics), feature `servo`
 ├── ferrite-ui             Iced UI: tabs, address bar, DevTools, agent panel, consent cards, settings
 ├── ferrite-shell          top-level binary, CLI dispatch, log file
 └── ferrite-eval           evaluation harness (Servo-free): corpus, harness, adjudication, metrics, live model runner
@@ -412,8 +412,9 @@ the app writes its standard error output to a log file.
 - If you run from a terminal, the app prints there instead.
 - Windows writes no log file yet (`docs/TO-DO.md` T-298).
 
-Read the `[ferrite-render]` line first. It says whether the GPU or the CPU
-renderer is in use, and why. `FERRITE_RENDERER=gpu|cpu|auto` overrides it.
+Read the `[ferrite-render]` and `[ferrite-webgl]` lines first. The first says
+`CPU rendering`: Ferrite has no GPU renderer. The second says whether pages get
+WebGL. `FERRITE_WEBGL=on|off|auto` sets it, and the default is on.
 
 - `just collect-logs` zips the log, the crash reports and the system information
   onto your Desktop. On macOS it also adds a stack sample if the app is frozen.

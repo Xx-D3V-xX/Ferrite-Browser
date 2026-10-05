@@ -300,6 +300,45 @@ pub fn display_scale() -> f32 {
     f32::from_bits(DISPLAY_SCALE_BITS.load(std::sync::atomic::Ordering::Relaxed))
 }
 
+/// Whether pages get WebGL, and the reason, from `FERRITE_WEBGL=on|off|auto`
+/// (default auto, which is on). `off` makes `getContext('webgl')` return null,
+/// so a page falls back to its non-3D version; it is the way out if a page's
+/// WebGL ever freezes it. (The freeze seen on macOS came from the GPU renderer
+/// that has since been removed; see `docs/TO-DO.md` T-305.)
+#[must_use]
+pub fn webgl_decision(setting: Option<&str>) -> (bool, &'static str) {
+    match setting.map(|s| s.trim().to_ascii_lowercase()).as_deref() {
+        Some("on" | "1" | "true" | "yes") => (true, "FERRITE_WEBGL=on"),
+        Some("off" | "0" | "false" | "no") => (false, "FERRITE_WEBGL=off"),
+        _ => (true, "on by default"),
+    }
+}
+
+#[cfg(test)]
+mod webgl_decision_tests {
+    use super::webgl_decision;
+
+    #[test]
+    fn auto_is_on() {
+        assert!(webgl_decision(None).0);
+        assert!(webgl_decision(Some("")).0);
+        assert!(webgl_decision(Some("auto")).0);
+    }
+
+    #[test]
+    fn the_setting_turns_it_on_or_off() {
+        assert!(webgl_decision(Some(" ON ")).0);
+        assert!(!webgl_decision(Some("off")).0);
+        assert!(!webgl_decision(Some("0")).0);
+    }
+
+    #[test]
+    fn the_reason_names_the_setting_when_one_was_given() {
+        assert_eq!(webgl_decision(Some("off")).1, "FERRITE_WEBGL=off");
+        assert_eq!(webgl_decision(None).1, "on by default");
+    }
+}
+
 /// A process-wide counter for frame numbers, so two tabs never share one.
 #[cfg(feature = "servo")]
 pub(crate) fn next_frame_seq() -> u64 {
@@ -500,57 +539,20 @@ mod inner {
         SERVO_ENGINE.with(|cell| drop(cell.borrow_mut().take()));
     }
 
-    /// Which kind of context pages are rendered with.
-    #[derive(Clone, Copy, PartialEq, Eq, Debug)]
-    enum Renderer {
-        /// The GPU when it passes its self-test, else the CPU.
-        Auto,
-        Gpu,
-        Cpu,
-    }
-
-    /// `FERRITE_RENDERER=gpu|cpu|auto` (default auto). On macOS the CPU
-    /// renderer is Apple's generic software OpenGL, which is what made every
-    /// page slow; elsewhere auto keeps the CPU renderer until the GPU path has
-    /// been run on that platform.
-    fn renderer_choice() -> Renderer {
-        match std::env::var("FERRITE_RENDERER")
-            .unwrap_or_default()
-            .to_ascii_lowercase()
-            .as_str()
-        {
-            "gpu" | "hardware" => Renderer::Gpu,
-            "cpu" | "software" => Renderer::Cpu,
-            _ => Renderer::Auto,
-        }
-    }
-
-    /// Makes the rendering context for one tab, preferring the GPU where it is
-    /// trusted, and saying once, in the log, what it chose and why.
+    /// Makes the rendering context for one tab: always the CPU (software)
+    /// renderer. A GPU renderer was tried and removed: on an Apple M1 with it,
+    /// Google never finished loading and could not be scrolled or clicked, while
+    /// the CPU renderer worked (`docs/DECISIONS.md` ADR-021, `docs/TO-DO.md`
+    /// T-281 and T-305). Says once, in the log, what it uses.
     fn make_rendering_context(size: PhysicalSize<u32>) -> Result<Rc<dyn RenderingContext>, String> {
         static REPORTED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
-        let report = |line: String| {
-            if !REPORTED.swap(true, std::sync::atomic::Ordering::Relaxed) {
-                eprintln!("[ferrite-render] {line}");
+        if !REPORTED.swap(true, std::sync::atomic::Ordering::Relaxed) {
+            eprintln!("[ferrite-render] CPU rendering (software); there is no GPU renderer");
+            if std::env::var_os("FERRITE_RENDERER").is_some() {
+                eprintln!(
+                    "[ferrite-render] FERRITE_RENDERER is ignored: there is only the CPU renderer"
+                );
             }
-        };
-        let try_gpu = match renderer_choice() {
-            Renderer::Gpu => true,
-            Renderer::Cpu => false,
-            Renderer::Auto => cfg!(target_os = "macos"),
-        };
-        if try_gpu {
-            match crate::gpu_context::HardwareRenderingContext::new(size) {
-                Ok(gpu) => {
-                    report(format!("GPU rendering ({})", gpu.renderer()));
-                    return Ok(Rc::new(gpu));
-                }
-                Err(e) => report(format!(
-                    "the GPU path did not pass its self-test ({e:?}); using the CPU renderer"
-                )),
-            }
-        } else {
-            report("CPU rendering (FERRITE_RENDERER=gpu to try the GPU)".to_string());
         }
         SoftwareRenderingContext::new(size)
             .map(|cpu| Rc::new(cpu) as Rc<dyn RenderingContext>)
@@ -597,6 +599,12 @@ mod inner {
                 // workspace Cargo.toml — its `dom_crypto_subtle_enabled`
                 // preference is already on.)
                 let cores = std::thread::available_parallelism().map_or(4, |n| n.get());
+                let (webgl_on, webgl_why) =
+                    super::webgl_decision(std::env::var("FERRITE_WEBGL").ok().as_deref());
+                eprintln!(
+                    "[ferrite-webgl] {} ({webgl_why})",
+                    if webgl_on { "on" } else { "off" }
+                );
                 let mut prefs = servo::Preferences {
                     dom_indexeddb_enabled: true,
                     dom_cookiestore_enabled: true,
@@ -608,7 +616,11 @@ mod inner {
                     dom_permissions_enabled: true,
                     dom_notification_enabled: true,
                     dom_async_clipboard_enabled: true,
-                    dom_webgl2_enabled: true,
+                    dom_webgl2_enabled: webgl_on,
+                    // No runtime off-switch exists for WebGL 1 (it is a compile-time
+                    // feature); forcing context creation to fail makes
+                    // `getContext('webgl')` return null, which pages handle.
+                    webgl_testing_context_creation_error: !webgl_on,
                     // Seen failing on GitHub (`e.adoptedStyleSheets is undefined`,
                     // dozens of times while its components start) and Google
                     // (`document.fonts.load is not a function`): both ship off.

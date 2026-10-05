@@ -115,7 +115,7 @@ description: Ferrite is a browser for AI agents. It limits a hijacked agent by d
       <div class="card"><div class="ico">{{icon:list}}</div><h3>Logs you can send</h3><p>Without a terminal, Ferrite writes a log file. After a crash, the page stays frozen under a banner with Reload. A script gathers the log, crash reports and system details into one zip.</p></div>
     </div>
 
-    <p class="tiny" style="margin-top:22px">Pages are drawn on the CPU. The exception is macOS. There, Ferrite tries the GPU first. It falls back to the CPU if a startup self-test fails. (<code>FERRITE_RENDERER=gpu|cpu|auto</code> overrides the choice.) The GPU path has never run on a real GPU or on a Mac. No speed-up has been measured.</p>
+    <p class="tiny" style="margin-top:22px">Pages are drawn on the CPU on every platform. A GPU renderer was tried on a Mac and removed: with it, Google never finished loading and could not be scrolled. No speed has been measured.</p>
 
     <div style="margin-top:72px;max-width:760px">
       <span class="eyebrow">DevTools</span>
@@ -308,7 +308,7 @@ description: Ferrite is a browser for AI agents. It limits a hijacked agent by d
 
     <div class="callout warn" style="margin-top:40px">
       <h4>Check which commit a build comes from</h4>
-      <p>The release page names the commit. The build published on 2026-10-02 (commit <code>f4ed744</code>) is older than several features shown on this site. These are the DevTools panel, resizable panels, page-control overlays, the crash banner, the GPU renderer, the display-scale fix, Google address-bar search and the log-collection script. They are in the source. They arrive in the next build that CI publishes. Until then, build from source to try them.</p>
+      <p>The release page names the commit. The build published on 2026-10-02 (commit <code>f4ed744</code>) is older than several features shown on this site. These are the DevTools panel, resizable panels, page-control overlays, the crash banner, the display-scale fix, Google address-bar search and the log-collection script. They are in the source. They arrive in the next build that CI publishes. Until then, build from source to try them.</p>
     </div>
 
     <h3 style="margin:56px 0 6px">Or build it from source</h3>

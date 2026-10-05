@@ -2,7 +2,7 @@
 title: Run it from source
 order: 3
 group: Start
-summary: Build and run Ferrite from source with just or plain cargo, which recipe to use when, the GPU and CPU renderer switch, how the macOS, Windows and Linux release builds are made, and how to run the live evaluation with a real model.
+summary: Build and run Ferrite from source with just or plain cargo, which recipe to use when, the renderer and the WebGL switch, how the macOS, Windows and Linux release builds are made, and how to run the live evaluation with a real model.
 -->
 <p class="lede">There are two ways to get a running browser. You can download a build. Or you can build it yourself. This page covers the second way. It also covers how the downloadable builds are made. Every command below comes from the repository's <code>justfile</code>, scripts or workflows. Where something has not been run, the page says so. New words are explained in <a href="{{ROOT}}docs/glossary.html">Words we use</a>.</p>
 
@@ -61,19 +61,17 @@ $ just run-fast --no-model-check</code></pre>
   <p>The packaged apps ignore <code>env.local</code>. They also ignore any <code>FERRITE_*</code> variable that you did not export before you started them. Connect a model from the Settings drawer. (The <code>README.txt</code> inside the Linux package still says to put your key in <code>~/.ferrite/env.local</code>. That is out of date. The app never reads that file.)</p>
 </div>
 
-<h2>The renderer: GPU or CPU</h2>
-<p>The engine draws pages into an off-screen buffer. It picks which kind of context to use once for each run. It writes the choice to the log:</p>
-<pre><code>[ferrite-render] GPU rendering (&lt;renderer name&gt;)
-[ferrite-render] the GPU path did not pass its self-test (&lt;error&gt;); using the CPU renderer
-[ferrite-render] CPU rendering (FERRITE_RENDERER=gpu to try the GPU)</code></pre>
+<h2>The renderer and WebGL</h2>
+<p>The engine draws pages into an off-screen buffer. The app writes two lines to the log, once for each run:</p>
+<pre><code>[ferrite-render] CPU rendering (software); there is no GPU renderer
+[ferrite-webgl] on (on by default)</code></pre>
 <dl class="defs">
-  <dt><code>FERRITE_RENDERER=auto</code></dt><dd>The default. <strong>It tries the GPU on macOS only.</strong> On macOS the CPU path is Apple's generic software OpenGL. That is the likely reason pages felt slow. On Linux and Windows it uses the CPU renderer.</dd>
-  <dt><code>gpu</code></dt><dd>Try the GPU on any platform. The context first proves itself. It clears the screen to a colour and reads the colour back. On any failure, it falls back to the CPU renderer.</dd>
-  <dt><code>cpu</code></dt><dd>Never use the GPU. <code>hardware</code> and <code>software</code> are also accepted. They mean <code>gpu</code> and <code>cpu</code>.</dd>
+  <dt>The renderer</dt><dd><strong>Ferrite has no GPU renderer.</strong> Pages are always drawn on the CPU. A GPU renderer was tried and then removed. On an Apple M1 its self-test passed, but with it Google never finished loading and could not be scrolled or clicked. With the CPU renderer, GitHub worked fully. <code>FERRITE_RENDERER</code> is no longer read. The app says so if it is set.</dd>
+  <dt><code>FERRITE_WEBGL=on|off|auto</code></dt><dd>Whether pages get WebGL. The default is <code>auto</code>, which is on. With <code>off</code>, a page gets no WebGL and falls back to its non-3D version. Use it if a page's WebGL ever freezes it.</dd>
 </dl>
 <div class="callout warn">
-  <h4>Never run on a real GPU</h4>
-  <p>On Mesa's software OpenGL, the GPU path gives the same pixels as the CPU path. That is all it has run on. It has not run on a real GPU or on a Mac. Nobody has measured a speed-up. On a new build, check the <code>[ferrite-render]</code> line in the log first. The same release also tells the engine the window's display scale. Before, a Retina page was laid out twice as wide as it looks. The release also sizes the style, layout and worker thread pools to the core count. Nobody has timed either change on real hardware.</p>
+  <h4>Speed is not measured</h4>
+  <p>The CPU renderer may be slower than a GPU one would have been. Nobody has timed it on a Mac. The same release also tells the engine the window's display scale. Before, a Retina page was laid out twice as wide as it looks. It also sizes the style, layout and worker thread pools to the core count. Nobody has timed either change on real hardware.</p>
 </div>
 
 <h2>Release builds</h2>
@@ -89,7 +87,7 @@ $ just run-fast --no-model-check</code></pre>
 <tr><td>Windows (x64)</td><td><code>ferrite-&lt;commit&gt;-windows-x64.zip</code></td><td><code>ferrite.exe</code> with its icon built in. SmartScreen may ask once. Choose <em>Run anyway</em>.</td></tr>
 <tr><td>Linux (x64)</td><td><code>ferrite-&lt;commit&gt;-linux-x64.tar.gz</code></td><td><code>ferrite</code>, an icon, a <code>.desktop</code> entry, <code>README.txt</code> and <code>install.sh</code>. <code>install.sh</code> copies the app into <code>~/.local</code>. You need a graphical session (X11 or Wayland) with OpenGL/EGL. You also need the shared libraries that <code>README.txt</code> names: fontconfig, freetype, libxkbcommon, and the X11 and Wayland client libraries.</td></tr>
 </tbody></table></div>
-<p>The packaging command is <code>scripts/package.sh &lt;macos|windows|linux&gt; &lt;label&gt; &lt;binary&gt;</code>. CI passes the short commit hash as the label. <strong>The project has not checked</strong> the packaged Windows and Linux apps on real machines. The macOS app is the one the owner runs. It has been reported to crash and to need a force-quit. See <a href="{{ROOT}}docs/limits.html">Limits</a>. The latest published release was built from commit <code>f4ed744</code> on 2026-10-02. It does not yet have the page controls, DevTools, resizable panels, crash banner, GPU renderer or the display-scale fix. It does have the log file.</p>
+<p>The packaging command is <code>scripts/package.sh &lt;macos|windows|linux&gt; &lt;label&gt; &lt;binary&gt;</code>. CI passes the short commit hash as the label. <strong>The project has not checked</strong> the packaged Windows and Linux apps on real machines. The macOS app is the one the owner runs. It has been reported to crash and to need a force-quit. See <a href="{{ROOT}}docs/limits.html">Limits</a>. The latest published release was built from commit <code>f4ed744</code> on 2026-10-02. It does not yet have the page controls, DevTools, resizable panels, crash banner or the display-scale fix. It does have the log file.</p>
 
 <h2>Checks before you change anything</h2>
 <div class="table-wrap"><table>
