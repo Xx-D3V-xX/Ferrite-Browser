@@ -2945,7 +2945,14 @@ impl GlobalScope {
         introduction_type: Option<&'static CStr>,
         rval: Option<MutableHandleValue>,
     ) -> Result<(), JavaScriptEvaluationError> {
-        assert!(self.can_run_script());
+        // Ferrite (servo/servo#47331): a document that cannot run script right now
+        // (not fully active while it is changing, or sandboxed by a
+        // `Content-Security-Policy: sandbox` header) is an error for the caller,
+        // not a reason to panic the script thread. The assertion killed the page,
+        // and the embedder's callback never ran.
+        if !self.can_run_script() {
+            return Err(JavaScriptEvaluationError::WebViewNotReady);
+        }
 
         run_a_script::<DomTypeHolder, _, _>(cx, self, |cx| {
             let url = self.api_base_url();

@@ -1112,6 +1112,11 @@ mod inner {
         /// session has read that frame back. Reading pixels is by far the most
         /// expensive thing a tick does, so an unchanged page costs nothing.
         frame_ready: Rc<std::cell::Cell<bool>>,
+        /// The throttle state the session last asked for (see `set_active`).
+        /// The engine applies a throttle to the page that is current when it
+        /// arrives and does not carry it to the next page loaded in the same tab,
+        /// so a background tab that navigates must be told again.
+        throttle: Rc<std::cell::Cell<Option<bool>>>,
     }
 
     impl WebViewDelegate for HeadlessDelegate {
@@ -1182,6 +1187,11 @@ mod inner {
                     .url()
                     .map_or_else(|| "<unknown>".to_string(), |u| u.to_string())
             );
+            // A new page in a background tab starts un-throttled: tell the engine
+            // again now that the page (and its window) exists.
+            if status == servo::LoadStatus::HeadParsed && self.throttle.get() == Some(true) {
+                webview.set_throttled(true);
+            }
             match status {
                 servo::LoadStatus::Complete => {
                     let url = webview
@@ -1368,6 +1378,8 @@ mod inner {
         script_watch: super::ScriptWatch,
         /// Set by the callback of the outstanding probe.
         probe_answered: Rc<std::cell::Cell<bool>>,
+        /// The throttle state last sent to the engine (`None` before the first).
+        throttle_sent: Rc<std::cell::Cell<Option<bool>>>,
     }
 
     impl HeadlessServoSession {
@@ -1438,6 +1450,7 @@ mod inner {
             let audit_log = shared_audit_log()?;
 
             // ── Shared delegate ↔ session state ────────────────────────────
+            let throttle_sent: Rc<std::cell::Cell<Option<bool>>> = Rc::default();
             let shared_load_status = Rc::new(std::cell::RefCell::new(LoadStatus::Loading));
             let shared_url = Rc::new(std::cell::RefCell::new("about:blank".to_string()));
             let shared_history: Rc<std::cell::RefCell<(Vec<String>, usize)>> =
@@ -1486,6 +1499,7 @@ mod inner {
                 console_log: shared_console_log.clone(),
                 net_log: shared_net_log.clone(),
                 frame_ready: frame_ready.clone(),
+                throttle: throttle_sent.clone(),
             });
             let webview = make(&servo, rendering_context.clone(), delegate);
 
@@ -1520,6 +1534,7 @@ mod inner {
                 last_favicon: None,
                 script_watch: super::ScriptWatch::default(),
                 probe_answered: Rc::default(),
+                throttle_sent,
             })
         }
 
@@ -2025,6 +2040,13 @@ mod inner {
         /// WebView and hit-tests pointer input only against shown WebViews, so a
         /// tab that was never focused/shown does not react to input.
         pub fn set_active(&self, active: bool) {
+            // A background tab is throttled (timers slowed, animations stopped)
+            // and its document is hidden; the active one is not. Sent only when it
+            // changes, because this is called whenever tabs are re-synced.
+            if self.throttle_sent.get() != Some(!active) {
+                self.throttle_sent.set(Some(!active));
+                self.webview.set_throttled(!active);
+            }
             if active {
                 self.frame_ready.set(true);
                 self.webview.show();

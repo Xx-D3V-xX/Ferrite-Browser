@@ -2451,6 +2451,8 @@ impl Document {
 
                 // Step 9.10. Set the Document's page showing to true.
                 document.page_showing.set(true);
+                // Ferrite: a page that is showing and not throttled is visible.
+                document.apply_throttle_visibility(cx, window.throttled());
 
                 // Step 9.11. Fire a page transition event named pageshow at window with false.
                 let page_show_event = PageTransitionEvent::new(
@@ -3312,7 +3314,20 @@ impl Document {
         depth: &ResizeObservationDepth,
     ) -> bool {
         let mut has_active_resize_observations = false;
-        for observer in self.resize_observers.borrow_mut().iter_mut() {
+        // Ferrite: do not hold `resize_observers` borrowed while observers
+        // measure boxes. Measuring runs a reflow, which can clone an inline
+        // SVG and allocate, and an allocation can start a garbage collection
+        // that traces this very field (`Document::trace` borrows it) and
+        // panics with "already mutably borrowed". See FERRITE-PATCHES.md.
+        #[expect(clippy::redundant_iter_cloned)]
+        let observers: Vec<DomRoot<ResizeObserver>> = self
+            .resize_observers
+            .borrow()
+            .iter()
+            .cloned()
+            .map(|obs| DomRoot::from_ref(&*obs))
+            .collect();
+        for observer in observers {
             observer.gather_active_resize_observations_at_depth(
                 no_gc,
                 depth,
@@ -5007,6 +5022,24 @@ impl Document {
     }
     pub(crate) fn set_declarative_refresh(&self, refresh: DeclarativeRefresh) {
         *self.declarative_refresh.borrow_mut() = Some(refresh);
+    }
+
+    /// Ferrite: makes the visibility state follow the throttle state. A document
+    /// the embedder is showing is "visible", one it has throttled (a background
+    /// tab) is "hidden". Only once the page is showing: before that the load path
+    /// decides. The engine never did this on an ordinary load, so every page saw
+    /// `document.visibilityState == "hidden"` and the wake-lock API refused it as
+    /// "not visible" (see FERRITE-PATCHES.md).
+    pub(crate) fn apply_throttle_visibility(&self, cx: &mut JSContext, throttled: bool) {
+        if !self.page_showing.get() {
+            return;
+        }
+        let state = if throttled {
+            DocumentVisibilityState::Hidden
+        } else {
+            DocumentVisibilityState::Visible
+        };
+        self.update_visibility_state(cx, state);
     }
 
     /// <https://html.spec.whatwg.org/multipage/#visibility-state>

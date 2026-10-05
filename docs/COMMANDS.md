@@ -1004,6 +1004,10 @@ positional:
 - the display scale (1.0). A scale of `2` renders as a Retina screen would. Then a
   1280-pixel frame is a 640 CSS-pixel viewport.
 
+Set `PAGE_SHOT_BACKGROUND=1` to load the page as a background tab (the engine
+throttles it: timers run about once a second, animation frames stop, and
+`document.visibilityState` is `hidden`). Without it the page is the active tab.
+
 It prints these lines:
 
 - `URL`

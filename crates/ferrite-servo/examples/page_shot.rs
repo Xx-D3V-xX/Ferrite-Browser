@@ -26,7 +26,18 @@ fn main() {
     ferrite_servo::session::set_display_scale(scale);
 
     let mut session = HeadlessServoSession::new(width, height).expect("engine starts");
-    session.set_active(true);
+    // PAGE_SHOT_BACKGROUND=1 loads the page as a background tab (throttled, hidden).
+    let background = std::env::var_os("PAGE_SHOT_BACKGROUND").is_some();
+    session.set_active(!background);
+    if background {
+        // Let the engine apply the throttle to the blank page first; a page
+        // loaded afterwards in the same tab inherits it.
+        let settle = Instant::now() + Duration::from_millis(700);
+        while Instant::now() < settle {
+            session.spin();
+            std::thread::sleep(Duration::from_millis(8));
+        }
+    }
     let started = Instant::now();
     session.navigate(&url);
 
