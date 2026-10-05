@@ -653,3 +653,28 @@ absent in this Servo and are listed by the probe as gaps.
 **Why not the alternatives.** Forking the whole engine would mean tracking Servo's git tree (the position ADR-013 moved away from). A page-level shim cannot reach an unforgeable property. Doing nothing leaves the script thread killable by any page.
 
 **Not claimed.** That this was what stopped GitHub opening for the owner: the panic was never reproduced, and GitHub cannot be reached from the build environment (T-283, T-290). The vendored copy adds about a full crate of third-party source to the repository and must be re-derived by hand on an engine upgrade.
+
+## ADR-023 — A person decides what a page may use on their machine, and an agent at work removes the standing yes
+
+**Date:** 2026-10-05. **Status:** live. Implemented in `crates/ferrite-servo/src/permissions.rs`, `session.rs`, `crates/ferrite-ui/src/permission.rs` (T-314).
+
+**Context.** The owner asked for the camera, the microphone and screen sharing, "as they should be there in a browser", and for the defense to be improved wherever the AI agent makes that unsafe. The engine had a `getUserMedia` that handed out the camera with no question asked, so the first version of this work refused capture outright (T-313). A browser that cannot capture is not a browser; one that captures unasked is not safe. The agent adds a third danger: an injected instruction can send it to any page, including one that already holds a standing permission, and the capture then starts with nobody looking.
+
+**Decision.** (1) A page's request becomes a prompt, drawn by the shell, answered with the shell's own buttons or Escape, and nothing the page draws or the agent does can reach it (the agent has no action for it; a test pins that). (2) One prompt per request: camera and microphone together. (3) The screen is asked every time, and an "allow" for it is never kept. (4) A kept "allow" for the camera or microphone is not used while the agent is working in the tab; the person is asked again and the card says why, and offers no "always" then. (5) A kept "block" always holds. (6) The agent holds its next step while a request waits, so it cannot act on a page that is asking for something. (7) A page that is capturing is shown (a bar with "Stop sharing") and cannot hide it. (8) Every decision is written to the audit log, with whether the agent was working. (9) What Ferrite has nothing behind (location, push, MIDI, Bluetooth) is refused; the screen wake lock is granted.
+
+**Why not the alternatives.** Refusing capture was the only safe thing while nobody could be asked, and was wrong as a product. Asking only once per site, with no regard for the agent, leaves the standing permission as the injection path. Letting the model answer prompts, even "carefully", puts the decision where the attacker writes. Treating capture as one more agent action to predict (the fingerprint) does not fit: the page asks, not the agent, and the right gate is the person.
+
+**Not claimed.** That this is tested with a real camera or microphone (none exists on the build machine), on macOS or on Windows. That an iframe's request is attributed to the frame: the card names the tab's origin.
+
+## ADR-024 — Where the engine is missing a feature that is mostly a protocol, write it as a script and test it in the engine
+
+**Date:** 2026-10-05. **Status:** live (T-314).
+
+**Context.** Service workers and container queries were switched off in the engine for good reasons (the worker never leaves "installing"; the style engine drops `@container` unless built for Firefox). Fixing them inside the engine means the network stack and layout loop. Both are, for what pages actually use, a protocol over things the engine does have: dedicated workers, `postMessage`, IndexedDB, `ResizeObserver`, `fetch`, ordinary CSS.
+
+**Decision.** `sw_compat.js` and `cq_compat.js` define them, each with a header that says what differs from the real thing, each skipped when the engine ever has its own, each with a probe that runs in the real engine (`probe-sw`, `probe-web-api`). They are user scripts, not changes to a page; nothing outside the page can observe them except through the same APIs.
+
+**Why not the alternatives.** Leaving them off makes sites that wait for `serviceWorker.ready` hang, or lays out container-query designs in their narrowest form. A native implementation is the better end state and is not ruled out; it is days of engine work with a risk of layout hangs, and the script is replaceable by it.
+
+**Not claimed.** Offline use (the worker lives in the page), navigations through a worker, push, nearest-container semantics for nested containers of one name.
+
