@@ -77,6 +77,14 @@ $ bash /Applications/Ferrite.app/Contents/Resources/collect-logs.sh  # from the 
 </ul>
 <p>Nothing is uploaded. But the log can contain page URLs and console errors. So read it before you send it. The script needs <code>bash</code> and <code>zip</code>. It does not support Windows. The sampling part works on macOS only. The bundled copy is in the macOS app only. Suppose Ferrite crashes on macOS (exit code 139). Then <code>just crash-report</code> prints the exception and the stack of the crashing thread from the newest report. It uses only Python's standard library.</p>
 
+<h2>A page that never stops loading</h2>
+<p>Some pages paint fully but the stop button stays in the toolbar. You may also be unable to scroll or click. Ferrite writes two kinds of line to help.</p>
+<ul>
+  <li><strong>Load lines.</strong> The log has one <code>[ferrite-load]</code> line for each step of a page's load: <code>Started</code>, <code>HeadParsed</code> and <code>Complete</code>. A page that never reaches <code>Complete</code> shows how far it got. The stop button stays until <code>Complete</code>.</li>
+  <li><strong>A stuck script.</strong> Ferrite asks each page's script thread a trivial question every 2 seconds. It never waits for the answer. If there is no answer for 5 seconds, the Console tab shows <em>this page's script has not answered</em>, and the log shows the same as a <code>[console:warn]</code> line. Scrolling and clicking go through that thread. A stuck script freezes them while the page still paints. An info line says when the page answers again.</li>
+</ul>
+<p>While a page is stuck, open Activity Monitor and look at Ferrite's CPU. Near 100% means a script is busy. Near 0% means it is waiting for something. Then run <code>collect-logs.sh</code> in a second terminal. It includes a 5-second sample of the frozen app. (<code>ferrite.log</code> holds only the newest run. The run before it is <code>ferrite.previous.log</code>.) This was tested on Linux with a page that blocks its script for 9 seconds. It has not run on a Mac.</p>
+
 <h2>Reporting a page that does not work</h2>
 <p>Send these things, most useful first:</p>
 <ol>
@@ -88,6 +96,6 @@ $ bash /Applications/Ferrite.app/Contents/Resources/collect-logs.sh  # from the 
 </ol>
 <p><code>page_shot</code> loads a page again without the app (see <a href="{{ROOT}}docs/run-it.html#looking-at-a-page-without-the-app">Run it from source</a>).</p>
 <div class="callout warn">
-  <h4>GitHub still needs your log</h4>
-  <p>On the owner's Mac, GitHub does not open. The cause is not known. The first log was empty, because the app printed nothing. Ferrite fixed a script-thread panic in a vendored engine patch. A vendored patch is a changed copy of the engine kept in the repository. Nobody could make the panic happen again, so it is not proven to be the cause. The sandbox where this was studied blocks GitHub's asset host. So the real page could not be loaded there. The log would settle it. So would the collect-logs zip. They must come from a build that has the console and request logging. Capture them right after loading GitHub. The same is true for a Google results page pinned to the left edge. The likely cause is the missing display scale, but nobody has seen it directly.</p>
+  <h4>Some pages still need your log</h4>
+  <p>On the owner's Mac, GitHub now opens and Google shows a signed-in results page. But some pages still never stop loading, and the Google results page could not be scrolled or clicked. Two causes were found and fixed: a WebGL panic (see the renderer and WebGL section) and icons that painted black on a dark theme. The loading problem itself is not explained. The sandbox where this was studied blocks Google, so the page could not be loaded there. The load lines, the stuck-script warning and a collect-logs zip taken while the page is stuck would settle it.</p>
 </div>
