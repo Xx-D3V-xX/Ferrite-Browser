@@ -478,6 +478,35 @@ mod script_watch_tests {
     }
 }
 
+/// Whether pages get `IntersectionObserver`, from
+/// `FERRITE_INTERSECTION_OBSERVER=on|off` (default on). Servo ships it off, and
+/// Ferrite turns it on because lazy-loading and framework routers call it. It is
+/// also what runs the engine's containing-block walk on every frame, where a bug
+/// (since fixed in `vendor/servo-layout`) froze the Google results page; `off`
+/// is the quick way to find out whether a stuck page is that kind of problem.
+#[must_use]
+pub fn intersection_observer_enabled(setting: Option<&str>) -> bool {
+    !matches!(
+        setting.map(|s| s.trim().to_ascii_lowercase()).as_deref(),
+        Some("off" | "0" | "false" | "no")
+    )
+}
+
+#[cfg(test)]
+mod intersection_observer_setting_tests {
+    use super::intersection_observer_enabled;
+
+    #[test]
+    fn it_is_on_unless_turned_off() {
+        assert!(intersection_observer_enabled(None));
+        assert!(intersection_observer_enabled(Some("")));
+        assert!(intersection_observer_enabled(Some("on")));
+        assert!(!intersection_observer_enabled(Some("off")));
+        assert!(!intersection_observer_enabled(Some(" OFF ")));
+        assert!(!intersection_observer_enabled(Some("0")));
+    }
+}
+
 /// A process-wide counter for frame numbers, so two tabs never share one.
 #[cfg(feature = "servo")]
 pub(crate) fn next_frame_seq() -> u64 {
@@ -748,10 +777,19 @@ mod inner {
                         super::WebGlMode::V2 => "WebGL 1 and 2",
                     }
                 );
+                let observer_on = super::intersection_observer_enabled(
+                    std::env::var("FERRITE_INTERSECTION_OBSERVER")
+                        .ok()
+                        .as_deref(),
+                );
+                eprintln!(
+                    "[ferrite-observer] IntersectionObserver {}",
+                    if observer_on { "on" } else { "off" }
+                );
                 let mut prefs = servo::Preferences {
                     dom_indexeddb_enabled: true,
                     dom_cookiestore_enabled: true,
-                    dom_intersection_observer_enabled: true,
+                    dom_intersection_observer_enabled: observer_on,
                     // Web APIs that sign-in and anti-abuse scripts probe for
                     // (and that ordinary sites use) and that Servo ships off
                     // by default. Each is a real implementation being turned

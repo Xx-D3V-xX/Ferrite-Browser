@@ -67,6 +67,7 @@ $ just run-fast --no-model-check</code></pre>
 [ferrite-webgl] on (on by default)</code></pre>
 <dl class="defs">
   <dt>The renderer</dt><dd><strong>Ferrite has no GPU renderer.</strong> Pages are always drawn on the CPU. A GPU renderer was tried and then removed. On an Apple M1 its self-test passed, but with it Google never finished loading and could not be scrolled or clicked. With the CPU renderer, GitHub worked fully. <code>FERRITE_RENDERER</code> is no longer read. The app says so if it is set.</dd>
+  <dt><code>FERRITE_INTERSECTION_OBSERVER=on|off</code></dt><dd>Whether pages get <code>IntersectionObserver</code>. The default is on. It is the feature behind lazy-loaded images and infinite scroll. Use <code>off</code> as a quick test when a page never stops loading. A page that checks for the feature then skips it. The app prints one <code>[ferrite-observer]</code> line at startup.</dd>
   <dt><code>FERRITE_WEBGL=off|webgl1|on|auto</code></dt><dd>Which WebGL pages get. The default is <code>auto</code>, which is <strong>WebGL 1 only</strong>. <code>on</code> gives WebGL 1 and 2. With <code>off</code>, a page gets no WebGL and falls back to its non-3D version. WebGL 2 is off by default because of a known engine bug on macOS: a WebGL 2 page leaves a GL error pending, the next buffer swap fails, and the engine's WebGL thread panics. Ferrite has two fixes in vendored engine crates, and neither has run on a Mac.</dd>
 </dl>
 <div class="callout warn">
