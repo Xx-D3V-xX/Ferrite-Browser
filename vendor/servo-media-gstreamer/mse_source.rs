@@ -35,6 +35,15 @@ use gstreamer::prelude::*;
 use gstreamer::subclass::prelude::*;
 use url::Url;
 
+/// The debug category: `GST_DEBUG=servomse:6` shows what the source and its feeders do.
+static CAT: LazyLock<gstreamer::DebugCategory> = LazyLock::new(|| {
+    gstreamer::DebugCategory::new(
+        "servomse",
+        gstreamer::DebugColorFlags::empty(),
+        Some("Servo Media Source Extensions source"),
+    )
+});
+
 /// How long a feeder waits for a frame before it looks at the world again.
 const POLL: Duration = Duration::from_millis(100);
 
@@ -78,6 +87,9 @@ mod imp {
     struct State {
         shared: Option<Arc<Shared>>,
         stop: Option<Arc<AtomicBool>>,
+        /// The streams built for the current run, taken apart when the player stops (it
+        /// stops at the end of the stream, and starts again for a seek or a replay).
+        pads: Vec<(gstreamer::Element, gstreamer::GhostPad)>,
     }
 
     #[derive(Default)]
@@ -133,8 +145,12 @@ mod imp {
                 _ => {},
             }
             let result = self.parent_change_state(transition);
-            if transition == gstreamer::StateChange::ReadyToNull {
+            if matches!(
+                transition,
+                gstreamer::StateChange::PausedToReady | gstreamer::StateChange::ReadyToNull
+            ) {
                 self.stop();
+                self.remove_pads();
             }
             result
         }
@@ -144,6 +160,7 @@ mod imp {
 
     impl ServoMseSrc {
         fn start(&self) -> Result<(), gstreamer::StateChangeError> {
+            gstreamer::info!(CAT, imp = self, "starting: building the streams");
             let mut state = self.state.lock().unwrap();
             let Some(shared) = state.shared.clone() else {
                 gstreamer::element_imp_error!(
@@ -167,8 +184,35 @@ mod imp {
         }
 
         fn stop(&self) {
+            gstreamer::info!(CAT, imp = self, "stopping");
             if let Some(stop) = self.state.lock().unwrap().stop.take() {
                 stop.store(true, Ordering::Relaxed);
+            }
+        }
+
+        /// Keeps a stream the pad builder made; if the run it belongs to was stopped
+        /// meanwhile, takes it apart again at once.
+        pub(super) fn remember(
+            &self,
+            stop: &AtomicBool,
+            appsrc: gstreamer::Element,
+            ghost: gstreamer::GhostPad,
+        ) {
+            let mut state = self.state.lock().unwrap();
+            state.pads.push((appsrc, ghost));
+            if stop.load(Ordering::Relaxed) {
+                drop(state);
+                self.remove_pads();
+            }
+        }
+
+        fn remove_pads(&self) {
+            let pads = std::mem::take(&mut self.state.lock().unwrap().pads);
+            let bin = self.obj();
+            for (appsrc, ghost) in pads {
+                let _ = bin.remove_pad(&ghost);
+                let _ = appsrc.set_state(gstreamer::State::Null);
+                let _ = bin.remove(&appsrc);
             }
         }
     }
@@ -243,6 +287,24 @@ impl Starvation {
             .map(|p| p.nseconds() as i64)
     }
 
+    /// Whether the pipeline is playing. Only a playing pipeline can run out of data, and
+    /// only then is its position the playhead: after a seek, a paused one still reports
+    /// where it was before.
+    fn playing(&self) -> bool {
+        let mut object: gstreamer::Object = match self.bin.upgrade() {
+            Some(bin) => bin.upcast(),
+            None => return false,
+        };
+        while let Some(parent) = object.parent() {
+            object = parent;
+        }
+        object
+            .downcast::<gstreamer::Element>()
+            .is_ok_and(|pipeline| {
+                pipeline.state(gstreamer::ClockTime::ZERO).1 == gstreamer::State::Playing
+            })
+    }
+
     fn post(&self, percent: i32) {
         if let Some(bin) = self.bin.upgrade() {
             let message = gstreamer::message::Buffering::builder(percent)
@@ -297,6 +359,7 @@ fn build_pads(bin: glib::WeakRef<ServoMseSrc>, shared: Arc<Shared>, stop: Arc<At
         }
     };
     let Some(bin) = bin.upgrade() else { return };
+    gstreamer::info!(CAT, "tracks have data, timeline starts at {start}");
     let group_id = gstreamer::GroupId::next();
     let push_lock = Arc::new(Mutex::new(()));
     let starvation = Arc::new(Starvation {
@@ -318,7 +381,7 @@ fn build_pads(bin: glib::WeakRef<ServoMseSrc>, shared: Arc<Shared>, stop: Arc<At
             );
             continue;
         }
-        match make_pad(&bin, &shared, slot, &info, group_id, start, &push_lock) {
+        match make_pad(&bin, &shared, slot, &info, group_id, start, &push_lock, &stop) {
             Ok(appsrc) => feeders.push(Feeder {
                 appsrc,
                 shared: shared.clone(),
@@ -354,6 +417,7 @@ fn build_pads(bin: glib::WeakRef<ServoMseSrc>, shared: Arc<Shared>, stop: Arc<At
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn make_pad(
     bin: &ServoMseSrc,
     shared: &Arc<Shared>,
@@ -362,6 +426,7 @@ fn make_pad(
     group_id: gstreamer::GroupId,
     start: i64,
     push_lock: &Arc<Mutex<()>>,
+    stop: &AtomicBool,
 ) -> Result<gstreamer_app::AppSrc, glib::BoolError> {
     let (prefix, template) = match info.kind {
         TrackKind::Video => ("video", &*imp::VIDEO_PAD_TEMPLATE),
@@ -447,6 +512,8 @@ fn make_pad(
     ghost.set_active(true)?;
     bin.add_pad(&ghost)?;
     appsrc.sync_state_with_parent()?;
+    bin.imp()
+        .remember(stop, appsrc.clone().upcast(), ghost.clone());
     Ok(appsrc)
 }
 
@@ -466,6 +533,10 @@ fn feed(feeder: Feeder) {
     let mut ended = false;
     // The end of the latest frame pushed since the last flush.
     let mut pushed_end: Option<i64> = None;
+    // A pipeline that has just been seeked can report where it was before. The
+    // playhead is trusted once it has been seen to move since the flush.
+    let mut position_seen: Option<i64> = None;
+    let mut position_moves = false;
     while !stop.load(Ordering::Relaxed) {
         match handle.next(POLL) {
             Next::Sample(sample) => {
@@ -482,7 +553,9 @@ fn feed(feeder: Feeder) {
                     }
                     config = Some(sample.config);
                 }
-                match appsrc.push_buffer(buffer_for(&sample, discont)) {
+                let pushed = appsrc.push_buffer(buffer_for(&sample, discont));
+                gstreamer::trace!(CAT, "track {slot}: push pts {} -> {pushed:?}", sample.pts);
+                match pushed {
                     Ok(_) => {
                         discont = false;
                         pushed_end = Some(pushed_end.map_or(sample.end(), |e| e.max(sample.end())));
@@ -491,29 +564,49 @@ fn feed(feeder: Feeder) {
                             starvation.fed(slot);
                         }
                     },
-                    // A seek is under way: the next call to `next` reports it.
-                    Err(gstreamer::FlowError::Flushing) => {},
+                    // This stream's `appsrc` is still taking a seek (or an end of stream)
+                    // in: the frame is tried again, unless the seek turns out to restart
+                    // the feeder, which `next` reports first.
+                    Err(gstreamer::FlowError::Flushing | gstreamer::FlowError::Eos) => {
+                        handle.unget(&sample);
+                        drop(_guard);
+                        std::thread::sleep(Duration::from_millis(5));
+                    },
                     Err(_) => break,
                 }
             },
-            Next::Flush { .. } => {
+            Next::Flush { position } => {
+                gstreamer::info!(CAT, "track {slot}: flush to {position}");
                 discont = true;
                 ended = false;
                 pushed_end = None;
+                position_seen = None;
+                position_moves = false;
             },
             Next::Wait => {
-                if !ended && appsrc.current_level_bytes() == 0 {
+                if !ended && appsrc.current_level_bytes() == 0 && starvation.playing() {
+                    let position = starvation.position();
+                    if let Some(p) = position {
+                        match position_seen {
+                            None => position_seen = Some(p),
+                            Some(seen) if seen != p => position_moves = true,
+                            Some(_) => {},
+                        }
+                    }
                     let ahead = match pushed_end {
                         // Nothing buffered at the place the player is going to.
                         None => Some(0),
-                        Some(end) => starvation.position().map(|p| end - p),
+                        Some(end) if position_moves => position.map(|p| end - p),
+                        Some(_) => None,
                     };
                     if ahead.is_some_and(|a| a < STARVE_AHEAD) {
+                        gstreamer::info!(CAT, "track {slot}: starved ({ahead:?} ahead, pushed to {pushed_end:?}, at {:?})", starvation.position());
                         starvation.starved(slot);
                     }
                 }
             },
             Next::Eos => {
+                gstreamer::info!(CAT, "track {slot}: end of stream");
                 ended = true;
                 let _ = appsrc.end_of_stream();
                 starvation.fed(slot);

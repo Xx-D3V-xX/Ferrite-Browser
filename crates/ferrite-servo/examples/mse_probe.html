@@ -30,7 +30,7 @@ function open(video){
   var ms = new MediaSource();
   var url = URL.createObjectURL(ms);
   video.src = url;
-  return new Promise(function(res){ ms.addEventListener('sourceopen', function(){ res({ms: ms, url: url}); }, {once: true}); });
+  return new Promise(function(res){ var t = setTimeout(function(){ log('FAIL sourceopen never fired :: ' + ms.readyState + ' ' + video.readyState + ' ' + video.networkState + ' ' + (video.error && video.error.code)); res({ms: ms, url: url}); }, 6000); ms.addEventListener('sourceopen', function(){ clearTimeout(t); res({ms: ms, url: url}); }, {once: true}); });
 }
 function frameDrawn(v){
   var cv = document.createElement('canvas'); cv.width = 320; cv.height = 240; var cx = cv.getContext('2d');
@@ -91,13 +91,15 @@ var WEBM = 'video/webm; codecs="vp9, opus"';
   ok('seeking reopens the stream (readyState)', ms.readyState === 'open' || ms.readyState === 'ended');
   ok('seeked fires', await seeked);
   ok('currentTime is where the seek went', Math.abs(v.currentTime - 0.5) < 0.3, v.currentTime);
-  var p2 = once(v, 'playing', 8000); try { await v.play(); } catch (e) {}
-  await p2;
+  var p2 = once(v, 'playing', 8000); var pr = null; try { pr = await Promise.race([v.play(), wait(3000).then(function(){ return 'play() did not settle'; })]); } catch (e) { pr = e.name; }
+  var gotPlaying = await p2;
+  ok('play() after the seek starts playback', gotPlaying, [pr, v.paused, v.seeking, v.readyState, v.currentTime, ms.readyState]);
+  // The source was reopened by the seek: the page ends it again, as a player would.
+  try { ms.endOfStream(); } catch (e) { ok('endOfStream after a seek', false, e.name); }
   ok('plays on after the seek and ends', v.ended || await once(v, 'ended', 8000), [v.currentTime, v.ended]);
 
   // ---- timestampOffset puts the same clip after itself; remove() takes a part out.
-  ms.endOfStream; 
-  if (ms.readyState === 'ended') { sb.timestampOffset = 2; }
+  sb.timestampOffset = 2;
   ok('timestampOffset can be set', sb.timestampOffset === 2, sb.timestampOffset);
   var more = true; for (var j = 0; j < file.frags.length; j++) more = (await append(sb, file.frags[j])) && more;
   ok('a second copy appends at the offset', more && sb.buffered.end(sb.buffered.length - 1) > 3.8, sb.buffered.length ? sb.buffered.end(sb.buffered.length - 1) : 'empty');
@@ -172,7 +174,7 @@ var WEBM = 'video/webm; codecs="vp9, opus"';
   // ---- Errors.
   v = fresh(); o = await open(v); ms = o.ms;
   sb = ms.addSourceBuffer(MP4);
-  var bad = new Uint8Array(64); for (var q = 0; q < 64; q++) bad[q] = (q * 37) & 255; bad[3] = 4; bad[4] = 109; bad[5] = 111; bad[6] = 111; bad[7] = 118;
+  var bad = new Uint8Array(64); for (var q = 0; q < 64; q++) bad[q] = (q * 37) & 255; bad[0] = 0; bad[1] = 0; bad[2] = 0; bad[3] = 4; bad[4] = 109; bad[5] = 111; bad[6] = 111; bad[7] = 118;
   var err = once(sb, 'error', 4000), verr = once(v, 'error', 4000);
   sb.appendBuffer(bad);
   ok('garbage fires error on the buffer', await err);

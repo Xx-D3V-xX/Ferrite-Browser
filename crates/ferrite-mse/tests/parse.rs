@@ -227,3 +227,15 @@ fn type_support() {
     assert!(!ok(r#"video/x-flv; codecs="avc1.42E01E""#));
     assert!(!ok(r#"video/mp4; codecs="xyz""#));
 }
+
+/// What a page's garbage looks like: a box that claims to be too small, then noise.
+#[test]
+fn noise_after_a_bad_box_is_an_error_not_a_hang() {
+    let mut bad = [0u8; 64];
+    for (i, b) in bad.iter_mut().enumerate() {
+        *b = (i * 37 % 256) as u8;
+    }
+    bad[..8].copy_from_slice(&[0, 0, 0, 4, b'm', b'o', b'o', b'v']);
+    let mut p = Parser::new(Container::Mp4);
+    assert!(p.append(&bad).is_err());
+}

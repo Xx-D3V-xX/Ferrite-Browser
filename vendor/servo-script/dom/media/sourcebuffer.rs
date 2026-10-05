@@ -155,7 +155,9 @@ impl SourceBuffer {
 
     /// <https://w3c.github.io/media-source/#sourcebuffer-segment-parser-loop>
     fn run_append(&self, cx: &mut JSContext, bytes: &[u8]) {
-        let events = match self.parser.borrow_mut().append(bytes) {
+        // The borrow ends here: the error path resets the parser.
+        let parsed = self.parser.borrow_mut().append(bytes);
+        let events = match parsed {
             Ok(events) => events,
             Err(error) => {
                 warn!("SourceBuffer append failed: {error}");

@@ -151,6 +151,11 @@ probe-sw:
 probe-media:
     cargo run -p ferrite-servo --features servo,media --example media_probe
 
+# Media Source Extensions in a real headless Servo session: a page builds a stream out of
+# SourceBuffers and it plays, seeks, stalls and ends (56 checks). Needs GStreamer.
+probe-mse:
+    cargo run -p ferrite-servo --features servo,media --example mse_probe
+
 # Drives a real headless Servo session against a built-in page and checks
 # scrolling, clicking, typing and reload (no network or window needed).
 # Pass a URL to probe another page. Needs the real Servo build.

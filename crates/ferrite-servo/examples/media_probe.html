@@ -46,10 +46,7 @@ function once(el, type, ms){ return new Promise(function(res){ var t = setTimeou
     } catch (e) { clearTimeout(timer); res('threw ' + e); }
   });
   ok('WebRTC data channel between two peers', got === 'ping', got);
-  var gum = await navigator.mediaDevices.getUserMedia({video: true, audio: true}).then(function(){ return 'granted'; }, function(e){ return e.name; });
-  ok('camera and microphone are refused', gum === 'NotAllowedError', gum);
-  var gdm = await navigator.mediaDevices.getDisplayMedia({video: true}).then(function(){ return 'granted'; }, function(e){ return e.name; });
-  ok('screen capture is refused', gdm === 'NotAllowedError', gdm);
+  // Camera, microphone and screen capture ask a person first: `capture_probe` covers them.
   ok('no device is listed', (await navigator.mediaDevices.enumerateDevices()).length === 0);
  } catch (e) { log('EXCEPTION ' + e); }
  document.title = 'DONE';

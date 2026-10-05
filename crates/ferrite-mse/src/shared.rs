@@ -492,6 +492,12 @@ impl TrackHandle {
         }
     }
 
+    /// The frame [`TrackHandle::next`] just returned could not be handed over: the next
+    /// call returns it again.
+    pub fn unget(&mut self, sample: &Sample) {
+        self.cursor = Cursor::After(sample.dts - 1);
+    }
+
     /// The slot this feeder reads.
     pub fn slot(&self) -> usize {
         self.slot
@@ -599,6 +605,20 @@ mod tests {
         assert_eq!(h.next(SHORT), Next::Wait);
         shared.append(slot, run(10_000, 5, 5)).unwrap();
         assert!(matches!(h.next(SHORT), Next::Sample(s) if s.pts == 10_000 * MS));
+    }
+
+    #[test]
+    fn an_ungotten_frame_comes_again() {
+        let shared = Shared::new();
+        let slot = shared.add_track(info(1, TrackKind::Video));
+        shared.append(slot, run(0, 3, 3)).unwrap();
+        let mut h = shared.handle(slot);
+        let Next::Sample(first) = h.next(SHORT) else {
+            panic!("no frame")
+        };
+        h.unget(&first);
+        assert_eq!(h.next(SHORT), Next::Sample(first));
+        assert!(matches!(h.next(SHORT), Next::Sample(s) if s.pts == 40 * MS));
     }
 
     #[test]

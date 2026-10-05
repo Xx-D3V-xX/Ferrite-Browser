@@ -529,6 +529,10 @@ pub(crate) struct HTMLMediaElement {
     /// Ferrite: the `MediaSource` this element plays, if its `src` is an object URL made
     /// for one (<https://w3c.github.io/media-source/#mediasource-attach>).
     media_source: MutNullableDom<MediaSource>,
+    /// Ferrite: the player of a `MediaSource` reached the end of its stream. Its pipeline
+    /// does not take a seek after that (its demuxing stage has let the streams go), so
+    /// the next seek builds a new player.
+    media_source_player_ended: Cell<bool>,
     /// <https://html.spec.whatwg.org/multipage/#dom-media-currentsrc>
     current_src: DomRefCell<String>,
     /// Incremented whenever tasks associated with this element are cancelled.
@@ -662,6 +666,7 @@ impl HTMLMediaElement {
             ready_state: Cell::new(ReadyState::HaveNothing),
             src_object: Default::default(),
             media_source: Default::default(),
+            media_source_player_ended: Cell::new(false),
             current_src: DomRefCell::new("".to_owned()),
             generation_id: Cell::new(0),
             fired_loadeddata_event: Cell::new(false),
@@ -746,6 +751,7 @@ impl HTMLMediaElement {
                 }
             }
         } else if is_playing &&
+            !self.is_potentially_playing() &&
             let Some(ref player) = *self.player.borrow() &&
             let Err(error) = player.lock().unwrap().pause()
         {
@@ -2084,9 +2090,13 @@ impl HTMLMediaElement {
         // Step 11. Set the current playback position to the new playback position.
         self.current_playback_position.set(time);
 
-        // Ferrite: seeking an ended `MediaSource` opens it again.
+        // Ferrite: seeking an ended `MediaSource` opens it again, with a new player if the
+        // old one reached the end of its stream.
         if let Some(source) = self.media_source.get() {
             source.reopen_if_ended();
+            if self.media_source_player_ended.replace(false) {
+                self.restart_media_source_player(&source);
+            }
         }
 
         if let Some(ref player) = *self.player.borrow() &&
@@ -2388,6 +2398,14 @@ impl HTMLMediaElement {
                 this.upcast::<EventTarget>().fire_event(cx, atom!("ended"));
             }));
 
+        // Ferrite: the player stops with the element. Left as "playing", it would never be
+        // started again by a later `play()` (the element thinks it is already going).
+        if let Some(ref player) = *self.player.borrow() &&
+            let Err(error) = player.lock().unwrap().pause()
+        {
+            error!("Could not pause the player at the end of playback: {error:?}");
+        }
+
         // <https://html.spec.whatwg.org/multipage/#dom-media-have_current_data>
         self.change_ready_state(ReadyState::HaveCurrentData);
     }
@@ -2404,6 +2422,9 @@ impl HTMLMediaElement {
     }
 
     fn playback_end(&self) {
+        if self.media_source.get().is_some() {
+            self.media_source_player_ended.set(true);
+        }
         // Abort the following steps of the end of playback if seeking is in progress.
         if self.seeking.get() {
             return;
@@ -2833,7 +2854,10 @@ impl HTMLMediaElement {
         // If the seek was initiated by script or by the user agent itself continue with the
         // following steps, otherwise abort.
         let delta = (position - self.current_seek_position.get()).abs();
-        if !self.seeking.get() || delta > SEEK_POSITION_THRESHOLD {
+        // Ferrite: a player fed by a `MediaSource` reports the end as the position when it
+        // is seeked after it ended, so the position cannot say which seek this was.
+        let from_media_source = self.media_source.get().is_some();
+        if !self.seeking.get() || (delta > SEEK_POSITION_THRESHOLD && !from_media_source) {
             return;
         }
 
@@ -2882,6 +2906,23 @@ impl HTMLMediaElement {
             cx,
             MediaSessionEvent::PlaybackStateChange(media_session_playback_state),
         );
+    }
+
+    /// Replaces the player with a new one for the same `MediaSource`.
+    fn restart_media_source_player(&self, source: &MediaSource) {
+        if let Some(player) = self.player.borrow_mut().take() &&
+            let Err(error) = player.lock().unwrap().stop()
+        {
+            error!("Could not stop the old player: {error:?}");
+        }
+        *self.event_handler.borrow_mut() = None;
+        self.video_renderer.lock().unwrap().reset();
+        if self
+            .create_media_player(&Resource::MediaSource(source.registry_id()))
+            .is_err()
+        {
+            error!("Could not make a new player for the media source");
+        }
     }
 
     fn load_media_source(&self, cx: &JSContext, source: &MediaSource) {
