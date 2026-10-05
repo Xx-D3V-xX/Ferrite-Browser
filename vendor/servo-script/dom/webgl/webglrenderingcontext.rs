@@ -226,7 +226,11 @@ impl WebGLRenderingContext {
             None => return Err("WebGL initialization failed early on".into()),
         };
 
-        let (sender, receiver) = webgl_channel().unwrap();
+        // Ferrite: a WebGL thread that has died must not take the page's script
+        // thread with it (see FERRITE-PATCHES.md): report an error, so
+        // `getContext` returns null and the page falls back.
+        let (sender, receiver) =
+            webgl_channel().ok_or_else(|| "WebGL channel could not be made".to_string())?;
         webgl_chan
             .send(WebGLMsg::CreateContext(
                 window.webview_id().into(),
@@ -235,8 +239,10 @@ impl WebGLRenderingContext {
                 attrs,
                 sender,
             ))
-            .unwrap();
-        let result = receiver.recv().unwrap();
+            .map_err(|_| "the WebGL thread is gone".to_string())?;
+        let result = receiver
+            .recv()
+            .map_err(|_| "the WebGL thread is gone".to_string())?;
 
         result.map(|ctx_data| {
             let max_combined_texture_image_units = ctx_data.limits.max_combined_texture_image_units;
@@ -402,7 +408,11 @@ impl WebGLRenderingContext {
             .webgl_sender
             .send(command, capture_webgl_backtrace());
         if matches!(fallibility, Operation::Infallible) {
-            result.expect("Operation failed");
+            // Ferrite: do not panic the script thread when the WebGL thread is
+            // gone; the canvas simply stops drawing (see FERRITE-PATCHES.md).
+            if let Err(e) = result {
+                warn!("WebGL command could not be sent ({e:?}); the WebGL thread is gone");
+            }
         }
     }
 

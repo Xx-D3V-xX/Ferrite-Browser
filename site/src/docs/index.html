@@ -31,7 +31,7 @@ summary: What Ferrite is, the idea behind its defense against indirect prompt in
 <tr><td><code>ferrite-model</code></td><td>The layer that talks to model providers. It has Mock, Replay, Ollama and Gemini backends. It adds a cache, a throttle, a budget and a trace. It also holds the saved <a href="{{ROOT}}docs/models-and-settings.html">settings</a>.</td></tr>
 <tr><td><code>ferrite-ipi</code></td><td>The defense itself: fingerprint, sanitizer, dry run, synthetic twin (the made-up data that the dry run uses), comparator (the part that compares the prediction with what the agent tried) and runtime guard.</td></tr>
 <tr><td><code>ferrite-audit-log</code></td><td>The audit log. Each entry is tied to the one before it with SHA-256. It is stored in SQLite.</td></tr>
-<tr><td><code>ferrite-engine</code>, <code>-engine-servo</code>, <code>-servo</code></td><td>A browser trait that does not depend on one engine. Also the Servo-based code that the live app runs. This includes the console and request log for each tab, page controls, crash notices and the GPU rendering context.</td></tr>
+<tr><td><code>ferrite-engine</code>, <code>-engine-servo</code>, <code>-servo</code></td><td>A browser trait that does not depend on one engine. Also the Servo-based code that the live app runs. This includes the console and request log for each tab, page controls, crash notices and the WebGL setting.</td></tr>
 <tr><td><code>ferrite-agent</code></td><td>The plan, act and observe loop. It also handles what the agent keeps in context.</td></tr>
 <tr><td><code>ferrite-ui</code>, <code>ferrite-shell</code></td><td>The Iced interface and the program. The interface has the tab strip, toolbar, agent panel, review and approval cards, DevTools, page-control overlays and settings.</td></tr>
 <tr><td><code>ferrite-eval</code></td><td>The evaluation harness (corpus, adjudication, metrics). Also the live runner that puts a real model in the loop. It does not need Servo, so it runs anywhere.</td></tr>
@@ -43,7 +43,7 @@ summary: What Ferrite is, the idea behind its defense against indirect prompt in
   <li>The main evaluation uses a scripted agent. So its results describe the architecture, not the behavior of any one model. The owner has also run the live runner with one real model, ollama gemma4:31b. That run covers all 1,984 cases. It tested only one model. That model rarely fell for the attack (2.0%). So the guard had few attacks to stop. <a href="{{ROOT}}docs/limits.html">Limits</a> has the details.</li>
   <li>The corpus was written by one author and generated from templates. So the confidence intervals are too optimistic.</li>
   <li>Some attacks stay inside the prediction. They use the same capability at the task's own site. They are a residual that the design cannot remove. A residual is an attack that looks exactly like the normal task.</li>
-  <li>The newest browser work was checked on Linux under a virtual display. It includes DevTools, page controls, the GPU renderer and panel resizing. <strong>None of it has run on a Mac or on a real GPU.</strong> The build on the releases page is older than most of it.</li>
+  <li>The newest browser work was checked on Linux under a virtual display. It includes DevTools, page controls and panel resizing. <strong>Some of it has run on one Mac (an Apple M1).</strong> The build on the releases page is older than most of it.</li>
 </ul>
 
 <h2>Where to go next</h2>

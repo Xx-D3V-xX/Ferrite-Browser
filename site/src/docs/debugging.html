@@ -63,7 +63,7 @@ summary: Find out why a page misbehaves: the DevTools Console, Network and Engin
 <tr><td>Windows</td><td><code>%LOCALAPPDATA%\Ferrite\logs</code> is where DevTools saves logs</td><td><strong>No <code>ferrite.log</code> is written on Windows.</strong> In the current code, sending standard error to a file works on Unix only. Run Ferrite from a terminal to see the output.</td></tr>
 </tbody></table></div>
 <p>The file starts with a banner. The banner names the version, the OS, the architecture and the process id. Every panic carries a backtrace. (Ferrite sets <code>RUST_BACKTRACE=1</code> for you if you have not set it.) Suppose the interface stops ticking for 8 seconds. Then one line says so (<code>the UI has not responded for …</code>). One more line appears when it recovers. When you close the window, the process ends within 3 seconds, whatever the engine is doing. If the process had to be forced to end, the log says so. Nobody knows whether this watchdog also covers <kbd>Cmd</kbd>+<kbd>Q</kbd> on macOS, which goes through the system menu.</p>
-<p>On a new machine, look first for the renderer line (see <a href="{{ROOT}}docs/run-it.html#the-renderer-gpu-or-cpu">the renderer</a>). It says whether the GPU or the CPU is drawing pages, and why.</p>
+<p>On a new machine, look first for the renderer line and the WebGL line (see <a href="{{ROOT}}docs/run-it.html#the-renderer-and-webgl">the renderer and WebGL</a>). The renderer line says <code>CPU rendering</code>, because there is no GPU renderer. The WebGL line says whether pages get WebGL.</p>
 
 <h2>Collecting logs to send</h2>
 <pre><code>$ bash scripts/collect-logs.sh                                      # from a checkout

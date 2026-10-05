@@ -629,7 +629,7 @@ absent in this Servo and are listed by the probe as gaps.
 
 ## ADR-021 — Render on the GPU where it has been shown to work, and prove it at start-up; fall back to the CPU
 
-**Date:** 2026-10-03. **Status:** live on macOS by default, opt-in elsewhere; **unverified on any real GPU** (T-281). Implemented in `e97ca27`.
+**Date:** 2026-10-03. **Status:** SUPERSEDED on 2026-10-05: the GPU renderer was removed (`docs/TO-DO.md` T-281, T-305). On an Apple M1 its self-test passed, but with it Google never finished loading and could not be scrolled or clicked, and the engine's WebGL thread panicked; the owner chose the CPU renderer only. The text below is kept as the record of the decision. Implemented in `e97ca27`; the code can be restored from that commit.
 
 **Context.** The engine's own offscreen rendering context asks the graphics stack for the software adapter. On macOS that is Apple's generic software OpenGL, which rasterised every page on the CPU; that was taken to be a large part of why pages felt slow on the owner's Mac (not measured). Using the GPU instead has a cost of its own: a context that opens but draws nothing (a driver quirk, a headless session) would leave every tab blank, which is worse than slow.
 

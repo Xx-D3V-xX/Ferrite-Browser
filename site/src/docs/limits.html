@@ -79,7 +79,7 @@ summary: Every known limit of Ferrite's defense, its evaluation (including the o
 
 <div class="callout warn">
   <h4>Most of the newest work has only run on Linux</h4>
-  <p>These features were checked on Linux. They are the DevTools panel, resizable panels, page-control overlays, the crash banner, calmer approval cards, the GPU renderer and the display-scale fix. The checks used a virtual display at normal pixel density. The engine parts also ran in the headless engine. <strong>None of it has run on a Mac</strong>, on a Retina screen or on a real GPU. The build on the releases page (commit <code>f4ed744</code>, 2026-10-02) is older than most of it.</p>
+  <p>These features were checked on Linux. They are the DevTools panel, resizable panels, page-control overlays, the crash banner, calmer approval cards and the display-scale fix. The checks used a virtual display at normal pixel density. The engine parts also ran in the headless engine. <strong>None of it has run on a Mac</strong>, on a Retina screen or on a real GPU. The build on the releases page (commit <code>f4ed744</code>, 2026-10-02) is older than most of it.</p>
 </div>
 
 <h3>Websites that do not work yet</h3>
@@ -104,8 +104,8 @@ summary: Every known limit of Ferrite's defense, its evaluation (including the o
 
 <h3>Speed and the renderer</h3>
 <ul>
-  <li><strong>Speed on real hardware has not been measured.</strong> One thing was measured, in the headless engine on Linux. It is the fix that stopped the shell from copying and re-uploading the whole page on every tick. Three things were not measured anywhere. They are the GPU rendering path, the thread pools sized to the core count, and the release profile as <code>just run-fast</code> builds it. An on-disk HTTP cache was tried and then removed. The engine's disk cache stores only entries pushed out of memory, and it did nothing across restarts.</li>
-  <li><strong>The GPU renderer has never run on a real GPU or on a Mac.</strong> It gives the same pixels as the CPU path on Mesa's software OpenGL. That is the only place it was tested. Ferrite chooses it automatically on macOS only. It falls back to the CPU renderer if its self-test fails. <code>FERRITE_RENDERER=gpu|cpu|auto</code> overrides the choice.</li>
+  <li><strong>Speed on real hardware has not been measured.</strong> One thing was measured, in the headless engine on Linux. It is the fix that stopped the shell from copying and re-uploading the whole page on every tick. Two things were not measured anywhere. They are the thread pools sized to the core count, and the release profile as <code>just run-fast</code> builds it. An on-disk HTTP cache was tried and then removed. The engine's disk cache stores only entries pushed out of memory, and it did nothing across restarts.</li>
+  <li><strong>There is no GPU renderer.</strong> It was tried and removed. On an Apple M1 (a CI build) its self-test passed, but with it Google never finished loading and could not be scrolled or clicked, and the engine's WebGL thread panicked. With the CPU renderer, GitHub worked fully. Pages are drawn on the CPU everywhere, so they may be slower. <code>FERRITE_WEBGL=off</code> turns WebGL off if a page's WebGL ever freezes it.</li>
 </ul>
 
 <h3>Logs and builds</h3>

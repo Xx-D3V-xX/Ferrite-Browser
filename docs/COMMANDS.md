@@ -1051,22 +1051,31 @@ The file starts with a banner:
   process`.
 - DevTools' **Save log...** and **Open log folder** use this same folder.
 
-The line to look for first on a new machine is the renderer line. It is printed once
-per run:
+The lines to look for first on a new machine are the renderer line and the WebGL
+line. Each is printed once per run:
 
 ```
-[ferrite-render] GPU rendering (<renderer name>)
-[ferrite-render] the GPU path did not pass its self-test (<error>); using the CPU renderer
-[ferrite-render] CPU rendering (FERRITE_RENDERER=gpu to try the GPU)
+[ferrite-render] CPU rendering (software); there is no GPU renderer
+[ferrite-webgl] on (on by default)
 ```
 
-`FERRITE_RENDERER=gpu|cpu|auto` sets the renderer. The default is `auto`. `hardware`
-and `software` are also accepted as spellings. **`auto` tries the GPU on macOS
-only.** On Linux and Windows it uses the CPU renderer unless you set `gpu`. The GPU
-context proves itself first. It clears the screen to a colour and reads the colour
-back. On any failure it falls back to the CPU renderer (ADR-021). **The GPU path has
-never run on a real GPU or on macOS.** It is pixel-identical to the CPU path on
-Mesa's software GL (`docs/PROGRESS.md`).
+**Ferrite has no GPU renderer.** Pages are always drawn on the CPU. A GPU renderer
+was added (ADR-021) and then removed. On an Apple M1 (macOS 26.6.2, a CI build) its
+self-test passed, but with it Google never finished loading and could not be scrolled
+or clicked, and the engine's WebGL thread panicked. With the CPU renderer, GitHub
+worked fully (`docs/TO-DO.md` T-281 and T-305). The cost is that pages may be slower.
+Speed is not measured. `FERRITE_RENDERER` is no longer read. If it is set, the app
+prints `FERRITE_RENDERER is ignored: there is only the CPU renderer`.
+
+`FERRITE_WEBGL=on|off|auto` sets whether pages get WebGL. The default is `auto`,
+which is on. With `off`, `getContext('webgl')` returns `null`, and a page falls back
+to its non-3D version. Use `off` if a page's WebGL ever freezes it. The engine has no
+runtime switch for WebGL 1, so `off` forces context creation to fail. Tested on Linux
+only: with `on` a canvas draws and reads back the right pixel for 120 frames; with
+`off` `getContext` returns `null` and the page keeps running. The vendored engine no
+longer panics a page's script thread when the WebGL thread is gone
+(`vendor/servo-script/FERRITE-PATCHES.md` item 2). That patch was compiled but never
+exercised.
 
 Related engine settings:
 
@@ -1194,7 +1203,7 @@ publishes. This was seen through the Actions API on 2026-10-04. The latest `main
 runs (`f4ed744`, 2026-10-02) both succeeded. The `latest` release holds the three
 packages. That release was built from `main`. It contains the work up to commit
 `8962b01` (the log file and quit watchdog). It does not contain the display-scale
-fix, the GPU context, the page controls or DevTools from this branch.
+fix, the page controls or DevTools from this branch.
 
 ### Packages: `scripts/package.sh <macos|windows|linux> <label> <binary> [out-dir]`
 
@@ -1227,7 +1236,8 @@ browser. "Scripts" means `scripts/*.sh`. "Eval" means the evaluation examples.
 | `CARGO_TARGET_DIR` | justfile, scripts | build output; default `<repo>/target` |
 | `FERRITE_PROFILE` | scripts | `dev` (default) or `release` |
 | `FERRITE_PYTHON` | `setup-local.sh` | the interpreter for the Laya venv |
-| `FERRITE_RENDERER` | app | `gpu`, `cpu` or `auto` (default); `auto` is GPU on macOS only |
+| `FERRITE_RENDERER` | app | ignored; there is only the CPU renderer (`docs/TO-DO.md` T-281) |
+| `FERRITE_WEBGL` | app | `on`, `off` or `auto` (default); `auto` is on (`docs/TO-DO.md` T-305) |
 | `FERRITE_USER_AGENT` | app | overrides the User-Agent string (it wins over Settings) |
 | `FERRITE_DEFENSE` | app, eval | `on` (default; any value that is not known also means `on`), `off`, `sanitizer_only`, `loop_only` |
 | `FERRITE_MODEL_SMALL`, `FERRITE_MODEL_MAIN` | app, eval, model examples | model tags; no default |
