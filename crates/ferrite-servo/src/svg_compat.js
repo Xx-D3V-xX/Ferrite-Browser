@@ -11,6 +11,12 @@
  * the one place the painter reads them. It changes no meaning: it writes the
  * value the page already computed. It touches only <svg> subtrees, only inline
  * `style`, and nothing else on the page. Idempotent; safe to run twice.
+ *
+ * One structural step comes first: an icon drawn through `<use href="#id">`
+ * whose target lives elsewhere in the page (a sprite sheet) is replaced by an
+ * inline copy of that target. The painter never applies the `<use>`'s own
+ * colour to the referenced content, so the copy is what lets the icon take the
+ * colour the page gave it. References to other files are left alone.
  */
 (function () {
   'use strict';
@@ -36,12 +42,59 @@
   var queued = false;
   var pending = [];
 
+  var SVG_NS = 'http://www.w3.org/2000/svg';
+  var XLINK_NS = 'http://www.w3.org/1999/xlink';
+  var COPY_FROM_USE = ['class', 'style', 'fill', 'stroke', 'stroke-width', 'opacity',
+                       'fill-opacity', 'stroke-opacity', 'color'];
+
+  function copyAttrs(from, to, names) {
+    for (var i = 0; i < names.length; i++) {
+      if (from.hasAttribute(names[i])) to.setAttribute(names[i], from.getAttribute(names[i]));
+    }
+  }
+
+  // Replaces each `<use href="#id">` in `svg` whose target is outside `svg` with
+  // an inline copy of the target.
+  function expandUses(svg) {
+    var uses = Array.prototype.slice.call(svg.querySelectorAll('use'));
+    for (var i = 0; i < uses.length; i++) {
+      var use = uses[i];
+      var ref = use.getAttribute('href') || use.getAttributeNS(XLINK_NS, 'href') || '';
+      if (ref.charAt(0) !== '#' || ref.length < 2) continue;
+      var target = document.getElementById(ref.slice(1));
+      if (!target || svg.contains(target) || target.contains(use) || !use.parentNode) continue;
+      var holder, kids, k;
+      if (target.tagName.toLowerCase() === 'symbol') {
+        // A symbol becomes a nested <svg> with the symbol's viewBox, sized by the
+        // <use> (100% when the <use> gives no size, as the specification says).
+        holder = document.createElementNS(SVG_NS, 'svg');
+        copyAttrs(target, holder, ['viewBox', 'preserveAspectRatio']);
+        copyAttrs(use, holder, ['x', 'y', 'width', 'height']);
+        if (!use.hasAttribute('width')) holder.setAttribute('width', '100%');
+        if (!use.hasAttribute('height')) holder.setAttribute('height', '100%');
+        kids = target.childNodes;
+        for (k = 0; k < kids.length; k++) holder.appendChild(kids[k].cloneNode(true));
+      } else {
+        holder = document.createElementNS(SVG_NS, 'g');
+        var tx = use.getAttribute('x') || '0', ty = use.getAttribute('y') || '0';
+        var tf = (use.getAttribute('transform') || '') + ' translate(' + tx + ' ' + ty + ')';
+        holder.setAttribute('transform', tf.trim());
+        holder.appendChild(target.cloneNode(true));
+      }
+      copyAttrs(use, holder, COPY_FROM_USE);
+      use.parentNode.replaceChild(holder, use);
+    }
+  }
+
   // One pass over `svgs`: every read first, then every write. Interleaving them
   // forces a style recalculation per element, which is what makes a naive
   // version of this crawl on a page with many icons.
   function fixBatch(svgs) {
     var plan = [];
     var i, j, k;
+    for (i = 0; i < svgs.length; i++) {
+      try { expandUses(svgs[i]); } catch (e) { /* leave this icon as the page made it */ }
+    }
     for (i = 0; i < svgs.length; i++) {
       var svg = svgs[i];
       var nodes = Array.prototype.slice.call(svg.querySelectorAll(SHAPES));

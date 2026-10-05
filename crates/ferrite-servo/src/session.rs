@@ -358,6 +358,126 @@ mod webgl_decision_tests {
     }
 }
 
+/// How often a page's script thread is asked whether it is still there.
+const WATCH_INTERVAL: std::time::Duration = std::time::Duration::from_secs(2);
+/// How long an unanswered question can wait before the page counts as stalled.
+const WATCH_STALL_AFTER: std::time::Duration = std::time::Duration::from_secs(5);
+
+/// What a [`ScriptWatch`] step wants done.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum WatchEvent {
+    /// Nothing.
+    Quiet,
+    /// Ask the page's script thread a trivial question now.
+    SendProbe,
+    /// The question has gone unanswered for this long: the page's script is busy
+    /// or stuck. Scrolling and clicking go through that thread, so they stop too.
+    Stalled(std::time::Duration),
+    /// The page answered after having been reported stalled; it took this long.
+    Recovered(std::time::Duration),
+}
+
+/// Watches whether a page's script thread still answers. A page that never
+/// finishes loading and cannot be scrolled or clicked, but still paints, has a
+/// script thread that is busy or stuck; nothing else in the app can tell that
+/// from a page that is merely slow, so the log would say nothing.
+#[derive(Debug, Default)]
+pub struct ScriptWatch {
+    sent_at: Option<std::time::Instant>,
+    next_at: Option<std::time::Instant>,
+    stalled: bool,
+}
+
+impl ScriptWatch {
+    /// One look at the clock. `answered` is whether the outstanding question,
+    /// if there is one, has been answered.
+    pub fn step(&mut self, now: std::time::Instant, answered: bool) -> WatchEvent {
+        if let Some(sent) = self.sent_at {
+            let waited = now.saturating_duration_since(sent);
+            if answered {
+                self.sent_at = None;
+                self.next_at = Some(now + WATCH_INTERVAL);
+                return if std::mem::take(&mut self.stalled) {
+                    WatchEvent::Recovered(waited)
+                } else {
+                    WatchEvent::Quiet
+                };
+            }
+            if !self.stalled && waited >= WATCH_STALL_AFTER {
+                self.stalled = true;
+                return WatchEvent::Stalled(waited);
+            }
+            return WatchEvent::Quiet;
+        }
+        if self.next_at.is_none_or(|at| now >= at) {
+            self.sent_at = Some(now);
+            return WatchEvent::SendProbe;
+        }
+        WatchEvent::Quiet
+    }
+
+    /// Forget the outstanding question: the page navigated, so its answer will
+    /// never come and the silence means nothing.
+    pub fn reset(&mut self) {
+        *self = Self::default();
+    }
+}
+
+#[cfg(test)]
+mod script_watch_tests {
+    use super::{ScriptWatch, WatchEvent};
+    use std::time::{Duration, Instant};
+
+    fn secs(base: Instant, s: u64) -> Instant {
+        base + Duration::from_secs(s)
+    }
+
+    #[test]
+    fn it_asks_at_once_then_every_two_seconds() {
+        let t0 = Instant::now();
+        let mut w = ScriptWatch::default();
+        assert_eq!(w.step(t0, false), WatchEvent::SendProbe);
+        assert_eq!(w.step(secs(t0, 1), true), WatchEvent::Quiet);
+        assert_eq!(w.step(secs(t0, 2), false), WatchEvent::Quiet);
+        assert_eq!(w.step(secs(t0, 3), false), WatchEvent::SendProbe);
+    }
+
+    #[test]
+    fn a_question_unanswered_for_five_seconds_is_a_stall_reported_once() {
+        let t0 = Instant::now();
+        let mut w = ScriptWatch::default();
+        assert_eq!(w.step(t0, false), WatchEvent::SendProbe);
+        assert_eq!(w.step(secs(t0, 4), false), WatchEvent::Quiet);
+        assert_eq!(
+            w.step(secs(t0, 5), false),
+            WatchEvent::Stalled(Duration::from_secs(5))
+        );
+        assert_eq!(w.step(secs(t0, 9), false), WatchEvent::Quiet);
+    }
+
+    #[test]
+    fn answering_after_a_stall_reports_the_recovery_once() {
+        let t0 = Instant::now();
+        let mut w = ScriptWatch::default();
+        let _ = w.step(t0, false);
+        let _ = w.step(secs(t0, 6), false);
+        assert_eq!(
+            w.step(secs(t0, 8), true),
+            WatchEvent::Recovered(Duration::from_secs(8))
+        );
+        assert_eq!(w.step(secs(t0, 9), false), WatchEvent::Quiet);
+    }
+
+    #[test]
+    fn a_reset_forgets_the_question() {
+        let t0 = Instant::now();
+        let mut w = ScriptWatch::default();
+        let _ = w.step(t0, false);
+        w.reset();
+        assert_eq!(w.step(secs(t0, 1), false), WatchEvent::SendProbe);
+    }
+}
+
 /// A process-wide counter for frame numbers, so two tabs never share one.
 #[cfg(feature = "servo")]
 pub(crate) fn next_frame_seq() -> u64 {
@@ -1016,6 +1136,14 @@ mod inner {
         }
 
         fn notify_load_status_changed(&self, webview: servo::WebView, status: servo::LoadStatus) {
+            // One line per step a page's load takes, so a page that never
+            // finishes shows how far it got (started, head parsed, complete).
+            eprintln!(
+                "[ferrite-load] {status:?} {}",
+                webview
+                    .url()
+                    .map_or_else(|| "<unknown>".to_string(), |u| u.to_string())
+            );
             match status {
                 servo::LoadStatus::Complete => {
                     let url = webview
@@ -1198,6 +1326,10 @@ mod inner {
         shared_net_log: Rc<std::cell::RefCell<std::collections::VecDeque<crate::diag::NetEvent>>>,
         /// Most recently synced favicon (updated in `sync_and_read()`).
         last_favicon: Option<(u32, u32, Vec<u8>)>,
+        /// Whether the page's script thread still answers (see [`super::ScriptWatch`]).
+        script_watch: super::ScriptWatch,
+        /// Set by the callback of the outstanding probe.
+        probe_answered: Rc<std::cell::Cell<bool>>,
     }
 
     impl HeadlessServoSession {
@@ -1348,6 +1480,8 @@ mod inner {
                 shared_console_log,
                 shared_net_log,
                 last_favicon: None,
+                script_watch: super::ScriptWatch::default(),
+                probe_answered: Rc::default(),
             })
         }
 
@@ -1458,7 +1592,14 @@ mod inner {
         pub fn sync_state(&mut self) {
             // Sync load status, URL, and page title from delegate callbacks.
             self.last_load_status = self.shared_load_status.borrow().clone();
-            self.current_url = self.shared_url.borrow().clone();
+            let new_url = self.shared_url.borrow().clone();
+            if new_url != self.current_url {
+                // A new page: the old probe's answer will never come.
+                self.script_watch.reset();
+                self.probe_answered = Rc::default();
+            }
+            self.current_url = new_url;
+            self.watch_script_thread();
             self.last_page_title = self.shared_page_title.borrow().clone();
             self.last_favicon = self.shared_favicon.borrow().clone();
             // Without this the delegate's history was written and never read, so
@@ -1466,6 +1607,53 @@ mod inner {
             // empty history in a real Servo build (found by the first real
             // `--features servo` compile, as a dead-code warning on this field).
             self.last_history = self.shared_history.borrow().clone();
+        }
+
+        /// Asks the page's script thread a trivial question every two seconds
+        /// and says, in the tab's console and the log, when it stops answering
+        /// and when it answers again. It never waits for the answer.
+        fn watch_script_thread(&mut self) {
+            use super::WatchEvent;
+            use crate::diag::{push_bounded, ConsoleEntry, ConsoleLevel};
+            let event = self
+                .script_watch
+                .step(std::time::Instant::now(), self.probe_answered.get());
+            let note = |level: ConsoleLevel, message: String| {
+                push_bounded(
+                    &mut self.shared_console_log.borrow_mut(),
+                    ConsoleEntry {
+                        at_ms: crate::diag::now_ms(),
+                        level,
+                        source: None,
+                        message,
+                    },
+                );
+            };
+            match event {
+                WatchEvent::Quiet => {}
+                WatchEvent::SendProbe => {
+                    let answered: Rc<std::cell::Cell<bool>> = Rc::default();
+                    self.probe_answered = answered.clone();
+                    self.webview
+                        .evaluate_javascript("0", move |_| answered.set(true));
+                }
+                WatchEvent::Stalled(waited) => note(
+                    ConsoleLevel::Warn,
+                    format!(
+                        "Ferrite: this page's script has not answered for {} s. It is busy or \
+                         stuck, and scrolling and clicking need it. ({})",
+                        waited.as_secs(),
+                        self.current_url
+                    ),
+                ),
+                WatchEvent::Recovered(waited) => note(
+                    ConsoleLevel::Info,
+                    format!(
+                        "Ferrite: this page's script answered again after {} s.",
+                        waited.as_secs()
+                    ),
+                ),
+            }
         }
 
         /// The render-surface size this session was last asked to have,

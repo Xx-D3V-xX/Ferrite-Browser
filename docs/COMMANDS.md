@@ -1092,6 +1092,25 @@ The engine has no runtime switch for WebGL 1, so `off` forces context creation t
 Tested on Linux only: with `on` or `webgl1` a canvas draws and reads back the right pixel
 for 120 frames; with `off` `getContext` returns `null` and the page keeps running.
 
+Two more kinds of line help when a page never stops loading or cannot be scrolled:
+
+```
+[ferrite-load] Started https://www.google.com/search?q=hi
+[ferrite-load] HeadParsed https://www.google.com/search?q=hi
+[ferrite-load] Complete https://www.google.com/search?q=hi
+```
+
+One line is written for each step of a page's load. A page that never reaches
+`Complete` shows how far it got. The toolbar's stop button stays until `Complete`.
+In the DevTools Console tab, and in the log as a `[console:warn]` line, the app also
+writes `Ferrite: this page's script has not answered for 5 s. It is busy or stuck, and
+scrolling and clicking need it.` It asks the page's script thread a trivial question
+every 2 seconds and never waits for the answer. When the page answers again, an info
+line says after how many seconds. Scrolling and clicking go through the page's script
+thread, so a stuck script freezes them while the page still paints
+(`docs/TO-DO.md` T-306). Tested on Linux with a page that blocks its script for 9
+seconds.
+
 Related engine settings:
 
 - The display scale is read from the window. It is passed to every tab. A Retina
@@ -1148,6 +1167,7 @@ Page console messages are in DevTools (section 4). They are also copied to the l
 | `run-local` exits 2 "not configured" | Set both model tags in `env.local`. Or pass `--no-model-check` and connect in Settings. |
 | Agent panel says no model | Settings (Mod+,) or the environment variables of section 5. |
 | A page stops responding | The crash banner and the DevTools Engine tab. Also `ferrite.log`. Run `collect-logs.sh` while it is frozen. |
+| A page never stops loading, or cannot be scrolled or clicked | Look in the DevTools Console tab for `this page's script has not answered`. Look in the log for the `[ferrite-load]` lines. Open Activity Monitor and read Ferrite's CPU: near 100% means a script is busy, near 0% means it is waiting. Run `collect-logs.sh` while the page is stuck. |
 | A packaged app ignores `env.local` | It never reads it. Use the Settings drawer. |
 | Linux: key forgotten after reboot | T-259: export `OLLAMA_API_KEY` or `FERRITE_GEMINI_API_KEY` instead. |
 | Cargo link failure with a full disk | Build and test crate by crate (`cargo test -p <crate>`). `just disk` shows where the space is. `rm -rf target/debug/examples target/debug/incremental` reclaims some. |
