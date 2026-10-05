@@ -59,6 +59,10 @@ name = "mse_probe"
 required-features = ["media"]
 
 [[example]]
+name = "mse_libs_probe"
+required-features = ["media"]
+
+[[example]]
 name = "capture_probe"
 required-features = ["media"]
 

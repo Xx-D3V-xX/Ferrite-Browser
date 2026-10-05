@@ -531,8 +531,11 @@ pub(crate) struct HTMLMediaElement {
     media_source: MutNullableDom<MediaSource>,
     /// Ferrite: the player of a `MediaSource` reached the end of its stream. Its pipeline
     /// does not take a seek after that (its demuxing stage has let the streams go), so
-    /// the next seek builds a new player.
+    /// the next seek builds a new player that starts at the seek's target.
     media_source_player_ended: Cell<bool>,
+    /// Ferrite: the seek (in seconds) the player that was just made began at. It is done
+    /// when the player first reports a state.
+    media_source_pending_seek: Cell<Option<f64>>,
     /// <https://html.spec.whatwg.org/multipage/#dom-media-currentsrc>
     current_src: DomRefCell<String>,
     /// Incremented whenever tasks associated with this element are cancelled.
@@ -667,6 +670,7 @@ impl HTMLMediaElement {
             src_object: Default::default(),
             media_source: Default::default(),
             media_source_player_ended: Cell::new(false),
+            media_source_pending_seek: Cell::new(None),
             current_src: DomRefCell::new("".to_owned()),
             generation_id: Cell::new(0),
             fired_loadeddata_event: Cell::new(false),
@@ -1275,7 +1279,11 @@ impl HTMLMediaElement {
         // type (including any codecs described by the codecs parameter, for types that define that
         // parameter), represents a type that the user agent knows it cannot render, then end the
         // synchronous section, and jump down to the failed with elements step below.
-        if let Some(type_) = element.get_attribute_string_value(&local_name!("type")) &&
+        // Ferrite: an empty `type` says nothing about the media (Shaka Player writes one on
+        // the `<source>` it gives a `MediaSource`), so it does not rule the source out.
+        if let Some(type_) = element
+            .get_attribute_string_value(&local_name!("type"))
+            .filter(|type_| !type_.is_empty()) &&
             ServoMedia::get().can_play_type(&type_) == SupportsMediaType::No
         {
             self.load_from_source_child_failure_steps(cx, source);
@@ -2092,14 +2100,22 @@ impl HTMLMediaElement {
 
         // Ferrite: seeking an ended `MediaSource` opens it again, with a new player if the
         // old one reached the end of its stream.
+        let mut new_player = false;
         if let Some(source) = self.media_source.get() {
             source.reopen_if_ended();
             if self.media_source_player_ended.replace(false) {
+                // The new player is made to start at the target, so it is not seeked.
+                source
+                    .shared()
+                    .seek(crate::dom::mediasource::seconds_to_ns(time));
                 self.restart_media_source_player(&source);
+                new_player = true;
             }
         }
 
-        if let Some(ref player) = *self.player.borrow() &&
+        if new_player || self.media_source_pending_seek.get().is_some() {
+            self.media_source_pending_seek.set(Some(time));
+        } else if let Some(ref player) = *self.player.borrow() &&
             let Err(error) = player.lock().unwrap().seek(time)
         {
             error!("Could not seek player: {error:?}");
@@ -2462,14 +2478,16 @@ impl HTMLMediaElement {
         cx: &mut JSContext,
         metadata: &servo_media::player::metadata::Metadata,
     ) {
-        // The following steps should be run once on the initial `metadata` signal from the media
-        // engine.
-        if self.ready_state.get() != ReadyState::HaveNothing {
+        // Ferrite: with a `MediaSource` the initialization segments are the metadata; the
+        // player's own only tells that it is up.
+        if self.media_source.get().is_some() {
+            self.apply_pending_player_seek(cx);
             return;
         }
 
-        // Ferrite: with a `MediaSource` the initialization segments are the metadata.
-        if self.media_source.get().is_some() {
+        // The following steps should be run once on the initial `metadata` signal from the media
+        // engine.
+        if self.ready_state.get() != ReadyState::HaveNothing {
             return;
         }
 
@@ -2872,6 +2890,9 @@ impl HTMLMediaElement {
     }
 
     fn playback_state_changed(&self, cx: &mut JSContext, state: &PlaybackState) {
+        if matches!(state, PlaybackState::Paused | PlaybackState::Playing) {
+            self.apply_pending_player_seek(cx);
+        }
         let mut media_session_playback_state = MediaSessionPlaybackState::None_;
         match *state {
             PlaybackState::Paused => {
@@ -2906,6 +2927,13 @@ impl HTMLMediaElement {
             cx,
             MediaSessionEvent::PlaybackStateChange(media_session_playback_state),
         );
+    }
+
+    /// The new player is up, and it began at the seek's target: the seek is done.
+    fn apply_pending_player_seek(&self, cx: &JSContext) {
+        if let Some(time) = self.media_source_pending_seek.take() {
+            self.playback_seek_done(cx, time);
+        }
     }
 
     /// Replaces the player with a new one for the same `MediaSource`.

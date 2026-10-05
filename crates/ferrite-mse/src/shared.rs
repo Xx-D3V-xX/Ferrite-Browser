@@ -8,6 +8,9 @@ use crate::{Sample, TrackBuffer, TrackInfo};
 /// The most encoded data a `MediaSource` keeps, as Chrome's order of magnitude.
 pub const DEFAULT_QUOTA: usize = 200 * 1024 * 1024;
 
+/// Data that ends this close to the duration reaches it.
+const COMPLETE_SLACK: i64 = 50_000_000;
+
 /// Seeks to the same time closer together than this are one seek.
 const SEEK_COALESCE: Duration = Duration::from_millis(250);
 
@@ -383,14 +386,26 @@ impl Shared {
         self.lock().closed
     }
 
-    /// A feeder for a track, starting at the beginning of the buffered data.
+    /// Where playback is to start if a seek was made before any player existed (a
+    /// player rebuilt for a seek): the seek's target.
+    pub fn start_position(&self) -> Option<i64> {
+        let st = self.lock();
+        (st.epoch > 0).then_some(st.seek_to)
+    }
+
+    /// A feeder for a track, starting at the beginning of the buffered data, or at the
+    /// last seek's target if there was one.
     pub fn handle(self: &Arc<Shared>, slot: usize) -> TrackHandle {
-        let epoch = self.lock().epoch;
+        let st = self.lock();
         TrackHandle {
             shared: Arc::clone(self),
             slot,
-            epoch,
-            cursor: Cursor::Start,
+            epoch: st.epoch,
+            cursor: if st.epoch > 0 {
+                Cursor::Seek(st.seek_to)
+            } else {
+                Cursor::Start
+            },
             eos_sent: false,
         }
     }
@@ -475,7 +490,16 @@ impl TrackHandle {
                 self.eos_sent = false;
                 return Next::Sample(sample.clone());
             }
-            if st.ended && !self.eos_sent {
+            // The stream is over when the page said so, or when the track holds data to
+            // the duration (a page that never calls `endOfStream()` still plays to the end).
+            let complete = st.ended
+                || st.duration.is_some_and(|duration| {
+                    slot.buf
+                        .buffered()
+                        .last()
+                        .is_some_and(|&(_, end)| end >= duration - COMPLETE_SLACK)
+                });
+            if complete && !self.eos_sent {
                 self.eos_sent = true;
                 return Next::Eos;
             }
@@ -605,6 +629,36 @@ mod tests {
         assert_eq!(h.next(SHORT), Next::Wait);
         shared.append(slot, run(10_000, 5, 5)).unwrap();
         assert!(matches!(h.next(SHORT), Next::Sample(s) if s.pts == 10_000 * MS));
+    }
+
+    #[test]
+    fn a_feeder_made_after_a_seek_starts_at_its_target() {
+        let shared = Shared::new();
+        let slot = shared.add_track(info(1, TrackKind::Video));
+        shared.append(slot, run(0, 15, 5)).unwrap();
+        assert_eq!(shared.start_position(), None);
+        shared.seek(250 * MS);
+        assert_eq!(shared.start_position(), Some(250 * MS));
+        let mut h = shared.handle(slot);
+        // Starts at the sync sample before 250 ms, without a flush to tell of.
+        assert!(matches!(h.next(SHORT), Next::Sample(s) if s.pts == 200 * MS && s.key));
+    }
+
+    #[test]
+    fn data_that_reaches_the_duration_ends_the_stream_without_endofstream() {
+        let shared = Shared::new();
+        let slot = shared.add_track(info(1, TrackKind::Video));
+        shared.append(slot, run(0, 3, 3)).unwrap(); // 0..120 ms
+        shared.set_duration(Some(500 * MS));
+        let mut h = shared.handle(slot);
+        for _ in 0..3 {
+            assert!(matches!(h.next(SHORT), Next::Sample(_)));
+        }
+        // Short of the duration: waits for more.
+        assert_eq!(h.next(SHORT), Next::Wait);
+        // The page sets the duration where the data ends (within a frame or so).
+        shared.set_duration(Some(150 * MS));
+        assert_eq!(h.next(SHORT), Next::Eos);
     }
 
     #[test]

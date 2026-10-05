@@ -335,6 +335,15 @@ impl Starvation {
     }
 }
 
+/// The `appsrc`s of one run, and the seek last passed on to them. A demuxer flushes all its
+/// pads for one seek; this bin's streams are separate sources, and the player sends a seek
+/// up one pad only, so the others are given it here.
+#[derive(Default)]
+struct Siblings {
+    sources: Mutex<Vec<gstreamer_app::AppSrc>>,
+    last_seek: Mutex<Option<gstreamer::Seqnum>>,
+}
+
 /// Everything one track's feeder thread needs.
 struct Feeder {
     appsrc: gstreamer_app::AppSrc,
@@ -359,9 +368,12 @@ fn build_pads(bin: glib::WeakRef<ServoMseSrc>, shared: Arc<Shared>, stop: Arc<At
         }
     };
     let Some(bin) = bin.upgrade() else { return };
+    // A player made for a seek (after the end of the stream) begins where it was sent.
+    let start = shared.start_position().unwrap_or(start);
     gstreamer::info!(CAT, "tracks have data, timeline starts at {start}");
     let group_id = gstreamer::GroupId::next();
     let push_lock = Arc::new(Mutex::new(()));
+    let siblings = Arc::new(Siblings::default());
     let starvation = Arc::new(Starvation {
         bin: bin.upcast_ref::<gstreamer::Element>().downgrade(),
         starved: Mutex::new(0),
@@ -381,7 +393,7 @@ fn build_pads(bin: glib::WeakRef<ServoMseSrc>, shared: Arc<Shared>, stop: Arc<At
             );
             continue;
         }
-        match make_pad(&bin, &shared, slot, &info, group_id, start, &push_lock, &stop) {
+        match make_pad(&bin, &shared, slot, &info, group_id, start, &push_lock, &siblings, &stop) {
             Ok(appsrc) => feeders.push(Feeder {
                 appsrc,
                 shared: shared.clone(),
@@ -426,6 +438,7 @@ fn make_pad(
     group_id: gstreamer::GroupId,
     start: i64,
     push_lock: &Arc<Mutex<()>>,
+    siblings: &Arc<Siblings>,
     stop: &AtomicBool,
 ) -> Result<gstreamer_app::AppSrc, glib::BoolError> {
     let (prefix, template) = match info.kind {
@@ -508,6 +521,32 @@ fn make_pad(
     let ghost = gstreamer::GhostPad::builder_from_template(template)
         .name(format!("{prefix}_{slot}"))
         .build();
+    siblings.sources.lock().unwrap().push(appsrc.clone());
+    {
+        let siblings = siblings.clone();
+        let own = appsrc.clone();
+        ghost.add_probe(gstreamer::PadProbeType::EVENT_UPSTREAM, move |_, info| {
+            let Some(gstreamer::PadProbeData::Event(ref event)) = info.data else {
+                return gstreamer::PadProbeReturn::Ok;
+            };
+            if event.type_() != gstreamer::EventType::Seek {
+                return gstreamer::PadProbeReturn::Ok;
+            }
+            // Once per seek, even if the player sends it up every pad.
+            {
+                let mut last = siblings.last_seek.lock().unwrap();
+                if *last == Some(event.seqnum()) {
+                    return gstreamer::PadProbeReturn::Ok;
+                }
+                *last = Some(event.seqnum());
+            }
+            let others: Vec<_> = siblings.sources.lock().unwrap().clone();
+            for other in others.into_iter().filter(|o| *o != own) {
+                other.send_event(event.copy());
+            }
+            gstreamer::PadProbeReturn::Ok
+        });
+    }
     ghost.set_target(Some(&src_pad))?;
     ghost.set_active(true)?;
     bin.add_pad(&ghost)?;
@@ -572,7 +611,10 @@ fn feed(feeder: Feeder) {
                         drop(_guard);
                         std::thread::sleep(Duration::from_millis(5));
                     },
-                    Err(_) => break,
+                    Err(error) => {
+                        gstreamer::warning!(CAT, "track {slot}: a frame could not be pushed ({error:?}): the feeder stops");
+                        break;
+                    },
                 }
             },
             Next::Flush { position } => {

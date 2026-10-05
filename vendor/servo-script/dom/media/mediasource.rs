@@ -86,9 +86,10 @@ pub(crate) enum State {
 pub(crate) struct MediaSource {
     eventtarget: EventTarget,
     state: Cell<State>,
+    /// Replaced by a new one when the source is detached, so it can be attached again.
     #[ignore_malloc_size_of = "shared with the media player"]
     #[no_trace]
-    shared: Arc<Shared>,
+    shared: DomRefCell<Arc<Shared>>,
     /// The number the player is given to find `shared` (`ferrite_mse::lookup`).
     registry_id: Cell<u64>,
     source_buffers: Dom<SourceBufferList>,
@@ -116,7 +117,7 @@ impl MediaSource {
             Box::new(MediaSource {
                 eventtarget: EventTarget::new_inherited(),
                 state: Cell::new(State::Closed),
-                shared,
+                shared: DomRefCell::new(shared),
                 registry_id: Cell::new(registry_id),
                 source_buffers: Dom::from_ref(&*source_buffers),
                 active_source_buffers: Dom::from_ref(&*active_source_buffers),
@@ -129,8 +130,8 @@ impl MediaSource {
         )
     }
 
-    pub(crate) fn shared(&self) -> &Arc<Shared> {
-        &self.shared
+    pub(crate) fn shared(&self) -> Arc<Shared> {
+        self.shared.borrow().clone()
     }
 
     pub(crate) fn registry_id(&self) -> u64 {
@@ -151,7 +152,7 @@ impl MediaSource {
 
     /// What the media element reports as `buffered`, in seconds.
     pub(crate) fn buffered_seconds(&self) -> Vec<(f64, f64)> {
-        self.shared
+        self.shared()
             .buffered_all()
             .into_iter()
             .map(|(start, end)| (ns_to_seconds(start), ns_to_seconds(end)))
@@ -160,8 +161,8 @@ impl MediaSource {
 
     /// The size of the first video track an initialization segment described.
     pub(crate) fn video_size(&self) -> Option<(u32, u32)> {
-        (0..self.shared.slot_count())
-            .filter_map(|slot| self.shared.track_info(slot))
+        (0..self.shared().slot_count())
+            .filter_map(|slot| self.shared().track_info(slot))
             .find(|track| track.kind == ferrite_mse::TrackKind::Video && track.width > 0)
             .map(|track| (track.width, track.height))
     }
@@ -184,8 +185,7 @@ impl MediaSource {
     /// <https://w3c.github.io/media-source/#mediasource-attach>: the media element
     /// starts using this `MediaSource`. False if it is already in use.
     pub(crate) fn attach(&self, element: &HTMLMediaElement) -> bool {
-        if self.state.get() != State::Closed || self.element.get().is_some() || self.shared.closed()
-        {
+        if self.state.get() != State::Closed || self.element.get().is_some() {
             return false;
         }
         self.element.set(Some(element));
@@ -205,7 +205,7 @@ impl MediaSource {
         for buffer in self.source_buffers.snapshot() {
             buffer.mark_removed();
             for slot in buffer.slots() {
-                self.shared.retire(slot);
+                self.shared().retire(slot);
             }
         }
         for buffer in self.active_source_buffers.snapshot() {
@@ -219,8 +219,12 @@ impl MediaSource {
             queue_event(&*self.active_source_buffers, "removesourcebuffer");
             queue_event(&*self.source_buffers, "removesourcebuffer");
         }
-        self.shared.close();
+        // The player's feeders stop with the old state; a new attach starts afresh.
+        let fresh = Shared::new();
+        let old = std::mem::replace(&mut *self.shared.borrow_mut(), fresh.clone());
+        old.close();
         ferrite_mse::unregister(self.registry_id.get());
+        self.registry_id.set(ferrite_mse::register(&fresh));
         self.element.set(None);
         queue_event(self, "sourceclose");
     }
@@ -249,7 +253,7 @@ impl MediaSource {
     /// Changes `duration` and tells the element and the player.
     fn set_duration_value(&self, seconds: f64) {
         self.duration.set(seconds);
-        self.shared
+        self.shared()
             .set_duration(seconds.is_finite().then(|| seconds_to_ns(seconds)));
         if let Some(element) = self.element.get() {
             element.media_source_duration_changed(seconds);
@@ -269,7 +273,7 @@ impl MediaSource {
     pub(crate) fn reopen_if_ended(&self) {
         if self.state.get() == State::Ended {
             self.state.set(State::Open);
-            self.shared.set_ended(false);
+            self.shared().set_ended(false);
             queue_event(self, "sourceopen");
         }
     }
@@ -280,28 +284,23 @@ impl MediaSource {
         queue_event(self, "sourceended");
         match error {
             None => {
-                // The duration becomes the end of what is buffered.
-                let highest = self
-                    .shared
-                    .buffered_all()
-                    .last()
-                    .map(|&(_, end)| end)
-                    .or_else(|| {
-                        (0..self.shared.slot_count())
-                            .filter_map(|slot| self.shared.buffered(slot).last().map(|r| r.1))
-                            .max()
-                    });
+                // The duration becomes the end of what is buffered: the highest end of any
+                // track, so a track that stops short does not cut the other one off.
+                let shared = self.shared();
+                let highest = (0..shared.slot_count())
+                    .filter_map(|slot| shared.buffered(slot).last().map(|r| r.1))
+                    .max();
                 if let Some(end) = highest {
                     let seconds = ns_to_seconds(end);
                     if seconds != self.duration.get() {
                         self.set_duration_value(seconds);
                     }
                 }
-                self.shared.set_ended(true);
+                self.shared().set_ended(true);
                 self.buffers_changed();
             },
             Some(error) => {
-                self.shared.set_ended(true);
+                self.shared().set_ended(true);
                 if let Some(element) = self.element.get() {
                     let code = match error {
                         EndOfStreamError::Network => MEDIA_ERR_NETWORK,
@@ -373,8 +372,8 @@ impl MediaSourceMethods<crate::DomTypeHolder> for MediaSource {
             return Err(Error::InvalidState(None));
         }
         // The duration may not cut off what is buffered.
-        let highest = (0..self.shared.slot_count())
-            .filter_map(|slot| self.shared.buffered(slot).last().map(|r| r.1))
+        let highest = (0..self.shared().slot_count())
+            .filter_map(|slot| self.shared().buffered(slot).last().map(|r| r.1))
             .max();
         if highest.is_some_and(|end| ns_to_seconds(end) > value) {
             return Err(Error::InvalidState(Some(
@@ -407,7 +406,7 @@ impl MediaSourceMethods<crate::DomTypeHolder> for MediaSource {
             return Err(Error::InvalidState(None));
         }
         let buffer = SourceBuffer::new(cx, &self.global(), self, mime, container);
-        self.shared.register_buffer();
+        self.shared().register_buffer();
         self.source_buffers.add(&buffer);
         queue_event(&*self.source_buffers, "addsourcebuffer");
         Ok(buffer)
@@ -423,9 +422,9 @@ impl MediaSourceMethods<crate::DomTypeHolder> for MediaSource {
         self.source_buffers.remove(buffer);
         buffer.mark_removed();
         for slot in buffer.slots() {
-            self.shared.retire(slot);
+            self.shared().retire(slot);
         }
-        self.shared.unregister_buffer(buffer.initialized());
+        self.shared().unregister_buffer(buffer.initialized());
         if was_active {
             queue_event(&*self.active_source_buffers, "removesourcebuffer");
         }

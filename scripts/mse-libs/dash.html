@@ -1,0 +1,16 @@
+<!doctype html><meta charset=utf-8><title>dash</title>
+<video id=v muted playsinline width=320 height=240></video>
+<script src="dash.all.min.js"></script><script src="common.js"></script>
+<script>
+(async function(){ try {
+  var v = document.getElementById('v');
+  var player = dashjs.MediaPlayer().create();
+  var errors = [];
+  player.on(dashjs.MediaPlayer.events.ERROR, function(e){ errors.push(JSON.stringify(e.error && (e.error.message || e.error))); log('INFO dash error ' + JSON.stringify(e.error && (e.error.message || e.error))); });
+  var init = new Promise(function(r){ player.on(dashjs.MediaPlayer.events.STREAM_INITIALIZED, function(){ r(true); }); setTimeout(function(){ r(false); }, 20000); });
+  player.initialize(v, 'manifest.mpd', true);
+  ok('dash.js initializes the stream', await init);
+  await standardChecks(v, 12);
+  ok('no errors', errors.length === 0, errors);
+ } catch (e) { log('EXCEPTION ' + e + ' ' + (e && e.stack)); } document.title = 'DONE'; })();
+</script>

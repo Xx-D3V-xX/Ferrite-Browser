@@ -156,6 +156,11 @@ probe-media:
 probe-mse:
     cargo run -p ferrite-servo --features servo,media --example mse_probe
 
+# The same, with the libraries pages use: hls.js, dash.js and Shaka Player play a stream
+# (fetches them with npm and makes the stream with GStreamer; see scripts/mse-libs/run.sh).
+probe-mse-libs *PAGES:
+    scripts/mse-libs/run.sh {{PAGES}}
+
 # Drives a real headless Servo session against a built-in page and checks
 # scrolling, clicking, typing and reload (no network or window needed).
 # Pass a URL to probe another page. Needs the real Servo build.
