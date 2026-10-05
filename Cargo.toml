@@ -185,3 +185,4 @@ servo-storage-traits = { path = "vendor/servo-storage-traits" }
 servo-embedder-traits = { path = "vendor/servo-embedder-traits" }
 servo-media-streams = { path = "vendor/servo-media-streams" }
 servo-media-gstreamer = { path = "vendor/servo-media-gstreamer" }
+servo-media-player = { path = "vendor/servo-media-player" }

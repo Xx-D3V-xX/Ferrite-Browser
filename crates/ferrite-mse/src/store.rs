@@ -218,6 +218,7 @@ mod tests {
             duration: dur_ms * MS,
             key,
             data: vec![0; size],
+            config: 0,
         }
     }
 
@@ -331,6 +332,7 @@ mod tests {
             duration: 40 * MS,
             key,
             data: vec![0; 4],
+            config: 0,
         };
         let mut b = TrackBuffer::new();
         b.append(vec![mk(40, 0, true), mk(120, 40, false), mk(80, 80, false)]);

@@ -43,6 +43,9 @@ version = "1.2.3"
 [dependencies.data-url]
 version = "0.3"
 
+[dependencies.ferrite-mse]
+path = "../../crates/ferrite-mse"
+
 [dependencies.glib]
 version = "0.22"
 

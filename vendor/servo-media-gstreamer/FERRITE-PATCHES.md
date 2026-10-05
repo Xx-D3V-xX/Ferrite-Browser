@@ -18,3 +18,13 @@ trait methods are declared) and `vendor/servo-embedder-traits`.
    'GstVP8Enc' can't be set from the given type`), so attaching a video stream to a
    `<video>` (or a peer connection) panicked the script thread. Both properties are
    set with `property_from_str` now.
+4. `mse_source.rs`, `player.rs`, `lib.rs`, `Cargo.toml`: **Media Source Extensions.**
+   `StreamType::MediaSource(id)` (declared in `vendor/servo-media-player`) makes the
+   player ask playbin3 for `servomse://<id>`, which is `servomsesrc`, a source bin that
+   reads the frames `ferrite-mse` holds for that `MediaSource`. It makes one `appsrc` pad
+   per track once every track has a frame, with one group id and a first segment that
+   begins where the data begins; follows seeks (a frame fetched before a seek is never
+   pushed after it); sends new caps when an initialization segment changes a track's
+   configuration; and posts `Buffering(0)` when the data ends within 80 ms of the
+   playhead and `Buffering(100)` once it is 250 ms ahead again, so a stalled player
+   pauses. The crate depends on `crates/ferrite-mse` by path.

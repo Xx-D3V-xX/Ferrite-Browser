@@ -31,6 +31,7 @@ use servo_media_traits::{BackendMsg, ClientContextId, MediaInstance};
 use super::BACKEND_BASE_TIME;
 use crate::media_stream::GStreamerMediaStream;
 use crate::media_stream_source::{ServoMediaStreamSrc, register_servo_media_stream_src};
+use crate::mse_source::{ServoMseSrc, register_servo_mse_src};
 use crate::render::GStreamerRender;
 use crate::source::{ServoSrc, register_servo_src};
 
@@ -120,6 +121,7 @@ impl AsRef<[f32]> for GStreamerAudioChunk {
 enum PlayerSource {
     Seekable(ServoSrc),
     Stream(ServoMediaStreamSrc),
+    MediaSource(ServoMseSrc),
 }
 
 struct PlayerInner {
@@ -179,7 +181,7 @@ impl PlayerInner {
     }
 
     pub fn set_playback_rate(&mut self, playback_rate: f64) -> Result<(), PlayerError> {
-        if self.stream_type != StreamType::Seekable {
+        if self.stream_type == StreamType::Stream {
             return Err(PlayerError::NonSeekableStream);
         }
 
@@ -259,7 +261,7 @@ impl PlayerInner {
     }
 
     pub fn seek(&mut self, time: f64) -> Result<(), PlayerError> {
-        if self.stream_type != StreamType::Seekable {
+        if self.stream_type == StreamType::Stream {
             return Err(PlayerError::NonSeekableStream);
         }
         if let Some(ref metadata) = self.last_metadata &&
@@ -621,6 +623,12 @@ impl GStreamerPlayer {
                 })?;
                 "servosrc://".to_value()
             },
+            StreamType::MediaSource(id) => {
+                register_servo_mse_src().map_err(|error| {
+                    PlayerError::Backend(format!("servomsesrc registration error: {error:?}"))
+                })?;
+                format!("servomse://{id}").to_value()
+            },
         };
         player.set_property("uri", &uri);
 
@@ -904,6 +912,18 @@ impl GStreamerPlayer {
                             let _ = notify!(sender_clone, Ok(()));
                         });
                         PlayerSource::Stream(media_stream_src)
+                    },
+                    StreamType::MediaSource(_) => {
+                        let mse_src = source
+                            .dynamic_cast::<ServoMseSrc>()
+                            .expect("Source element is expected to be a ServoMseSrc!");
+                        // Nothing to wait for: the source finds its data as the page
+                        // appends it.
+                        let sender_clone = sender.clone();
+                        is_ready_clone.call_once(|| {
+                            let _ = notify!(sender_clone, Ok(()));
+                        });
+                        PlayerSource::MediaSource(mse_src)
                     },
                 };
 

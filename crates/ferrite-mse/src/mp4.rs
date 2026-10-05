@@ -448,6 +448,7 @@ impl Mp4Parser {
                             duration: to_ns(duration as i64, timescale),
                             key: sflags & FLAG_NON_SYNC == 0,
                             data,
+                            config: 0,
                         });
                         dts += duration as i64;
                     }

@@ -8884,6 +8884,7 @@ version = "0.6.0"
 dependencies = [
  "byte-slice-cast",
  "data-url",
+ "ferrite-mse",
  "glib",
  "glib-sys",
  "gstreamer",
@@ -8976,8 +8977,6 @@ dependencies = [
 [[package]]
 name = "servo-media-player"
 version = "0.6.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "a48224b10071926e3a55a3e0be493f7683f3dd18e1285697d8d897a9aabdacb9"
 dependencies = [
  "malloc_size_of_derive",
  "serde",

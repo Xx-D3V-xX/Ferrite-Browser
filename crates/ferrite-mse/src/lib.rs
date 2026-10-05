@@ -18,11 +18,13 @@
 //! All times are nanoseconds in an `i64`, as GStreamer counts them.
 
 mod mp4;
+mod registry;
 mod shared;
 mod store;
 mod webm;
 
-pub use shared::{Next, Shared, TrackHandle};
+pub use registry::{lookup, register, unregister};
+pub use shared::{Next, QuotaExceeded, Shared, TrackHandle};
 pub use store::TrackBuffer;
 
 use std::fmt;
@@ -116,6 +118,9 @@ pub struct Sample {
     /// A sync sample: decoding can start here.
     pub key: bool,
     pub data: Vec<u8>,
+    /// Which initialization segment's configuration the frame was appended under (see
+    /// [`Shared::track_info_at`]). The parsers leave it 0; [`Shared::append`] sets it.
+    pub config: u32,
 }
 
 impl Sample {

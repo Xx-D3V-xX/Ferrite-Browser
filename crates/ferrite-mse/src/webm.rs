@@ -515,6 +515,7 @@ impl WebmParser {
             duration: duration.map(|d| d * self.scale).unwrap_or(default_duration),
             key,
             data: body[n + 3..].to_vec(),
+            config: 0,
         };
         // A frame with no duration of its own: the gap to the next one of its track
         // (found when that one arrives).

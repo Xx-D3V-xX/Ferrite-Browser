@@ -8,6 +8,9 @@ use crate::{Sample, TrackBuffer, TrackInfo};
 /// The most encoded data a `MediaSource` keeps, as Chrome's order of magnitude.
 pub const DEFAULT_QUOTA: usize = 200 * 1024 * 1024;
 
+/// Seeks to the same time closer together than this are one seek.
+const SEEK_COALESCE: Duration = Duration::from_millis(250);
+
 /// Played data is kept this long behind the playhead when the quota forces eviction.
 const KEEP_BEHIND: i64 = 1_000_000_000;
 
@@ -33,7 +36,8 @@ pub enum Next {
 }
 
 struct Slot {
-    info: TrackInfo,
+    /// The track as each initialization segment described it; the last is current.
+    infos: Vec<TrackInfo>,
     buf: TrackBuffer,
 }
 
@@ -42,9 +46,13 @@ struct State {
     ended: bool,
     closed: bool,
     duration: Option<i64>,
+    /// `SourceBuffer`s added, and how many of them have had an initialization segment.
+    buffers: usize,
+    initialized: usize,
     /// Bumped by every seek, so feeders know to restart.
     epoch: u64,
     seek_to: i64,
+    seek_at: Option<Instant>,
     /// The playhead, for eviction.
     position: i64,
 }
@@ -69,8 +77,11 @@ impl Shared {
                 ended: false,
                 closed: false,
                 duration: None,
+                buffers: 0,
+                initialized: 0,
                 epoch: 0,
                 seek_to: 0,
+                seek_at: None,
                 position: 0,
             }),
             wake: Condvar::new(),
@@ -84,24 +95,88 @@ impl Shared {
     }
 
     /// Registers a track from an initialization segment; returns its slot. A track
-    /// that is already known (the same container id, kind and codec) keeps its slot and
-    /// its frames, as a repeated initialization segment does.
+    /// that is already known (the same container id and kind) keeps its slot and its
+    /// frames, as a repeated initialization segment does; if its configuration changed,
+    /// frames appended from now on carry the new one.
     pub fn add_track(&self, info: TrackInfo) -> usize {
         let mut st = self.lock();
-        if let Some(i) = st
-            .slots
-            .iter()
-            .position(|s| s.info.id == info.id && s.info.kind == info.kind)
-        {
-            st.slots[i].info = info;
+        if let Some(i) = st.slots.iter().position(|s| {
+            let last = &s.infos[s.infos.len() - 1];
+            last.id == info.id && last.kind == info.kind
+        }) {
+            if st.slots[i].infos.last() != Some(&info) {
+                st.slots[i].infos.push(info);
+            }
             return i;
         }
         st.slots.push(Slot {
-            info,
+            infos: vec![info],
             buf: TrackBuffer::new(),
         });
         self.wake.notify_all();
         st.slots.len() - 1
+    }
+
+    /// A `SourceBuffer` was added.
+    pub fn register_buffer(&self) {
+        self.lock().buffers += 1;
+        self.wake.notify_all();
+    }
+
+    /// A `SourceBuffer` got its first initialization segment.
+    pub fn buffer_initialized(&self) {
+        self.lock().initialized += 1;
+        self.wake.notify_all();
+    }
+
+    /// A `SourceBuffer` was removed; say whether it had been initialized.
+    pub fn unregister_buffer(&self, initialized: bool) {
+        let mut st = self.lock();
+        st.buffers = st.buffers.saturating_sub(1);
+        if initialized {
+            st.initialized = st.initialized.saturating_sub(1);
+        }
+        self.wake.notify_all();
+    }
+
+    /// Every `SourceBuffer` has its tracks: the player can build its streams.
+    pub fn ready(&self) -> bool {
+        let st = self.lock();
+        st.buffers > 0 && st.initialized >= st.buffers
+    }
+
+    /// Waits until [`Shared::ready`] and every track holds a frame, or the stream
+    /// ended, up to `timeout`. Returns the earliest presentation time buffered then:
+    /// where the player's timeline starts.
+    pub fn wait_start(&self, timeout: Duration) -> Option<i64> {
+        let deadline = Instant::now() + timeout;
+        let mut st = self.lock();
+        loop {
+            if st.closed {
+                return None;
+            }
+            let ready = st.buffers > 0 && st.initialized >= st.buffers;
+            let all_have_frames =
+                !st.slots.is_empty() && st.slots.iter().all(|s| !s.buf.is_empty());
+            if ready
+                && (all_have_frames || (st.ended && st.slots.iter().any(|s| !s.buf.is_empty())))
+            {
+                return st
+                    .slots
+                    .iter()
+                    .filter_map(|s| s.buf.buffered().first().map(|r| r.0))
+                    .min();
+            }
+            let now = Instant::now();
+            if now >= deadline {
+                return None;
+            }
+            st = self
+                .wake
+                .wait_timeout(st, deadline - now)
+                .unwrap_or_else(|e| e.into_inner())
+                .0;
+        }
     }
 
     pub fn slot_count(&self) -> usize {
@@ -109,11 +184,22 @@ impl Shared {
     }
 
     pub fn track_info(&self, slot: usize) -> Option<TrackInfo> {
-        self.lock().slots.get(slot).map(|s| s.info.clone())
+        self.lock()
+            .slots
+            .get(slot)
+            .map(|s| s.infos[s.infos.len() - 1].clone())
+    }
+
+    /// The track as the initialization segment numbered `config` described it (the
+    /// number a [`Sample`] carries).
+    pub fn track_info_at(&self, slot: usize, config: u32) -> Option<TrackInfo> {
+        let st = self.lock();
+        let s = st.slots.get(slot)?;
+        s.infos.get(config as usize).or(s.infos.last()).cloned()
     }
 
     /// Adds frames to a track, evicting played data first if the quota needs it.
-    pub fn append(&self, slot: usize, samples: Vec<Sample>) -> Result<(), QuotaExceeded> {
+    pub fn append(&self, slot: usize, mut samples: Vec<Sample>) -> Result<(), QuotaExceeded> {
         let incoming: usize = samples.iter().map(|s| s.data.len()).sum();
         let mut st = self.lock();
         if slot >= st.slots.len() {
@@ -133,6 +219,10 @@ impl Shared {
             if freed < need {
                 return Err(QuotaExceeded);
             }
+        }
+        let config = (st.slots[slot].infos.len() - 1) as u32;
+        for s in &mut samples {
+            s.config = config;
         }
         st.slots[slot].buf.append(samples);
         st.ended = false;
@@ -218,13 +308,30 @@ impl Shared {
         self.lock().position
     }
 
-    /// The page (or the user) seeked to `time` nanoseconds: feeders restart there.
+    /// The page (or the user) seeked to `time` nanoseconds: feeders restart there. The
+    /// player reports one seek once per track; a repeat of the same time right after is
+    /// that, not a second seek.
     pub fn seek(&self, time: i64) {
         let mut st = self.lock();
+        let now = Instant::now();
+        if st.seek_to == time
+            && st.epoch > 0
+            && st
+                .seek_at
+                .is_some_and(|at| now.duration_since(at) < SEEK_COALESCE)
+        {
+            return;
+        }
         st.epoch += 1;
         st.seek_to = time;
+        st.seek_at = Some(now);
         st.position = time;
         self.wake.notify_all();
+    }
+
+    /// Counts seeks; a feeder compares it with the one it last saw.
+    pub fn epoch(&self) -> u64 {
+        self.lock().epoch
     }
 
     /// Detaches: every feeder is told to stop.
@@ -245,6 +352,7 @@ impl Shared {
             slot,
             epoch,
             cursor: Cursor::Start,
+            eos_sent: false,
         }
     }
 }
@@ -283,9 +391,17 @@ pub struct TrackHandle {
     slot: usize,
     epoch: u64,
     cursor: Cursor,
+    /// `Next::Eos` was returned and nothing has changed since.
+    eos_sent: bool,
 }
 
 impl TrackHandle {
+    /// A seek happened since the last [`TrackHandle::next`]: a frame it returned, not
+    /// yet handed to the player, belongs to the time before the seek.
+    pub fn stale(&self) -> bool {
+        self.shared.lock().epoch != self.epoch
+    }
+
     /// The next thing the player's thread must do, waiting up to `timeout` for it.
     pub fn next(&mut self, timeout: Duration) -> Next {
         let deadline = Instant::now() + timeout;
@@ -297,6 +413,7 @@ impl TrackHandle {
             if st.epoch != self.epoch {
                 self.epoch = st.epoch;
                 self.cursor = Cursor::Seek(st.seek_to);
+                self.eos_sent = false;
                 return Next::Flush {
                     position: st.seek_to,
                 };
@@ -316,9 +433,11 @@ impl TrackHandle {
             };
             if let Some(sample) = sample {
                 self.cursor = Cursor::After(sample.dts);
+                self.eos_sent = false;
                 return Next::Sample(sample.clone());
             }
-            if st.ended {
+            if st.ended && !self.eos_sent {
+                self.eos_sent = true;
                 return Next::Eos;
             }
             let now = Instant::now();
@@ -367,6 +486,7 @@ mod tests {
                 duration: 40 * MS,
                 key: i % gop == 0,
                 data: vec![0; 100],
+                config: 0,
             })
             .collect()
     }
@@ -390,6 +510,11 @@ mod tests {
         assert!(matches!(h.next(SHORT), Next::Sample(s) if s.pts == 120 * MS));
         shared.set_ended(true);
         assert_eq!(h.next(SHORT), Next::Eos);
+        // Once only: the stream stays ended, the feeder has nothing more to do.
+        assert_eq!(h.next(SHORT), Next::Wait);
+        // More data after an end restarts the stream.
+        shared.append(slot, run(160, 1, 1)).unwrap();
+        assert!(matches!(h.next(SHORT), Next::Sample(s) if s.pts == 160 * MS));
     }
 
     #[test]
@@ -481,6 +606,77 @@ mod tests {
         shared.set_position(3000 * MS);
         shared.append(slot, run(600, 10, 5)).unwrap();
         assert!(shared.bytes() <= 2000);
+    }
+
+    #[test]
+    fn frames_carry_the_configuration_they_were_appended_under() {
+        let shared = Shared::new();
+        let mut a = info(1, TrackKind::Video);
+        a.width = 320;
+        let slot = shared.add_track(a.clone());
+        shared.append(slot, run(0, 2, 2)).unwrap();
+        let mut b = a.clone();
+        b.width = 640;
+        assert_eq!(shared.add_track(b.clone()), slot);
+        // The same configuration again adds nothing.
+        shared.add_track(b.clone());
+        shared.append(slot, run(80, 2, 2)).unwrap();
+        let mut h = shared.handle(slot);
+        let mut widths = Vec::new();
+        while let Next::Sample(s) = h.next(SHORT) {
+            widths.push(shared.track_info_at(slot, s.config).unwrap().width);
+        }
+        assert_eq!(widths, vec![320, 320, 640, 640]);
+        assert_eq!(shared.track_info(slot).unwrap().width, 640);
+    }
+
+    #[test]
+    fn ready_waits_for_every_buffer_and_the_start_for_every_track() {
+        let shared = Shared::new();
+        assert!(!shared.ready());
+        shared.register_buffer();
+        shared.register_buffer();
+        let v = shared.add_track(info(1, TrackKind::Video));
+        shared.buffer_initialized();
+        assert!(!shared.ready());
+        let a = shared.add_track(info(2, TrackKind::Audio));
+        shared.buffer_initialized();
+        assert!(shared.ready());
+        // No frames yet.
+        assert_eq!(shared.wait_start(SHORT), None);
+        shared.append(v, run(66, 5, 5)).unwrap();
+        assert_eq!(shared.wait_start(SHORT), None);
+        shared.append(a, run(0, 5, 1)).unwrap();
+        // The timeline starts at the earliest frame of any track.
+        assert_eq!(shared.wait_start(SHORT), Some(0));
+        shared.unregister_buffer(true);
+        shared.unregister_buffer(true);
+        assert!(!shared.ready());
+    }
+
+    #[test]
+    fn a_repeated_seek_report_is_one_seek() {
+        let shared = Shared::new();
+        shared.seek(1000 * MS);
+        let epoch = shared.epoch();
+        shared.seek(1000 * MS);
+        assert_eq!(shared.epoch(), epoch);
+        shared.seek(2000 * MS);
+        assert_eq!(shared.epoch(), epoch + 1);
+    }
+
+    #[test]
+    fn a_frame_fetched_before_a_seek_is_stale_after_it() {
+        let shared = Shared::new();
+        let slot = shared.add_track(info(1, TrackKind::Video));
+        shared.append(slot, run(0, 5, 5)).unwrap();
+        let mut h = shared.handle(slot);
+        assert!(matches!(h.next(SHORT), Next::Sample(_)));
+        assert!(!h.stale());
+        shared.seek(80 * MS);
+        assert!(h.stale());
+        assert!(matches!(h.next(SHORT), Next::Flush { .. }));
+        assert!(!h.stale());
     }
 
     #[test]
