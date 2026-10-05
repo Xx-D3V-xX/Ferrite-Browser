@@ -18,10 +18,12 @@
  */
 (function () {
   'use strict';
-  if (typeof window === 'undefined' || typeof indexedDB === 'undefined') return;
-  if (!window.isSecureContext) return;
+  // Runs in a page and, prepended to a service worker's script (`sw_compat.js`), in a worker.
+  var G = typeof window !== 'undefined' ? window : (typeof self !== 'undefined' ? self : null);
+  if (!G || typeof indexedDB === 'undefined') return;
+  if (G.isSecureContext === false) return;
   try {
-    if (typeof window.caches === 'object' && window.caches && typeof Cache === 'function' &&
+    if (typeof G.caches === 'object' && G.caches && typeof Cache === 'function' &&
         typeof Cache.prototype.match === 'function') return;
   } catch (e) { /* fall through and define our own */ }
 
@@ -324,8 +326,8 @@
 
   var storage = new CacheStorage(TOKEN);
   try {
-    Object.defineProperty(window, 'Cache', { value: Cache, writable: true, configurable: true, enumerable: false });
-    Object.defineProperty(window, 'CacheStorage', { value: CacheStorage, writable: true, configurable: true, enumerable: false });
-    Object.defineProperty(window, 'caches', { get: function () { return storage; }, configurable: true, enumerable: true });
+    Object.defineProperty(G, 'Cache', { value: Cache, writable: true, configurable: true, enumerable: false });
+    Object.defineProperty(G, 'CacheStorage', { value: CacheStorage, writable: true, configurable: true, enumerable: false });
+    Object.defineProperty(G, 'caches', { get: function () { return storage; }, configurable: true, enumerable: true });
   } catch (e) { /* a frozen global object */ }
 })();

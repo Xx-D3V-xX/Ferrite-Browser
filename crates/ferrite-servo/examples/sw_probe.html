@@ -1,0 +1,64 @@
+<!doctype html><meta charset=utf-8><title>sw</title><body>
+<script>
+function log(s){ console.log(s); }
+function ok(name, cond, extra){ log((cond ? 'PASS ' : 'FAIL ') + name + (cond ? '' : ' :: ' + JSON.stringify(extra))); }
+function wait(ms){ return new Promise(function(r){ setTimeout(r, ms); }); }
+function until(test, ms){ return new Promise(function(res){ var end = Date.now() + (ms || 8000); (function poll(){ var v; try { v = test(); } catch (e) { v = false; } if (v) res(v); else if (Date.now() > end) res(false); else setTimeout(poll, 50); })(); }); }
+function name(p){ return p.then(function(){ return 'ok'; }, function(e){ return e.name; }); }
+var PHASE = sessionStorage.getItem('phase') || '1';
+(async function(){
+ try {
+  ok('navigator.serviceWorker and its classes exist', 'serviceWorker' in navigator && typeof ServiceWorkerRegistration === 'function' && typeof ServiceWorker === 'function' && navigator.serviceWorker instanceof ServiceWorkerContainer);
+  if (PHASE === '1') {
+    ok('not controlled before any worker', navigator.serviceWorker.controller === null);
+    var reg = await navigator.serviceWorker.register('/sw.js');
+    ok('register resolves with a registration for the root scope', reg instanceof ServiceWorkerRegistration && reg.scope === location.origin + '/', reg.scope);
+    var worker = reg.installing || reg.waiting || reg.active;
+    var states = [worker.state]; worker.addEventListener('statechange', function(){ states.push(worker.state); });
+    ok('the worker is installing, then reaches activated', await until(function(){ return worker.state === 'activated'; }), states);
+    ok('the states went in order', states.join() === 'installing,installed,activating,activated' || states.join() === 'installed,activating,activated', states);
+    ok('active is set and installing/waiting are empty', reg.active === worker && !reg.installing && !reg.waiting);
+    var ready = await Promise.race([navigator.serviceWorker.ready, wait(5000).then(function(){ return 'timeout'; })]);
+    ok('ready resolves with the registration', ready === reg, String(ready));
+    ok('the page that registered it is not controlled until it claims', navigator.serviceWorker.controller === null);
+    var changed = new Promise(function(res){ navigator.serviceWorker.addEventListener('controllerchange', function(){ res(true); }, {once: true}); });
+    var msgs = []; navigator.serviceWorker.addEventListener('message', function(e){ msgs.push(e.data); });
+    worker.postMessage('claim');
+    ok('clients.claim() takes control (controllerchange fires)', (await Promise.race([changed, wait(5000)])) === true && navigator.serviceWorker.controller === worker);
+    worker.postMessage('hello');
+    ok('postMessage reaches the worker and it answers through event.source', await until(function(){ return msgs.indexOf('echo:hello') >= 0; }), msgs);
+    worker.postMessage('who');
+    ok('clients.matchAll lists this page', await until(function(){ return msgs.some(function(m){ return typeof m === 'string' && m.indexOf('client:') === 0 && m.indexOf(location.href) > 0; }); }), msgs);
+    ok('a fetch the worker answers (respondWith)', (await fetch('/virtual.txt').then(function(r){ return r.text(); })) === 'from-sw');
+    var r = await fetch('/virtual.txt'); ok('... with the status and headers it gave', r.status === 201 && r.headers.get('x-from') === 'sw', [r.status, r.headers.get('x-from')]);
+    ok('a fetch the worker ignores goes to the network', (await fetch('/ping').then(function(r){ return r.text(); })) === 'pong');
+    ok('a POST body reaches the worker', (await fetch('/echo', {method: 'POST', body: 'shout'}).then(function(r){ return r.text(); })) === 'SHOUT');
+    var a = await fetch('/cache-me.txt').then(function(r){ return r.text(); }), b = await fetch('/cache-me.txt').then(function(r){ return r.text(); });
+    ok('the Cache API works inside the worker', a === b && a.indexOf('hit-') === 0, [a, b]);
+    ok('getRegistration and getRegistrations', (await navigator.serviceWorker.getRegistration()) === reg && (await navigator.serviceWorker.getRegistrations()).length === 1);
+    ok('update() resolves', (await reg.update()) === reg);
+    ok('registering the same script again gives the same registration', (await navigator.serviceWorker.register('/sw.js')) === reg);
+    ok('a script outside its own directory cannot take a wider scope', await name(navigator.serviceWorker.register('/dir/sw2.js', {scope: '/'})) === 'SecurityError');
+    ok('a script that throws is refused', await name(navigator.serviceWorker.register('/bad.js', {scope: '/bad/'})) === 'TypeError');
+    ok('a script on another origin is refused', await name(navigator.serviceWorker.register('http://example.invalid/sw.js')) === 'SecurityError');
+    ok('push is not offered: pushManager refuses', await name(reg.pushManager.subscribe({userVisibleOnly: true})) === 'NotAllowedError' && (await reg.pushManager.getSubscription()) === null);
+    sessionStorage.setItem('phase', '2');
+    log('RELOAD');
+    location.reload();
+    return;
+  }
+  // Phase 2: a new page in the scope of a worker an earlier page installed.
+  ok('after a reload the page is controlled with no registration call', await until(function(){ return navigator.serviceWorker.controller !== null; }, 10000));
+  var reg2 = await Promise.race([navigator.serviceWorker.ready, wait(5000).then(function(){ return null; })]);
+  ok('ready resolves for the remembered registration', reg2 && reg2.active && reg2.active.state === 'activated' && reg2.scope === location.origin + '/');
+  ok('the remembered worker answers fetches', (await fetch('/virtual.txt').then(function(r){ return r.text(); })) === 'from-sw');
+  var old = reg2.active;
+  ok('unregister resolves true', (await reg2.unregister()) === true);
+  ok('afterwards there is no registration and no controller', (await navigator.serviceWorker.getRegistration()) === undefined && navigator.serviceWorker.controller === null);
+  ok('... and fetches go to the network again', (await fetch('/virtual.txt').then(function(r){ return r.status; })) === 404);
+  ok('the worker is redundant and refuses a message', old.state === 'redundant' && (function(){ try { old.postMessage('x'); return 'no throw'; } catch (e) { return e.name; } })() === 'InvalidStateError');
+  sessionStorage.removeItem('phase');
+ } catch (e) { log('EXCEPTION ' + (e && e.stack || e)); }
+ document.title = 'DONE';
+})();
+</script>

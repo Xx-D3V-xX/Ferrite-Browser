@@ -57,3 +57,7 @@ required-features = ["media"]
 [[example]]
 name = "capture_probe"
 required-features = ["media"]
+
+[[example]]
+name = "sw_probe"
+required-features = ["servo"]

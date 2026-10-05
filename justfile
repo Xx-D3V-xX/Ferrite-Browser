@@ -136,6 +136,14 @@ run-media *ARGS:
 probe-capture:
     cargo run -p ferrite-servo --features servo,media --example capture_probe
 
+# Registers a service worker from loopback and checks its whole life: install, activate,
+# `ready`, `controller`, `postMessage`, `clients`, `fetch` events (answered, passed through,
+# a POST body, the Cache API inside the worker), a remembered registration on the next page,
+# `unregister` and the refusals. Needs the real Servo build.
+# Check service workers in the real engine.
+probe-sw:
+    cargo run -p ferrite-servo --features servo --example sw_probe
+
 # Plays a WebM video and an Ogg file, draws a decoded frame, opens a WebRTC data channel
 # between two peers and checks that camera, microphone and screen capture are refused.
 # Needs the real Servo build with GStreamer.
