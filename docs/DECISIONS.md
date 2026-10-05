@@ -678,3 +678,16 @@ absent in this Servo and are listed by the probe as gaps.
 
 **Not claimed.** Offline use (the worker lives in the page), navigations through a worker, push, nearest-container semantics for nested containers of one name.
 
+## ADR-025 — Media Source Extensions: the parsing and the frame store are plain Rust; the engine and the player are thin ends of it
+
+**Date:** 2026-10-05. **Status:** live (T-315).
+
+**Context.** YouTube and nearly every streaming site hand their player to the browser through `MediaSource`: the page downloads segments and appends bytes. The engine had none of it. The browser's job is to read those bytes (fragmented MP4, WebM), keep the frames by time, tell the page what is buffered, and feed a decoder in order, following seeks.
+
+**Decision.** (1) The data path is its own crate, `ferrite-mse`, with no engine and no GStreamer in it: parsers, a frame store, and one shared state that the DOM (which appends and removes) and the player (which reads) both hold. It is the part that reads untrusted bytes, so it is plain Rust and tested alone, including against corrupted files. (2) The player's end is one GStreamer source bin, `servomsesrc`, that exposes each track as an elementary stream and lets playbin3 parse and decode them as it does any stream. (3) The DOM end is `MediaSource`, `SourceBuffer` and `SourceBufferList` in the vendored `servo-script`; `HTMLMediaElement` takes its ready state, `buffered`, `seekable` and `duration` from the buffers, and the existing play/pause logic follows from the ready state. (4) A player whose stream ended is replaced by a new one for a seek: after the end, the demuxing stage of the pipeline has let its inputs go and no longer takes frames.
+
+**Why not the alternatives.** Making the page's bytes look like a file to the player (a pipe into `souphttpsrc` or `appsrc` with a demuxer) cannot follow a page that appends out of order, replaces ranges, switches quality, or seeks to data it has not yet appended; MSE is by definition random access in time. Writing the parsers on top of a GStreamer demuxer would put page bytes into a C library; the parsers are the part most worth keeping in safe Rust. Treating `MediaSource` as a script on top of `fetch` and a blob (as ADR-024 does for service workers) cannot work: the frames must reach a decoder.
+
+**What was found by running real players, and kept.** hls.js, dash.js and Shaka Player each rely on things the specification leaves vague and the first version got wrong: a seek must reach every stream's source (GStreamer sends it up one pad); a `MediaSource` must be attachable again after it is detached (Shaka sets a `<source>` and then calls `load()`); an empty `type` on a `<source>` says nothing; data that reaches the duration ends the stream even if the page never calls `endOfStream()`; the duration after `endOfStream()` is the highest track end. These are in `scripts/mse-libs`.
+
+**Not claimed.** YouTube was not tried (the build machine cannot reach it). No encrypted media. Not run on a Mac or Windows. Hardware decoding is whatever GStreamer chooses.

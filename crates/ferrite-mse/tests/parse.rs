@@ -81,7 +81,6 @@ fn h264_in_mp4() {
     assert_eq!(t.kind, TrackKind::Video);
     assert!(matches!(t.codec, Codec::H264 { ref avcc } if avcc.len() > 6));
     assert!(t.width > 0 && t.height > 0);
-    assert!(t.codec_string().starts_with("avc1."));
     let v = video(&p);
     assert_eq!(v.len(), 60);
     check_timeline(v);
@@ -95,7 +94,6 @@ fn aac_in_mp4() {
     assert_eq!(t.kind, TrackKind::Audio);
     assert!(matches!(t.codec, Codec::Aac { ref asc } if !asc.is_empty()));
     assert!(t.sample_rate >= 8000 && t.channels >= 1);
-    assert_eq!(t.codec_string(), "mp4a.40.2");
     let a = audio(&p);
     assert!(a.len() > 80, "{}", a.len());
     check_timeline(a);
@@ -238,4 +236,80 @@ fn noise_after_a_bad_box_is_an_error_not_a_hang() {
     bad[..8].copy_from_slice(&[0, 0, 0, 4, b'm', b'o', b'o', b'v']);
     let mut p = Parser::new(Container::Mp4);
     assert!(p.append(&bad).is_err());
+}
+
+/// The bytes come from a web page: whatever they are, the parsers return (events or an
+/// error) and never panic or run away. Corrupts the fixtures in many ways, in many chunkings.
+#[test]
+fn corrupted_input_never_panics() {
+    let mut seed: u64 = 0x2545_F491_4F6C_DD1D;
+    let mut next = move || {
+        seed ^= seed << 13;
+        seed ^= seed >> 7;
+        seed ^= seed << 17;
+        seed
+    };
+    for (name, container) in [
+        ("av_h264_aac.mp4", Container::Mp4),
+        ("a_aac.mp4", Container::Mp4),
+        ("av_vp9_opus.webm", Container::WebM),
+        ("av_vp8_vorbis.webm", Container::WebM),
+    ] {
+        let original = fixture(name);
+        for round in 0..150 {
+            let mut data = original.clone();
+            match round % 5 {
+                // Flip a few bytes anywhere.
+                0 | 1 => {
+                    for _ in 0..(1 + next() % 8) {
+                        let at = (next() as usize) % data.len();
+                        data[at] = next() as u8;
+                    }
+                }
+                // Flip bytes near the start, where the headers are.
+                2 => {
+                    for _ in 0..(1 + next() % 8) {
+                        let at = (next() as usize) % data.len().min(1500);
+                        data[at] = next() as u8;
+                    }
+                }
+                // Cut it short.
+                3 => data.truncate((next() as usize) % data.len()),
+                // Make a size field huge: every 4-byte window that looks like a small size.
+                _ => {
+                    let at = (next() as usize) % data.len().saturating_sub(8);
+                    data[at..at + 4].copy_from_slice(&[0x7f, 0xff, 0xff, 0xff]);
+                }
+            }
+            let chunk = 1 + (next() as usize) % 5000;
+            let mut parser = Parser::new(container);
+            for piece in data.chunks(chunk) {
+                if parser.append(piece).is_err() {
+                    break;
+                }
+            }
+            // An error is final until `reset`.
+            parser.reset();
+            let _ = parser.append(&original);
+        }
+    }
+}
+
+#[test]
+fn a_box_that_claims_to_be_enormous_is_not_waited_for_without_end() {
+    let mut p = Parser::new(Container::Mp4);
+    // A `moof` of nearly 2 GiB, then data that never ends it.
+    let mut head = vec![0x7f, 0xff, 0xff, 0xf0];
+    head.extend_from_slice(b"moof");
+    assert!(p.append(&head).is_ok());
+    let chunk = vec![0u8; 16 * 1024 * 1024];
+    let mut result = Ok(Vec::new());
+    for _ in 0..20 {
+        result = p.append(&chunk);
+        if result.is_err() {
+            break;
+        }
+    }
+    assert!(result.is_err(), "the parser held 320 MiB for one box");
+    assert_eq!(p.pending_bytes(), 0);
 }

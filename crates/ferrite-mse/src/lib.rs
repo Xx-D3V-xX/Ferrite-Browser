@@ -83,29 +83,7 @@ pub struct TrackInfo {
     pub channels: u32,
 }
 
-impl TrackInfo {
-    /// The codec as the `codecs=` parameter of a MIME type would say it (`avc1.42c00d`,
-    /// `mp4a.40.2`, `vp09.00.10.08`, `opus`), so `isTypeSupported` and the page's own
-    /// bookkeeping can use it.
-    pub fn codec_string(&self) -> String {
-        match &self.codec {
-            Codec::H264 { avcc } if avcc.len() >= 4 => {
-                format!("avc1.{:02x}{:02x}{:02x}", avcc[1], avcc[2], avcc[3])
-            }
-            Codec::H264 { .. } => "avc1".to_string(),
-            Codec::H265 { .. } => "hvc1".to_string(),
-            Codec::Vp8 => "vp8".to_string(),
-            Codec::Vp9 => "vp09.00.10.08".to_string(),
-            Codec::Av1 { .. } => "av01.0.04M.08".to_string(),
-            Codec::Aac { asc } if !asc.is_empty() => format!("mp4a.40.{}", asc[0] >> 3),
-            Codec::Aac { .. } => "mp4a.40.2".to_string(),
-            Codec::Opus { .. } => "opus".to_string(),
-            Codec::Vorbis { .. } => "vorbis".to_string(),
-            Codec::Mp3 => "mp3".to_string(),
-            Codec::Unknown(name) => name.clone(),
-        }
-    }
-}
+impl TrackInfo {}
 
 /// One encoded frame (or audio packet).
 #[derive(Debug, Clone, PartialEq)]
@@ -232,6 +210,9 @@ impl fmt::Display for ParseError {
 
 impl std::error::Error for ParseError {}
 
+/// The most bytes a parser holds back waiting for the rest of a box or element.
+const MAX_PENDING: usize = 256 * 1024 * 1024;
+
 /// An incremental parser for one `SourceBuffer`'s byte stream.
 pub struct Parser {
     inner: Inner,
@@ -255,6 +236,12 @@ impl Parser {
     /// Feeds bytes. Anything not yet a whole box or element is kept for the next call.
     /// An error leaves the parser unusable until [`Parser::reset`].
     pub fn append(&mut self, data: &[u8]) -> Result<Vec<Event>, ParseError> {
+        // A box or element that claims to be enormous is only waited for: not forever, and
+        // not at any price.
+        if self.pending_bytes().saturating_add(data.len()) > MAX_PENDING {
+            self.reset();
+            return Err(ParseError::Malformed("a segment larger than the limit"));
+        }
         match &mut self.inner {
             Inner::Mp4(p) => p.append(data),
             Inner::WebM(p) => p.append(data),

@@ -319,6 +319,7 @@ impl Shared {
     }
 
     /// The bytes held across all tracks.
+    #[cfg(test)]
     pub fn bytes(&self) -> usize {
         self.lock().slots.iter().map(|s| s.buf.bytes()).sum()
     }
@@ -344,10 +345,6 @@ impl Shared {
     /// The playhead, which decides what may be evicted.
     pub fn set_position(&self, position: i64) {
         self.lock().position = position;
-    }
-
-    pub fn position(&self) -> i64 {
-        self.lock().position
     }
 
     /// The page (or the user) seeked to `time` nanoseconds: feeders restart there. The
@@ -520,11 +517,6 @@ impl TrackHandle {
     /// call returns it again.
     pub fn unget(&mut self, sample: &Sample) {
         self.cursor = Cursor::After(sample.dts - 1);
-    }
-
-    /// The slot this feeder reads.
-    pub fn slot(&self) -> usize {
-        self.slot
     }
 }
 

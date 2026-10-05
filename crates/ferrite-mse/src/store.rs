@@ -23,6 +23,7 @@ impl TrackBuffer {
         TrackBuffer::default()
     }
 
+    #[cfg(test)]
     pub fn len(&self) -> usize {
         self.frames.len()
     }
@@ -36,6 +37,7 @@ impl TrackBuffer {
         self.bytes
     }
 
+    #[cfg(test)]
     pub fn get(&self, index: usize) -> Option<&Sample> {
         self.frames.get(index)
     }
@@ -162,11 +164,6 @@ impl TrackBuffer {
             // `time` is just before the first frame: start from the first sync sample.
             .or_else(|| self.frames.iter().find(|f| f.key))?;
         Some(key.dts - 1)
-    }
-
-    /// Whether any frame is buffered at or after `time` in decode order.
-    pub fn has_frames_after(&self, time: i64) -> bool {
-        self.frames.last().is_some_and(|f| f.end() > time)
     }
 
     /// Drops whole groups of frames that end before `before`, oldest first, until
