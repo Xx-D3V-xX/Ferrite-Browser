@@ -10,6 +10,10 @@ publish = false
 #   cargo build -p ferrite-servo --features servo
 #   cargo build -p ferrite-shell --features ferrite-servo/servo
 servo = ["dep:servo", "dep:euclid", "dep:stylo_static_prefs"]
+# Audio and video playback (and WebRTC) through GStreamer. Needs the GStreamer
+# development files to build and its runtime and plugins next to the app, so it is off
+# by default; see docs/COMMANDS.md.
+media = ["servo", "servo/media-gstreamer"]
 
 [dependencies]
 ferrite-audit-log = { workspace = true }
@@ -43,3 +47,7 @@ ignored = ["servo", "euclid", "stylo_static_prefs"]
 # `examples/page_shot.rs` writes a PNG of what the engine rendered. Already in
 # the lockfile (the engine itself decodes PNGs with it).
 png = "0.17"
+
+[[example]]
+name = "media_probe"
+required-features = ["media"]

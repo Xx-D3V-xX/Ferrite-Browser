@@ -194,7 +194,7 @@ var data = [
   ok('Web Locks: query', Array.isArray(q.held) && q.held.length === 0);
   ok('screen.orientation', screen.orientation.type.indexOf('landscape') === 0 && screen.orientation.angle === 0);
   ok('mediaDevices.enumerateDevices is empty', (await navigator.mediaDevices.enumerateDevices()).length === 0);
-  ok('mediaDevices.getUserMedia is refused', await navigator.mediaDevices.getUserMedia({video: true}).then(function(){ return 'ok'; }, function(e){ return e.name; }) === 'NotFoundError');
+  ok('mediaDevices.getUserMedia is refused', await navigator.mediaDevices.getUserMedia({video: true}).then(function(){ return 'ok'; }, function(e){ return e.name; }) === 'NotAllowedError');
   var vt = 'no'; var vtr = document.startViewTransition(function(){ vt = 'updated'; });
   await vtr.finished;
   ok('startViewTransition runs the update', vt === 'updated');

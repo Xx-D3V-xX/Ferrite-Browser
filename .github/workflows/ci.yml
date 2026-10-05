@@ -120,6 +120,45 @@ jobs:
   # uploaded as artifacts; release.yml publishes them once this whole run
   # has succeeded.
   # ─────────────────────────────────────────────────────────────
+  # Audio, video and WebRTC through GStreamer (the `media` feature). Linux only, and
+  # informational: it does not hold up a release, because the release builds do not
+  # include GStreamer (it must be installed next to the app to use it).
+  check-media-linux:
+    name: Media probe (Linux, GStreamer)
+    runs-on: ubuntu-latest
+    needs: ci
+    continue-on-error: true
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install system dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            build-essential clang cmake ninja-build pkg-config gperf python3 m4 \
+            libssl-dev libsqlite3-dev libfontconfig1-dev libfreetype-dev \
+            libharfbuzz-dev liblzma-dev libxkbcommon-dev libx11-dev \
+            libxcb-render0-dev libxcb-shape0-dev libxcb-xfixes0-dev \
+            libwayland-dev libegl1-mesa-dev libgl1-mesa-dev libgles2-mesa-dev \
+            libvulkan-dev libudev-dev libdbus-1-dev libglib2.0-dev libunwind-dev \
+            libgstreamer1.0-dev libgstreamer-plugins-base1.0-dev \
+            libgstreamer-plugins-bad1.0-dev gstreamer1.0-plugins-base \
+            gstreamer1.0-plugins-good gstreamer1.0-plugins-bad gstreamer1.0-libav \
+            gstreamer1.0-nice
+
+      - name: Install Rust stable
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache dependencies
+        uses: Swatinem/rust-cache@v2
+        with:
+          key: servo-media-linux
+
+      - name: Run the media probe
+        run: cargo run -p ferrite-servo --features servo,media --example media_probe
+
   build-servo-release:
     name: Build Servo release (${{ matrix.name }})
     runs-on: ${{ matrix.os }}

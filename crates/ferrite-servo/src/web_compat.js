@@ -522,3 +522,23 @@
   }
   installPopoverStyles();
 })();
+
+// Capture stays refused, whatever the engine offers. With a media backend built in the
+// engine has `navigator.mediaDevices` of its own and would hand out the camera or the
+// microphone without asking the user (it has no permission prompt for them), so
+// `getUserMedia` and `getDisplayMedia` are replaced by an answer of "not allowed" and
+// `enumerateDevices` lists nothing (device names are an identifier). The stand-in above
+// does the same when the engine has none.
+(function () {
+  'use strict';
+  if (typeof navigator === 'undefined' || !navigator.mediaDevices || navigator.mediaDevices.__ferriteGuarded) return;
+  var md = navigator.mediaDevices;
+  function refuse() { return Promise.reject(new DOMException('Permission denied', 'NotAllowedError')); }
+  try {
+    Object.defineProperty(md, 'getUserMedia', { value: refuse, configurable: true, writable: true });
+    Object.defineProperty(md, 'getDisplayMedia', { value: refuse, configurable: true, writable: true });
+    Object.defineProperty(md, 'enumerateDevices', { value: function () { return Promise.resolve([]); }, configurable: true, writable: true });
+    Object.defineProperty(md, '__ferriteGuarded', { value: true });
+  } catch (e) { /* a frozen object: nothing more can be done from here */ }
+  if (typeof navigator.getUserMedia === 'function') navigator.getUserMedia = function (c, ok, fail) { if (fail) fail(new DOMException('Permission denied', 'NotAllowedError')); };
+})();

@@ -1,0 +1,57 @@
+<!doctype html><meta charset=utf-8><title>media</title>
+<body style="margin:0;background:#fff">
+<video id=v src="clip.webm" muted playsinline width=320 height=240></video>
+<script>
+function log(s){ console.log(s); }
+function ok(name, cond, extra){ log((cond ? 'PASS ' : 'FAIL ') + name + (cond ? '' : ' :: ' + JSON.stringify(extra))); }
+function wait(ms){ return new Promise(function(r){ setTimeout(r, ms); }); }
+function once(el, type, ms){ return new Promise(function(res){ var t = setTimeout(function(){ res(false); }, ms); el.addEventListener(type, function(){ clearTimeout(t); res(true); }, {once: true}); }); }
+(async function(){
+ try {
+  var v = document.getElementById('v'), a = document.createElement('audio');
+  ok('canPlayType: webm, ogg and wav', !!v.canPlayType('video/webm; codecs="vp8"') && !!a.canPlayType('audio/ogg; codecs="vorbis"') && !!a.canPlayType('audio/wav'));
+  ok('MediaSource is absent (so players fall back to plain files)', typeof MediaSource === 'undefined');
+  var meta = v.readyState >= 1 || await once(v, 'loadedmetadata', 8000);
+  ok('video metadata', meta && v.videoWidth === 320 && v.videoHeight === 240 && Math.abs(v.duration - 3) < 0.3, [v.videoWidth, v.videoHeight, v.duration, v.error && v.error.message]);
+  var can = v.readyState >= 3 || await once(v, 'canplay', 8000);
+  ok('video can play', can, v.readyState);
+  var playing = once(v, 'playing', 8000);
+  try { await v.play(); } catch (e) { ok('video play()', false, e.name + ': ' + e.message); }
+  ok('video is playing', await playing && !v.paused);
+  await wait(1200);
+  ok('video time advances', v.currentTime > 0.5, v.currentTime);
+  var cv = document.createElement('canvas'); cv.width = 320; cv.height = 240; var cx = cv.getContext('2d');
+  var found = false;
+  for (var i = 0; i < 6 && !found; i++) { cx.drawImage(v, 0, 0, 320, 240); var d = cx.getImageData(0, 0, 320, 240).data; var corner = d[0] + d[1] + d[2]; var anyBright = false; for (var p = 0; p < d.length; p += 4 * 97) { if (d[p] > 200 && d[p+1] > 200 && d[p+2] > 200) { anyBright = true; break; } } found = anyBright && corner < 90; if (!found) await wait(250); }
+  ok('a decoded frame can be drawn to a canvas', found);
+  ok('video ends', v.ended || await once(v, 'ended', 6000));
+  var aud = a.readyState >= 1 || await new Promise(function(res){ a.onloadedmetadata = function(){ res(true); }; a.onerror = function(){ res(false); }; a.src = 'tone.ogg'; setTimeout(function(){ res(false); }, 8000); });
+  ok('audio metadata', aud && a.duration > 2 && a.duration < 2.7, a.duration);
+  ok('AudioContext', typeof AudioContext === 'function' && new AudioContext().sampleRate > 0);
+  // WebRTC: two peers in this page, a data channel between them.
+  ok('RTCPeerConnection exists', typeof RTCPeerConnection === 'function');
+  var got = await new Promise(function(res){
+    var timer = setTimeout(function(){ res('timeout'); }, 15000);
+    try {
+      var a1 = new RTCPeerConnection(), b1 = new RTCPeerConnection();
+      a1.onicecandidate = function(e){ if (e.candidate) b1.addIceCandidate(e.candidate); };
+      b1.onicecandidate = function(e){ if (e.candidate) a1.addIceCandidate(e.candidate); };
+      var ch = a1.createDataChannel('t');
+      ch.onopen = function(){ ch.send('ping'); };
+      b1.ondatachannel = function(e){ e.channel.onmessage = function(m){ clearTimeout(timer); res(m.data); }; };
+      a1.createOffer().then(function(o){ return a1.setLocalDescription(o).then(function(){ return b1.setRemoteDescription(o); }); })
+        .then(function(){ return b1.createAnswer(); })
+        .then(function(an){ return b1.setLocalDescription(an).then(function(){ return a1.setRemoteDescription(an); }); })
+        .catch(function(e){ clearTimeout(timer); res('error ' + e); });
+    } catch (e) { clearTimeout(timer); res('threw ' + e); }
+  });
+  ok('WebRTC data channel between two peers', got === 'ping', got);
+  var gum = await navigator.mediaDevices.getUserMedia({video: true, audio: true}).then(function(){ return 'granted'; }, function(e){ return e.name; });
+  ok('camera and microphone are refused', gum === 'NotAllowedError', gum);
+  var gdm = await navigator.mediaDevices.getDisplayMedia({video: true}).then(function(){ return 'granted'; }, function(e){ return e.name; });
+  ok('screen capture is refused', gdm === 'NotAllowedError', gdm);
+  ok('no device is listed', (await navigator.mediaDevices.enumerateDevices()).length === 0);
+ } catch (e) { log('EXCEPTION ' + e); }
+ document.title = 'DONE';
+})();
+</script>

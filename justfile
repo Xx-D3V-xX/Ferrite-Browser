@@ -122,6 +122,19 @@ run *ARGS:
 build-servo:
     cargo build -p ferrite-shell --features ferrite-servo/servo
 
+# Audio, video and WebRTC need GStreamer (its development files to build, its runtime and
+# plugins to run); docs/COMMANDS.md lists the packages. Not part of any release build.
+# Run the real-Servo browser with audio, video and WebRTC (needs GStreamer).
+run-media *ARGS:
+    cargo run -p ferrite-shell --features ferrite-servo/servo,ferrite-servo/media -- ui {{ARGS}}
+
+# Plays a WebM video and an Ogg file, draws a decoded frame, opens a WebRTC data channel
+# between two peers and checks that camera, microphone and screen capture are refused.
+# Needs the real Servo build with GStreamer.
+# Check audio, video and WebRTC in the real engine (needs GStreamer).
+probe-media:
+    cargo run -p ferrite-servo --features servo,media --example media_probe
+
 # Drives a real headless Servo session against a built-in page and checks
 # scrolling, clicking, typing and reload (no network or window needed).
 # Pass a URL to probe another page. Needs the real Servo build.

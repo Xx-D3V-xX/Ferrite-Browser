@@ -869,6 +869,15 @@ mod inner {
                 {
                     prefs.user_agent = ua;
                 }
+                // With a media backend built in (the `media` feature), WebRTC peer
+                // connections work. Capture (camera, microphone, screen) stays refused:
+                // `web_compat.js` rejects it, because the engine would grant it with no
+                // prompt.
+                #[cfg(feature = "media")]
+                {
+                    prefs.dom_webrtc_enabled = true;
+                    prefs.dom_webrtc_transceiver_enabled = true;
+                }
                 let servo = ServoBuilder::default()
                     .opts(opts)
                     .preferences(prefs)
