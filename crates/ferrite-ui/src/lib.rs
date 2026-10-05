@@ -4660,7 +4660,7 @@ fn kind_label(kind: &AuditEventKind, palette: &Palette, is_light: bool) -> (&'st
 /// Shortens every long URL in a page's console message to its start and end,
 /// so a message full of script addresses (Google's are hundreds of characters)
 /// still shows the part that matters, the error itself, after `truncate`.
-fn shorten_urls(message: &str) -> String {
+pub(crate) fn shorten_urls(message: &str) -> String {
     const KEEP_HEAD: usize = 56;
     const KEEP_TAIL: usize = 28;
     message

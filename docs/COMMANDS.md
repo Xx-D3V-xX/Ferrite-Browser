@@ -1126,6 +1126,15 @@ containing-block walk on every frame. Use `off` as a quick test when a page stic
 that checks for the feature then skips it; a page that calls it without checking shows a
 script error.
 
+The page script also writes warnings to the Console tab for things the engine does not
+say on its own: `Ferrite: img failed to load: <address>` (also `script`, `link`, `source`,
+`video`, `audio`, `iframe`, `object`, `embed`), and `Ferrite: unhandled promise rejection:
+<reason>`. An image that loads but cannot be decoded is reported the same way. Use them when
+icons show as empty or `?` boxes, or a page's app never starts. A font that fails to load is
+not reported, because the engine does not raise that event. Long script addresses in console
+messages are shortened before they are stored, so the error text after the address is kept
+in the DevTools copy (Google's addresses are thousands of characters long).
+
 Related engine settings:
 
 - The display scale is read from the window. It is passed to every tab. A Retina
