@@ -519,6 +519,18 @@ pub(crate) fn next_frame_seq() -> u64 {
 #[cfg(feature = "servo")]
 const WEB_COMPAT_JS: &str = include_str!("web_compat.js");
 
+/// CSS features the style engine ships off and that work once switched on:
+/// `:has()`, `:nth-child(n of S)` and `@scope`, each checked in the real engine by
+/// `examples/web_api_probe.rs`. Not here, with the reason in `docs/TO-DO.md`
+/// T-312: container queries (the style engine parses `@container` only when built
+/// for Gecko, so the rule is dropped whatever the preference says).
+#[cfg(feature = "servo")]
+fn apply_style_prefs() {
+    stylo_static_prefs::set_pref!("layout.css.has-selector.enabled", true);
+    stylo_static_prefs::set_pref!("layout.css.nth-child-of.enabled", true);
+    stylo_static_prefs::set_pref!("layout.css.at-scope.enabled", true);
+}
+
 /// The Cache API (`caches`), built on IndexedDB; see the script's own header.
 #[cfg(feature = "servo")]
 const STORAGE_COMPAT_JS: &str = include_str!("storage_compat.js");
@@ -857,12 +869,12 @@ mod inner {
                 {
                     prefs.user_agent = ua;
                 }
-                *guard = Some(
-                    ServoBuilder::default()
-                        .opts(opts)
-                        .preferences(prefs)
-                        .build(),
-                );
+                let servo = ServoBuilder::default()
+                    .opts(opts)
+                    .preferences(prefs)
+                    .build();
+                super::apply_style_prefs();
+                *guard = Some(servo);
             }
             guard.as_ref().unwrap().clone()
         })

@@ -19,7 +19,7 @@ use std::io::{Read, Write};
 use std::net::TcpListener;
 use std::time::{Duration, Instant};
 
-use ferrite_servo::session::{HeadlessServoSession, LoadStatus};
+use ferrite_servo::session::{shutdown_engine, HeadlessServoSession, LoadStatus};
 
 const PAGE: &str = include_str!("storage_probe.html");
 
@@ -112,5 +112,8 @@ fn main() {
     }
     let passed = lines.iter().filter(|l| l.starts_with("PASS ")).count();
     println!("{passed} passed, {failed} failed");
+    // Shut the engine down cleanly: exiting with it running crashes in its exit handlers.
+    drop(session);
+    shutdown_engine();
     std::process::exit(i32::from(failed > 0 || !errors.is_empty()));
 }

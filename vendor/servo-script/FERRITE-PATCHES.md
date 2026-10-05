@@ -78,5 +78,9 @@ directory) when the engine is upgraded to a release that includes the fixes.
      path failed with `DataError: Provided data is inadequate.` It is an Array now.
      Found by the Cache API stand-in (`crates/ferrite-servo/src/storage_compat.js`),
      which keys its entries on `['cache', 'url', 'method']`.
-   - **Not done.** A unique index is not enforced (a `put` that repeats a unique
-     index key does not fail with `ConstraintError`), and `getAllRecords`.
+   - **Unique indexes.** `IDBObjectStore::put`, `add` and `IDBCursor::update` send the
+     keys the record has in each unique index (`unique_index_keys`, `idbobjectstore.rs`)
+     and the storage backend refuses a duplicate (`vendor/servo-storage`), which the
+     request reports as `ConstraintError`.
+   - **Not done.** A unique index made after records exist is not checked against them
+     (see `vendor/servo-storage/FERRITE-PATCHES.md`), and `getAllRecords`.

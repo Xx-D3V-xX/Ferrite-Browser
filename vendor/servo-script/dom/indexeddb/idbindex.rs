@@ -199,6 +199,10 @@ impl IDBIndex {
     pub(crate) fn multi_entry(&self) -> bool {
         self.multi_entry
     }
+
+    pub(crate) fn is_unique(&self) -> bool {
+        self.unique
+    }
 }
 
 /// The index's records for a store's records: one per (index key, record), in index

@@ -376,3 +376,149 @@
     });
   }
 })();
+
+// The Popover API (`popover` attribute, showPopover / hidePopover / togglePopover, the
+// `beforetoggle` and `toggle` events, `popovertarget` buttons, light dismiss and Escape).
+// The engine has none of it. An open popover is shown through an attribute and a
+// low-priority style rule; the `:popover-open` selector (which the engine would drop
+// together with its whole rule) is rewritten to that attribute in the page's own
+// `<style>` elements. Linked style sheets are not rewritten. Skipped when the engine
+// has the real API.
+(function () {
+  'use strict';
+  if (typeof HTMLElement === 'undefined' || typeof HTMLElement.prototype.showPopover === 'function') return;
+  // The methods and listeners need no document; the style rule and the style rewriting
+  // do, and a start-of-document script can run before there is one.
+  if (!document.documentElement) {
+    document.addEventListener('DOMContentLoaded', function () { installPopoverStyles(); }, { once: true });
+  }
+  var OPEN = 'data-ferrite-popover-open';
+  var open = []; // open popovers, oldest first
+  var stylesInstalled = false;
+  function installPopoverStyles() {
+    if (stylesInstalled || !document.documentElement) return;
+    stylesInstalled = true;
+    var base = document.createElement('style');
+    base.textContent =
+      ':where([popover]:not([' + OPEN + '])){display:none}' +
+      ':where([popover][' + OPEN + ']){position:fixed;inset:0;width:fit-content;height:fit-content;margin:auto;' +
+      'border:solid;padding:.25em;overflow:auto;color:CanvasText;background:Canvas;z-index:2147483647}';
+    (document.head || document.documentElement).appendChild(base);
+    scan(document.documentElement);
+    new MutationObserver(function (records) {
+      records.forEach(function (r) {
+        [].forEach.call(r.addedNodes, scan);
+        if (r.type === 'characterData' && r.target.parentNode && r.target.parentNode.tagName === 'STYLE') rewrite(r.target.parentNode);
+      });
+    }).observe(document.documentElement, { childList: true, subtree: true, characterData: true });
+  }
+
+  function kind(el) {
+    var v = el.getAttribute('popover');
+    if (v === null) return null;
+    v = v.toLowerCase();
+    return v === 'manual' || v === 'hint' ? v : 'auto';
+  }
+  function isOpen(el) { return el.hasAttribute(OPEN); }
+  function fire(el, type, oldState, newState, cancelable) {
+    var ev;
+    try { ev = new ToggleEvent(type, { oldState: oldState, newState: newState, cancelable: !!cancelable }); }
+    catch (e) {
+      ev = new Event(type, { cancelable: !!cancelable });
+      ev.oldState = oldState; ev.newState = newState;
+    }
+    el.dispatchEvent(ev);
+    return ev;
+  }
+  function invalid(el, why) { return new DOMException(why, 'InvalidStateError'); }
+  function check(el) {
+    if (kind(el) === null) throw new DOMException('Not a popover', 'NotSupportedError');
+    if (!el.isConnected) throw invalid(el, 'The popover is not connected');
+  }
+  function hideOne(el, fireEvents) {
+    if (!isOpen(el)) return;
+    if (fireEvents) fire(el, 'beforetoggle', 'open', 'closed', false);
+    el.removeAttribute(OPEN);
+    var i = open.indexOf(el); if (i >= 0) open.splice(i, 1);
+    if (fireEvents) setTimeout(function () { fire(el, 'toggle', 'open', 'closed', false); }, 0);
+  }
+  // Close every open auto popover that is not an ancestor popover of `el`.
+  function closeUnrelated(el) {
+    open.slice().forEach(function (p) {
+      if (p !== el && kind(p) === 'auto' && !p.contains(el)) hideOne(p, true);
+    });
+  }
+  function show(el, source) {
+    check(el);
+    if (isOpen(el)) throw invalid(el, 'The popover is already showing');
+    if (fire(el, 'beforetoggle', 'closed', 'open', true).defaultPrevented) return;
+    if (!el.isConnected || isOpen(el)) return;
+    if (kind(el) === 'auto') closeUnrelated(el);
+    el.setAttribute(OPEN, '');
+    open.push(el);
+    el.__ferritePopoverSource = source || null;
+    setTimeout(function () { fire(el, 'toggle', 'closed', 'open', false); }, 0);
+  }
+  function hide(el) {
+    check(el);
+    if (!isOpen(el)) throw invalid(el, 'The popover is not showing');
+    hideOne(el, true);
+  }
+  var proto = HTMLElement.prototype;
+  Object.defineProperty(proto, 'showPopover', { configurable: true, writable: true, value: function showPopover(options) { show(this, options && options.source); } });
+  Object.defineProperty(proto, 'hidePopover', { configurable: true, writable: true, value: function hidePopover() { hide(this); } });
+  Object.defineProperty(proto, 'togglePopover', { configurable: true, writable: true, value: function togglePopover(options) {
+    var force = typeof options === 'boolean' ? options : options && options.force;
+    var want = force === undefined ? !isOpen(this) : !!force;
+    if (want && !isOpen(this)) show(this, options && options.source);
+    else if (!want && isOpen(this)) hide(this);
+    else check(this);
+    return isOpen(this);
+  } });
+  Object.defineProperty(proto, 'popover', {
+    configurable: true, enumerable: true,
+    get: function () { var k = kind(this); return k === null ? null : k; },
+    set: function (v) { if (v === null || v === undefined) this.removeAttribute('popover'); else this.setAttribute('popover', String(v)); }
+  });
+  // `popovertarget` / `popovertargetaction` on buttons.
+  document.addEventListener('click', function (ev) {
+    var t = ev.target;
+    var button = t && t.closest ? t.closest('button[popovertarget], input[popovertarget]') : null;
+    if (button && !button.disabled) {
+      var target = document.getElementById(button.getAttribute('popovertarget'));
+      if (target && kind(target) !== null) {
+        var action = (button.getAttribute('popovertargetaction') || 'toggle').toLowerCase();
+        try {
+          if (action === 'show' && !isOpen(target)) show(target, button);
+          else if (action === 'hide' && isOpen(target)) hide(target);
+          else if (action === 'toggle') (isOpen(target) ? hide : function (p) { show(p, button); })(target);
+        } catch (e) { /* a refused toggle is not an error for the page */ }
+        return;
+      }
+    }
+    // Light dismiss: a click outside every open auto popover closes them (and a click
+    // inside one keeps it and its ancestors).
+    open.slice().forEach(function (p) {
+      if (kind(p) !== 'auto' || !isOpen(p)) return;
+      var inside = p.contains(t) || (p.__ferritePopoverSource && p.__ferritePopoverSource.contains(t));
+      if (!inside) hideOne(p, true);
+    });
+  }, true);
+  document.addEventListener('keydown', function (ev) {
+    if (ev.key !== 'Escape' || ev.defaultPrevented) return;
+    for (var i = open.length - 1; i >= 0; i--) {
+      if (kind(open[i]) !== 'manual') { hideOne(open[i], true); ev.preventDefault(); return; }
+    }
+  }, true);
+  // `:popover-open` in the page's own style elements becomes the attribute selector.
+  function rewrite(style) {
+    var text = style.textContent;
+    if (text && text.indexOf(':popover-open') >= 0) style.textContent = text.split(':popover-open').join('[' + OPEN + ']');
+  }
+  function scan(root) {
+    if (root.nodeType !== 1) return;
+    if (root.tagName === 'STYLE') rewrite(root);
+    else if (root.querySelectorAll) [].forEach.call(root.querySelectorAll('style'), rewrite);
+  }
+  installPopoverStyles();
+})();

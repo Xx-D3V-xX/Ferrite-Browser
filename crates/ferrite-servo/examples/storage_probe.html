@@ -209,6 +209,70 @@ var data = [
   ok('wake lock is granted', sentinel && sentinel.type === 'screen' && sentinel.released === false, String(sentinel));
   if (sentinel && sentinel.release) await sentinel.release();
 
+  // -------- unique indexes --------
+  function failsWith(req){ return new Promise(function(res){ req.onsuccess = function(){ res('ok'); }; req.onerror = function(e){ e.preventDefault(); e.stopPropagation(); res(req.error.name); }; }); }
+  var udb = await new Promise(function(res, rej){
+    var r = indexedDB.open('ferrite-unique-' + Date.now(), 1);
+    r.onupgradeneeded = function(){
+      var a = r.result.createObjectStore('users', {keyPath: 'id'});
+      a.createIndex('by_email', 'email', {unique: true});
+      a.createIndex('by_tag', 'tags', {unique: true, multiEntry: true});
+      a.createIndex('by_nick', 'nick');                       // not unique
+      var b = r.result.createObjectStore('other', {keyPath: 'id'});
+      b.createIndex('by_email', 'email', {unique: true});     // the same index name in a second store
+    };
+    r.onsuccess = function(){ res(r.result); }; r.onerror = function(){ rej(r.error); };
+  });
+  var ut = udb.transaction(['users', 'other'], 'readwrite'); var us = ut.objectStore('users'); var uo = ut.objectStore('other');
+  us.put({id: 1, email: 'a@x', nick: 'n', tags: ['t1', 't2']});
+  ok('a second store may have an index of the same name', await failsWith(uo.put({id: 1, email: 'a@x'})) === 'ok');
+  ok('a duplicate unique key is a ConstraintError', await failsWith(us.put({id: 2, email: 'a@x'})) === 'ConstraintError');
+  ok('a refused put left nothing behind', (await P(us.count())) === 1);
+  ok('add with a duplicate unique key is a ConstraintError', await failsWith(us.add({id: 3, email: 'a@x'})) === 'ConstraintError');
+  ok('a distinct key is accepted', await failsWith(us.put({id: 2, email: 'b@x', nick: 'n'})) === 'ok');
+  ok('a non-unique index may repeat', (await P(us.index('by_nick').count())) === 2);
+  ok('re-saving a record with its own key is fine', await failsWith(us.put({id: 1, email: 'a@x', nick: 'm', tags: ['t1', 't2']})) === 'ok');
+  ok('changing a record frees its old key', (await failsWith(us.put({id: 1, email: 'c@x', tags: ['t1', 't2']}))) === 'ok' && (await failsWith(us.put({id: 9, email: 'a@x'}))) === 'ok');
+  ok('multiEntry unique: an element already held is refused', await failsWith(us.put({id: 10, email: 'z@x', tags: ['t2']})) === 'ConstraintError');
+  ok('multiEntry unique: a repeat inside one record is fine', await failsWith(us.put({id: 11, email: 'y@x', tags: ['q', 'q']})) === 'ok');
+  ok('a record with no key in the index is accepted twice', (await failsWith(us.put({id: 12}))) === 'ok' && (await failsWith(us.put({id: 13}))) === 'ok');
+  await P(us['delete'](9));
+  ok('delete frees the key', await failsWith(us.put({id: 14, email: 'a@x'})) === 'ok');
+  var cur = await P(us.openCursor(IDBKeyRange.only(2)));
+  ok('cursor.update to a held key is a ConstraintError', await failsWith(cur.update({id: 2, email: 'a@x'})) === 'ConstraintError');
+  ok('cursor.update to a free key is fine', await failsWith(cur.update({id: 2, email: 'free@x'})) === 'ok');
+  await P(us.clear());
+  ok('clear frees every key', (await failsWith(us.put({id: 20, email: 'a@x', tags: ['t1']}))) === 'ok' && (await failsWith(us.put({id: 21, email: 'c@x', tags: ['t1']}))) === 'ConstraintError');
+  await done(ut);
+  var rt = udb.transaction('users'); 
+  ok('unique index holds after commit', (await P(rt.objectStore('users').index('by_email').get('a@x'))).id === 20);
+  udb.close();
+
+  // -------- popover --------
+  var pop = document.createElement('div'); pop.id = 'pop1'; pop.setAttribute('popover', ''); pop.textContent = 'hello'; document.body.appendChild(pop);
+  var pop2 = document.createElement('div'); pop2.setAttribute('popover', 'manual'); document.body.appendChild(pop2);
+  var sty = document.createElement('style'); sty.textContent = '#pop1:popover-open{outline:3px solid rgb(1,2,3)}'; document.head.appendChild(sty);
+  await new Promise(function(r){ setTimeout(r, 30); });
+  ok('a closed popover is not displayed', getComputedStyle(pop).display === 'none');
+  var events = []; pop.addEventListener('beforetoggle', function(e){ events.push('before:' + e.newState); }); pop.addEventListener('toggle', function(e){ events.push('toggle:' + e.newState); });
+  pop.showPopover();
+  ok('showPopover displays it', getComputedStyle(pop).display !== 'none' && pop.matches('[data-ferrite-popover-open]'));
+  ok(':popover-open rules apply', getComputedStyle(pop).outlineColor === 'rgb(1, 2, 3)', getComputedStyle(pop).outlineColor);
+  ok('showPopover on a shown popover is an InvalidStateError', threw(function(){ pop.showPopover(); }) === 'InvalidStateError');
+  ok('popover property reflects the attribute', pop.popover === 'auto' && pop2.popover === 'manual');
+  pop2.showPopover();
+  document.body.dispatchEvent(new MouseEvent('click', {bubbles: true}));
+  ok('light dismiss closes an auto popover, not a manual one', getComputedStyle(pop).display === 'none' && getComputedStyle(pop2).display !== 'none');
+  ok('togglePopover(false) closes', pop2.togglePopover(false) === false && getComputedStyle(pop2).display === 'none');
+  var btn = document.createElement('button'); btn.setAttribute('popovertarget', 'pop1'); document.body.appendChild(btn); btn.click();
+  ok('a popovertarget button toggles it', getComputedStyle(pop).display !== 'none');
+  document.dispatchEvent(new KeyboardEvent('keydown', {key: 'Escape', bubbles: true}));
+  await new Promise(function(r){ setTimeout(r, 30); });
+  ok('Escape closes it', getComputedStyle(pop).display === 'none');
+  var befores = events.filter(function(e){ return e.indexOf('before:') === 0; }).join(), toggles = events.filter(function(e){ return e.indexOf('toggle:') === 0; }).join();
+  ok('beforetoggle fires first and toggle after, each once per change', befores === 'before:open,before:closed,before:open,before:closed' && toggles === 'toggle:open,toggle:closed,toggle:open,toggle:closed' && events[0] === 'before:open', events);
+  ok('a non-popover element refuses', threw(function(){ document.createElement('div').showPopover(); }) === 'NotSupportedError');
+
   // -------- web storage --------
   localStorage.setItem('k', 'v'); sessionStorage.setItem('s', 'w');
   ok('localStorage round trip', localStorage.getItem('k') === 'v' && localStorage.length >= 1);

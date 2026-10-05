@@ -129,7 +129,9 @@ impl From<PutItemResult> for IdbResult {
     fn from(value: PutItemResult) -> Self {
         match value {
             PutItemResult::Key(key) => Self::Key(key),
-            PutItemResult::CannotOverwrite => Self::Error(Error::Constraint(None)),
+            PutItemResult::CannotOverwrite | PutItemResult::UniqueIndexViolation => {
+                Self::Error(Error::Constraint(None))
+            },
         }
     }
 }

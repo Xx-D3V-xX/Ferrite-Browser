@@ -451,6 +451,7 @@ impl IDBCursorMethods<crate::DomTypeHolder> for IDBCursor {
                 _ => return Err(Error::Data(None)),
             }
         }
+        let unique_index_keys = store.unique_index_keys(cx, clone.handle())?;
         let serialized = structuredclone::write(cx, clone.handle(), None)?;
         let serialized_value =
             postcard::to_stdvec(&serialized).map_err(|_| Error::InvalidState(None))?;
@@ -465,6 +466,7 @@ impl IDBCursorMethods<crate::DomTypeHolder> for IDBCursor {
                     value: serialized_value,
                     should_overwrite: true,
                     key_generator_current_number: None,
+                    unique_index_keys,
                 })
             },
             None,

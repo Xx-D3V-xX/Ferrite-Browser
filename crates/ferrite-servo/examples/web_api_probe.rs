@@ -71,6 +71,10 @@ const REQUIRED: &[(&str, &str)] = &[
     ("Intl.DateTimeFormat / NumberFormat", "typeof Intl.DateTimeFormat === 'function' && typeof Intl.NumberFormat === 'function'"),
     ("Promise.allSettled / WeakRef", "typeof Promise.allSettled === 'function' && typeof WeakRef === 'function'"),
     ("Array.prototype.at / Object.hasOwn", "[1,2,3].at(-1) === 3 && Object.hasOwn({a:1},'a')"),
+    // CSS the style engine ships off; `ferrite-servo` switches these on.
+    (":has() styles and matches", "getComputedStyle(document.getElementById('has1')).width === '20px' && document.getElementById('has1').matches(':has(.kid)') && CSS.supports('selector(:has(a))')"),
+    (":nth-child(n of S)", "getComputedStyle(document.querySelectorAll('#nco li')[2]).width === '30px'"),
+    ("@scope", "getComputedStyle(document.getElementById('sc1')).width === '50px'"),
     ("localStorage / sessionStorage", "typeof localStorage === 'object' && typeof sessionStorage === 'object'"),
     ("history.pushState", "typeof history.pushState === 'function'"),
     ("matchMedia", "typeof matchMedia === 'function' && typeof matchMedia('(min-width:1px)').matches === 'boolean'"),
@@ -168,7 +172,10 @@ fn page() -> String {
     }
     format!(
         "<!doctype html><html><head><meta charset=utf-8><title>web api probe</title>\
-         <style>html,body{{margin:0}}.svgprobe{{position:absolute;left:0;top:0;width:40px;height:40px;fill:rgb(0,200,0)}}</style></head><body>\
+         <style>html,body{{margin:0}}\
+         #has1:has(> .kid){{width:20px}}#nco li:nth-child(2 of .on){{width:30px}}@scope (#sc){{.in{{width:50px}}}}\
+         .svgprobe{{position:absolute;left:0;top:0;width:40px;height:40px;fill:rgb(0,200,0)}}</style></head><body>\
+         <div id=has1 style=\"height:1px\"><span class=kid></span></div><ul id=nco><li class=on>a<li>b<li class=on>c</ul><div id=sc><div class=in id=sc1 style=\"height:1px\"></div></div>\
          <svg class=svgprobe viewBox=\"0 0 10 10\"><rect width=10 height=10 /></svg>\
          <script>{sync}{asyncs}window.__sync=R;window.__optional=O;Promise.all(ps).then(function(){{window.__async=A}});</script>\
          </body></html>"

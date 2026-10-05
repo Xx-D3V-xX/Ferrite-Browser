@@ -2605,6 +2605,7 @@ dependencies = [
  "raw-window-handle",
  "rustls",
  "servo",
+ "stylo_static_prefs",
  "url",
  "uuid",
  "winit",
@@ -9057,8 +9058,6 @@ dependencies = [
 [[package]]
 name = "servo-storage"
 version = "0.6.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "63c1069710e78d981e8f486ab8e66745a7f64e628bc51212bfd595ac92cf72de"
 dependencies = [
  "libc",
  "log",
@@ -9083,8 +9082,6 @@ dependencies = [
 [[package]]
 name = "servo-storage-traits"
 version = "0.6.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "920a3646a4f041dd51a89dd9c4fa1e9775f6562a4f66a704d2db1177bedb3df5"
 dependencies = [
  "malloc_size_of_derive",
  "serde",
