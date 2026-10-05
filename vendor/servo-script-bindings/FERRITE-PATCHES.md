@@ -22,3 +22,10 @@ engine is upgraded to a release that has these interfaces.
    `IDBCursor` and `IDBIndex`, so the engine's implementation (in
    `vendor/servo-script`, `dom/indexeddb/`; see its `FERRITE-PATCHES.md`) gets a
    JavaScript context like the other IndexedDB methods do.
+5. `interface.rs`: `SharedArrayBuffer` and `Atomics` are on in every realm
+   (`sharedMemoryAndAtomics_`); they were hard-wired off. `FERRITE_SHARED_MEMORY=off` turns
+   them off. See `vendor/servo-script/FERRITE-PATCHES.md`, item 7.
+6. `webidls/MediaDevices.webidl`, `MediaStreamTrack.webidl`, `MediaStream.webidl`,
+   `codegen/Bindings.conf`: `getDisplayMedia`, `getSupportedConstraints`, the track's
+   `label`, `enabled`, `muted`, `readyState`, `stop()`, `getSettings()` and event handlers,
+   the stream's `id` and `active`. See `vendor/servo-script/FERRITE-PATCHES.md`, item 8.

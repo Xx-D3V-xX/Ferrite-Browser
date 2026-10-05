@@ -146,7 +146,11 @@ pub(crate) unsafe fn create_global_object<D: DomTypes>(
 
     let mut options = RealmOptions::default();
     options.creationOptions_.traceGlobal_ = Some(trace);
-    options.creationOptions_.sharedMemoryAndAtomics_ = false;
+    // Ferrite: `SharedArrayBuffer` and `Atomics` were hard-wired off. They can be
+    // shared with a worker now (`structuredclone::write_message` in `servo-script`), which
+    // is what made turning them on safe. `FERRITE_SHARED_MEMORY=off` turns them off again.
+    options.creationOptions_.sharedMemoryAndAtomics_ =
+        std::env::var_os("FERRITE_SHARED_MEMORY").is_none_or(|value| value != "off");
     if use_system_compartment {
         options.creationOptions_.compSpec_ = CompartmentSpecifier::NewCompartmentAndZone;
         options.creationOptions_.__bindgen_anon_1.comp_ = std::ptr::null_mut();

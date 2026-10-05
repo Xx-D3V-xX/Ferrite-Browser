@@ -84,3 +84,25 @@ directory) when the engine is upgraded to a release that includes the fixes.
      request reports as `ConstraintError`.
    - **Not done.** A unique index made after records exist is not checked against them
      (see `vendor/servo-storage/FERRITE-PATCHES.md`), and `getAllRecords`.
+7. `dom/bindings/structuredclone.rs`, `dom/workers/dedicatedworkerglobalscope.rs` (with
+   `servo-script-bindings`, item 5): **`SharedArrayBuffer` can be shared with a worker.**
+   The engine hard-wired `SharedArrayBuffer`/`Atomics` off, and its structured clone
+   refused one (`sab_cloned_callback` returned false). Now `write_message` (used by
+   `postMessage` to a worker, a window, a port, a broadcast channel) writes normally and,
+   when SpiderMonkey refuses (a `SharedArrayBuffer`, a shared `WebAssembly.Memory`), writes
+   again with the same-process scope and the policy that allows shared memory; the bytes
+   carry a four-byte mark (`FSAB`) and `read` uses the same scope when it sees it. The
+   clone buffer of such a message is leaked on purpose (it holds the reference that keeps
+   the shared buffer alive until the receiver has read it); messages that share nothing are
+   unchanged. What is stored (IndexedDB, history state) never takes this path. A worker
+   may now call `Atomics.wait` (`JS_SetFutexCanWait`). **Not done:** a `WebAssembly.Module`
+   still cannot be sent to a worker (the engine's clone has no hook for it, and recreating
+   one needs a C++ call on `JS::WasmModule` that the Rust bindings do not expose), so
+   emscripten's pthreads, which post the module to each worker, still fail.
+8. `dom/media/` (with `servo-script-bindings`, item 6, and `vendor/servo-media-gstreamer`):
+   **capture.** `getUserMedia` asks the embedder (`PromptPermission`) without blocking the
+   page's script thread and rejects with `NotAllowedError` when refused, `NotFoundError`
+   when there is no device; `getDisplayMedia` (the whole screen); `getSupportedConstraints`;
+   `MediaStreamTrack.label`, `enabled`, `readyState`, `stop()`, `getSettings()`, `onended`;
+   `MediaStream.id` and `active`; `enumerateDevices` shows names only after a grant;
+   `FERRITE_MOCK_CAPTURE` makes the engine's test sources stand in for devices (probes).

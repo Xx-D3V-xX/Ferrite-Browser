@@ -88,7 +88,7 @@ impl BroadcastChannelMethods<crate::DomTypeHolder> for BroadcastChannel {
         }
 
         // Step 6, StructuredSerialize(message).
-        let data = structuredclone::write(cx, message, None)?;
+        let data = structuredclone::write_message(cx, message, None)?;
 
         let global = self.global();
 

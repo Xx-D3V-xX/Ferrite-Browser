@@ -150,7 +150,7 @@ impl MessagePort {
         }
 
         // Step 5
-        let data = structuredclone::write(cx, message, Some(transfer))?;
+        let data = structuredclone::write_message(cx, message, Some(transfer))?;
 
         if doomed {
             // TODO: The spec says to optionally report such a case to a dev console.

@@ -193,8 +193,7 @@ var data = [
   var q = await navigator.locks.query();
   ok('Web Locks: query', Array.isArray(q.held) && q.held.length === 0);
   ok('screen.orientation', screen.orientation.type.indexOf('landscape') === 0 && screen.orientation.angle === 0);
-  ok('mediaDevices.enumerateDevices is empty', (await navigator.mediaDevices.enumerateDevices()).length === 0);
-  ok('mediaDevices.getUserMedia is refused', await navigator.mediaDevices.getUserMedia({video: true}).then(function(){ return 'ok'; }, function(e){ return e.name; }) === 'NotAllowedError');
+  ok('mediaDevices.enumerateDevices answers with a list', Array.isArray(await navigator.mediaDevices.enumerateDevices()));
   var vt = 'no'; var vtr = document.startViewTransition(function(){ vt = 'updated'; });
   await vtr.finished;
   ok('startViewTransition runs the update', vt === 'updated');
@@ -247,6 +246,30 @@ var data = [
   var rt = udb.transaction('users'); 
   ok('unique index holds after commit', (await P(rt.objectStore('users').index('by_email').get('a@x'))).id === 20);
   udb.close();
+
+  // -------- shared memory --------
+  function workerOf(code){ return new Worker(URL.createObjectURL(new Blob([code]))); }
+  function reply(w, timeout){ return new Promise(function(res){ var t = setTimeout(function(){ res('timeout'); }, timeout || 8000); w.onmessage = function(e){ clearTimeout(t); res(e.data); }; w.onerror = function(e){ clearTimeout(t); res('worker error ' + e.message); }; }); }
+  ok('SharedArrayBuffer and Atomics exist', typeof SharedArrayBuffer === 'function' && typeof Atomics === 'object' && (function(){ var a = new Int32Array(new SharedArrayBuffer(8)); Atomics.add(a, 0, 5); return Atomics.load(a, 0) === 5; })());
+  var sab = new SharedArrayBuffer(16), view = new Int32Array(sab);
+  var w1 = workerOf('onmessage=function(e){var v=new Int32Array(e.data);Atomics.store(v,0,42);postMessage("done")}');
+  var r1 = reply(w1); try { w1.postMessage(sab); } catch (e) { r1 = Promise.resolve('threw ' + e); }
+  ok('a SharedArrayBuffer is shared with a Worker', (await r1) === 'done' && Atomics.load(view, 0) === 42, [await r1, Atomics.load(view, 0)]);
+  var w2 = workerOf('onmessage=function(e){var v=new Int32Array(e.data);var r=Atomics.wait(v,1,0,5000);postMessage(r+":"+Atomics.load(v,1))}');
+  var r2 = reply(w2); w2.postMessage(sab);
+  await new Promise(function(r){ setTimeout(r, 300); });
+  Atomics.store(view, 1, 7); Atomics.notify(view, 1);
+  ok('Atomics.wait in a worker is woken by Atomics.notify on the page', (await r2) === 'ok:7', await r2);
+  var mem = new WebAssembly.Memory({initial: 1, maximum: 2, shared: true});
+  ok('a shared WebAssembly.Memory has a SharedArrayBuffer', mem.buffer instanceof SharedArrayBuffer);
+  var w3 = workerOf('onmessage=function(e){var v=new Int32Array(e.data.buffer);v[3]=99;postMessage("ok")}');
+  var r3 = reply(w3); try { w3.postMessage(mem); } catch (e) { r3 = Promise.resolve('threw ' + e); }
+  ok('a shared WebAssembly.Memory is shared with a Worker', (await r3) === 'ok' && new Int32Array(mem.buffer)[3] === 99, [await r3, new Int32Array(mem.buffer)[3]]);
+  var ab = new ArrayBuffer(8), w5 = workerOf('onmessage=function(e){postMessage(e.data.byteLength)}'); var r5 = reply(w5); w5.postMessage(ab, [ab]);
+  ok('an ordinary transferred ArrayBuffer still moves (and is detached)', (await r5) === 8 && ab.byteLength === 0, [await r5, ab.byteLength]);
+  var w6 = workerOf('onmessage=function(e){postMessage({n:e.data.n+1,s:e.data.s})}'); var r6 = reply(w6); w6.postMessage({n: 1, s: 'x'});
+  ok('an ordinary message is unchanged', JSON.stringify(await r6) === '{"n":2,"s":"x"}', await r6);
+  [w1, w2, w3, w5, w6].forEach(function(w){ w.terminate(); });
 
   // -------- popover --------
   var pop = document.createElement('div'); pop.id = 'pop1'; pop.setAttribute('popover', ''); pop.textContent = 'hello'; document.body.appendChild(pop);
