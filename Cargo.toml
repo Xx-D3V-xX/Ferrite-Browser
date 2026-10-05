@@ -12,6 +12,7 @@ members = [
   "crates/ferrite-eval",
   "crates/ferrite-engine",
   "crates/ferrite-engine-servo",
+  "crates/ferrite-mse",
 ]
 resolver = "2"
 

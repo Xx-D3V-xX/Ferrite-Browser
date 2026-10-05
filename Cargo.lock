@@ -2605,6 +2605,10 @@ dependencies = [
 ]
 
 [[package]]
+name = "ferrite-mse"
+version = "0.1.0"
+
+[[package]]
 name = "ferrite-servo"
 version = "0.1.0"
 dependencies = [
