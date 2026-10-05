@@ -222,8 +222,11 @@ fn level_slot(level: ConsoleLevel) -> usize {
     }
 }
 
-/// Cuts `message` to [`MAX_MESSAGE_CHARS`], saying how much was dropped.
+/// Cuts `message` to [`MAX_MESSAGE_CHARS`], saying how much was dropped. Long
+/// script addresses are shortened first (Google's are thousands of characters),
+/// so the cut falls on padding and not on the error text after the address.
 pub(crate) fn cap_message(message: String) -> String {
+    let message = crate::shorten_urls(&message);
     let total = message.chars().count();
     if total <= MAX_MESSAGE_CHARS {
         return message;
@@ -1502,6 +1505,25 @@ mod tests {
         );
         assert_eq!(view.hidden, MAX_ENTRIES - 3);
         assert_eq!(log.level_count(LevelFilter::All), MAX_ENTRIES);
+    }
+
+    #[test]
+    fn a_long_script_address_does_not_push_the_error_text_out_of_the_log() {
+        let url = format!(
+            "https://www.google.com/xjs/_/js/k=xjs.s.en_GB/am={}/cb=loaded_h_0/m=csi?cb=1",
+            "A".repeat(MAX_MESSAGE_CHARS * 2)
+        );
+        let message =
+            format!("Error at {url}:996:29 uncaught exception: TypeError: x is undefined");
+        let mut log = TabLog::default();
+        log.push_message(entry(1, ConsoleLevel::Error, &message));
+        let view = log.console_view(LevelFilter::All, "", 1);
+        let kept = &view.rows[0].message;
+        assert!(
+            kept.contains("uncaught exception: TypeError: x is undefined"),
+            "{kept}"
+        );
+        assert!(!kept.contains("not kept"), "{kept}");
     }
 
     #[test]

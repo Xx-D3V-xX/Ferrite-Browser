@@ -3646,6 +3646,17 @@ impl Window {
         } else {
             self.as_global_scope().speed_up_timers();
         }
+        // Ferrite: a throttled page is a background one, so its document is hidden;
+        // an unthrottled page is visible (see FERRITE-PATCHES.md).
+        if let Some(document) = self.document.get() {
+            let document = Trusted::new(&*document);
+            self.as_global_scope()
+                .task_manager()
+                .dom_manipulation_task_source()
+                .queue(task!(apply_throttle_visibility: move |cx| {
+                    document.root().apply_throttle_visibility(cx, throttled);
+                }));
+        }
     }
 
     pub(crate) fn throttled(&self) -> bool {
