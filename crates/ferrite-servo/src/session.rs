@@ -566,6 +566,10 @@ pub fn forget_site_permission(origin: &str, kind: crate::permissions::Capability
 #[cfg(feature = "servo")]
 const STORAGE_COMPAT_JS: &str = include_str!("storage_compat.js");
 
+/// CSS container queries, rewritten into ordinary rules; see the script's own header.
+#[cfg(feature = "servo")]
+const CQ_COMPAT_JS: &str = include_str!("cq_compat.js");
+
 /// Service workers, built on dedicated workers; see the script's own header. A worker
 /// has no user scripts, so the Cache API script travels inside this one (as a string it
 /// puts in front of each worker's source).
@@ -797,6 +801,7 @@ mod inner {
                     manager.add_script(Rc::new(servo::UserScript::from(
                         super::SW_COMPAT_JS.as_str(),
                     )));
+                    manager.add_script(Rc::new(servo::UserScript::from(super::CQ_COMPAT_JS)));
                     Rc::new(manager)
                 })
                 .clone()
@@ -2868,7 +2873,7 @@ mod user_agent_tests {
 
 #[cfg(all(test, feature = "servo"))]
 mod svg_compat_tests {
-    use super::{STORAGE_COMPAT_JS, SVG_COMPAT_JS, SW_COMPAT_JS, WEB_COMPAT_JS};
+    use super::{CQ_COMPAT_JS, STORAGE_COMPAT_JS, SVG_COMPAT_JS, SW_COMPAT_JS, WEB_COMPAT_JS};
 
     #[test]
     fn the_compat_scripts_parse_under_node() {
@@ -2877,6 +2882,7 @@ mod svg_compat_tests {
             ("web_compat.js", WEB_COMPAT_JS),
             ("storage_compat.js", STORAGE_COMPAT_JS),
             ("sw_compat.js", SW_COMPAT_JS.as_str()),
+            ("cq_compat.js", CQ_COMPAT_JS),
         ] {
             parses_under_node(name, source);
         }

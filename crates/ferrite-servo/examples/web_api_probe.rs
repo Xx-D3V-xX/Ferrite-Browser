@@ -44,7 +44,6 @@ const REQUIRED: &[(&str, &str)] = &[
         "WebGL context",
         "(function(){var c=document.createElement('canvas');return !!(c.getContext('webgl')||c.getContext('experimental-webgl'))})()",
     ),
-    ("WebGL2 context", "!!document.createElement('canvas').getContext('webgl2')"),
     ("Notification", "typeof Notification === 'function'"),
     ("navigator.permissions", "typeof navigator.permissions === 'object' && typeof navigator.permissions.query === 'function'"),
     ("navigator.clipboard", "typeof navigator.clipboard === 'object' && typeof navigator.clipboard.writeText === 'function'"),
@@ -84,6 +83,11 @@ const REQUIRED: &[(&str, &str)] = &[
 /// Present in current Chrome, Firefox and Safari and used by real sites, but
 /// not needed to run a page: a gap is reported as `INFO`, never as a failure.
 const OPTIONAL: &[(&str, &str)] = &[
+    // Off by default since the macOS fix (docs/TO-DO.md T-305); `FERRITE_WEBGL=on` turns it on.
+    (
+        "WebGL2 context",
+        "!!document.createElement('canvas').getContext('webgl2')",
+    ),
     (
         "requestIdleCallback",
         "typeof requestIdleCallback === 'function'",
@@ -146,6 +150,16 @@ const ASYNC: &[(&str, &str)] = &[
         "fetch('/ping').then(function(r){return r.text()}).then(function(t){if(t!=='pong')throw new Error('got '+t);})",
     ),
     (
+        "container queries: min-width, ranges, not, or, named, nesting, cq units, and a resize",
+        "new Promise(function(res,rej){var w=function(id){return getComputedStyle(document.getElementById(id)).width};\
+         setTimeout(function(){\
+         var first=[w('cqa'),w('cqb'),w('cqc'),w('cqd'),w('cqe'),w('cqu')].join();\
+         if(first!=='40px,10px,42px,46px,44px,30px')return rej(new Error('at 300px: '+first));\
+         document.getElementById('cqbox').style.width='500px';\
+         setTimeout(function(){var second=[w('cqa'),w('cqb'),w('cqc'),w('cqd'),w('cqu')].join();\
+         if(second!=='40px,41px,10px,10px,50px')return rej(new Error('at 500px: '+second));res();},700);},700)})",
+    ),
+    (
         "setTimeout/Promise ordering",
         "new Promise(function(res){var o=[];setTimeout(function(){o.push('t');if(o.join('')==='mt')res();else throw new Error(o.join(''))},0);Promise.resolve().then(function(){o.push('m')})})",
     ),
@@ -173,9 +187,16 @@ fn page() -> String {
     format!(
         "<!doctype html><html><head><meta charset=utf-8><title>web api probe</title>\
          <style>html,body{{margin:0}}\
+         #cqbox i,#cqside i{{display:block;height:10px}}.cqi{{width:10px}}#cqu{{width:10cqw}}\
+         @container (min-width: 200px){{#cqa{{width:40px}}}}@container (min-width: 400px){{#cqb{{width:41px}}}}\
+         @container (width > 250px) and (width <= 320px){{#cqc{{width:42px}}}}\
+         @container not (min-width: 400px){{#cqd{{width:46px}}}}@container side (min-width: 450px){{#cqe{{width:44px}}}}\
+         @media (min-width: 1px){{@container (min-width: 100px){{#cqu{{width:10cqw}}}}}}\
          #has1:has(> .kid){{width:20px}}#nco li:nth-child(2 of .on){{width:30px}}@scope (#sc){{.in{{width:50px}}}}\
          .svgprobe{{position:absolute;left:0;top:0;width:40px;height:40px;fill:rgb(0,200,0)}}</style></head><body>\
          <div id=has1 style=\"height:1px\"><span class=kid></span></div><ul id=nco><li class=on>a<li>b<li class=on>c</ul><div id=sc><div class=in id=sc1 style=\"height:1px\"></div></div>\
+         <div id=cqbox style=\"container-type:inline-size;width:300px;height:1px;overflow:hidden\"><i class=cqi id=cqa></i><i class=cqi id=cqb></i><i class=cqi id=cqc></i><i class=cqi id=cqd></i><i class=cqi id=cqu></i></div>\
+         <div id=cqside style=\"container:side/inline-size;width:500px;height:1px;overflow:hidden\"><i class=cqi id=cqe></i></div>\
          <svg class=svgprobe viewBox=\"0 0 10 10\"><rect width=10 height=10 /></svg>\
          <script>{sync}{asyncs}window.__sync=R;window.__optional=O;Promise.all(ps).then(function(){{window.__async=A}});</script>\
          </body></html>"
@@ -358,5 +379,8 @@ fn main() {
             "SOME FAILED"
         }
     );
+    // Shut the engine down cleanly: exiting with it running crashes in its exit handlers.
+    drop(session);
+    ferrite_servo::session::shutdown_engine();
     std::process::exit(if failed == 0 { 0 } else { 1 });
 }
