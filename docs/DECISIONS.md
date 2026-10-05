@@ -644,7 +644,7 @@ absent in this Servo and are listed by the probe as gaps.
 
 ## ADR-022 — Carry a one-function patch to `servo-script` as a vendored crate, not a fork of the engine
 
-**Date:** 2026-10-03. **Status:** live; remove when the engine is upgraded to a release containing the fix. Implemented in `e97ca27`.
+**Date:** 2026-10-03. **Status:** live; remove when the engine is upgraded to a release containing the fix. Implemented in `e97ca27`. **Extended 2026-10-05:** the same method is used for two more crates, `servo-webgl` (the upstream WebGL swap fix, servo/servo#48620) and `servo-layout` (an infinite loop in the containing-block walk, which froze the Google results page); each has a `FERRITE-PATCHES.md`. All three are plain copies of the crates.io release plus the listed changes.
 
 **Context.** A page that reads `location.ancestorOrigins` on a document the parser did not create panics the engine's script thread (`expect("Must always have ancestor origins initialized")`, T-270). The thread dies, the page stops responding, and the app can hang on quit (T-274). The property is unforgeable, so a script injected into the page cannot intercept it (T-270), and there was no newer engine release with the fix.
 

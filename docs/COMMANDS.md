@@ -1109,7 +1109,22 @@ every 2 seconds and never waits for the answer. When the page answers again, an 
 line says after how many seconds. Scrolling and clicking go through the page's script
 thread, so a stuck script freezes them while the page still paints
 (`docs/TO-DO.md` T-306). Tested on Linux with a page that blocks its script for 9
-seconds.
+seconds. **This is how the Google results page freeze was found.** The owner's
+`collect-logs.sh` zip held a 5-second `sample` of the frozen app, and all of it was in
+one script thread inside `layout::query::containing_block_for_node`. The cause was an
+infinite loop in the engine, in the walk that finds an element's containing block: an
+ancestor with no layout box (for example a `display: contents` wrapper) made the loop
+ask for the same parent forever. An IntersectionObserver with an explicit `root` runs
+that walk on every frame. Fixed in `vendor/servo-layout/FERRITE-PATCHES.md`, and
+reproduced and checked with a local test page (`docs/TO-DO.md` T-306). Not yet seen on
+a Mac.
+
+`FERRITE_INTERSECTION_OBSERVER=on|off` sets whether pages get `IntersectionObserver`
+(default on; the app logs `[ferrite-observer] IntersectionObserver on`). It is the feature
+behind lazy-loaded images and infinite scroll, and it makes the engine run the
+containing-block walk on every frame. Use `off` as a quick test when a page sticks. A page
+that checks for the feature then skips it; a page that calls it without checking shows a
+script error.
 
 Related engine settings:
 
@@ -1272,6 +1287,7 @@ browser. "Scripts" means `scripts/*.sh`. "Eval" means the evaluation examples.
 | `FERRITE_PROFILE` | scripts | `dev` (default) or `release` |
 | `FERRITE_PYTHON` | `setup-local.sh` | the interpreter for the Laya venv |
 | `FERRITE_RENDERER` | app | ignored; there is only the CPU renderer (`docs/TO-DO.md` T-281) |
+| `FERRITE_INTERSECTION_OBSERVER` | app | `on` (default) or `off`; `off` removes `IntersectionObserver` from pages, a quick test when a page sticks (`docs/TO-DO.md` T-306) |
 | `FERRITE_WEBGL` | app | `off`, `webgl1`, `on` (WebGL 1 and 2) or `auto` (default, WebGL 1 only) (`docs/TO-DO.md` T-305) |
 | `FERRITE_USER_AGENT` | app | overrides the User-Agent string (it wins over Settings) |
 | `FERRITE_DEFENSE` | app, eval | `on` (default; any value that is not known also means `on`), `off`, `sanitizer_only`, `loop_only` |
