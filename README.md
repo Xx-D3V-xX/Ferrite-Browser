@@ -414,7 +414,7 @@ the app writes its standard error output to a log file.
 
 Read the `[ferrite-render]` and `[ferrite-webgl]` lines first. The first says
 `CPU rendering`: Ferrite has no GPU renderer. The second says whether pages get
-WebGL. `FERRITE_WEBGL=on|off|auto` sets it, and the default is on.
+WebGL. `FERRITE_WEBGL=off|webgl1|on|auto` sets it. The default is WebGL 1 only.
 
 - `just collect-logs` zips the log, the crash reports and the system information
   onto your Desktop. On macOS it also adds a stack sample if the app is frozen.

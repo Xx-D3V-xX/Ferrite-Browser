@@ -170,6 +170,8 @@ panic = "unwind"
 inherits = "release"
 debug = "line-tables-only"
 
-# The engine's script crate with Ferrite's fixes (vendor/servo-script/FERRITE-PATCHES.md).
+# The engine's script and WebGL crates with Ferrite's fixes
+# (vendor/servo-script/FERRITE-PATCHES.md, vendor/servo-webgl/FERRITE-PATCHES.md).
 [patch.crates-io]
 servo-script = { path = "vendor/servo-script" }
+servo-webgl = { path = "vendor/servo-webgl" }

@@ -300,42 +300,61 @@ pub fn display_scale() -> f32 {
     f32::from_bits(DISPLAY_SCALE_BITS.load(std::sync::atomic::Ordering::Relaxed))
 }
 
-/// Whether pages get WebGL, and the reason, from `FERRITE_WEBGL=on|off|auto`
-/// (default auto, which is on). `off` makes `getContext('webgl')` return null,
-/// so a page falls back to its non-3D version; it is the way out if a page's
-/// WebGL ever freezes it. (The freeze seen on macOS came from the GPU renderer
-/// that has since been removed; see `docs/TO-DO.md` T-305.)
+/// Which WebGL a page gets.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum WebGlMode {
+    /// None: `getContext('webgl')` returns null and a page falls back.
+    Off,
+    /// WebGL 1 only (the default).
+    V1,
+    /// WebGL 1 and 2.
+    V2,
+}
+
+/// Which WebGL pages get, and the reason, from `FERRITE_WEBGL=off|webgl1|on|auto`
+/// (default auto, which is WebGL 1 only). WebGL 2 is off by default because the
+/// engine's WebGL 2 `drawBuffers`/`readBuffer` on the default framebuffer leave a
+/// GL error pending, which on macOS made the next buffer swap fail and killed the
+/// WebGL thread (servo/servo#48550, fixed upstream in #48620; the vendored
+/// `servo-webgl` has the swap half of that fix). `off` is the way out if a page's
+/// WebGL ever freezes it. `on` turns WebGL 2 back on.
 #[must_use]
-pub fn webgl_decision(setting: Option<&str>) -> (bool, &'static str) {
+pub fn webgl_decision(setting: Option<&str>) -> (WebGlMode, &'static str) {
     match setting.map(|s| s.trim().to_ascii_lowercase()).as_deref() {
-        Some("on" | "1" | "true" | "yes") => (true, "FERRITE_WEBGL=on"),
-        Some("off" | "0" | "false" | "no") => (false, "FERRITE_WEBGL=off"),
-        _ => (true, "on by default"),
+        Some("on" | "1" | "true" | "yes" | "webgl2") => (WebGlMode::V2, "FERRITE_WEBGL=on"),
+        Some("webgl1") => (WebGlMode::V1, "FERRITE_WEBGL=webgl1"),
+        Some("off" | "0" | "false" | "no") => (WebGlMode::Off, "FERRITE_WEBGL=off"),
+        _ => (
+            WebGlMode::V1,
+            "WebGL 2 is off by default; FERRITE_WEBGL=on turns it on",
+        ),
     }
 }
 
 #[cfg(test)]
 mod webgl_decision_tests {
-    use super::webgl_decision;
+    use super::{webgl_decision, WebGlMode};
 
     #[test]
-    fn auto_is_on() {
-        assert!(webgl_decision(None).0);
-        assert!(webgl_decision(Some("")).0);
-        assert!(webgl_decision(Some("auto")).0);
+    fn auto_is_webgl_1_only() {
+        assert_eq!(webgl_decision(None).0, WebGlMode::V1);
+        assert_eq!(webgl_decision(Some("")).0, WebGlMode::V1);
+        assert_eq!(webgl_decision(Some("auto")).0, WebGlMode::V1);
+        assert_eq!(webgl_decision(Some("webgl1")).0, WebGlMode::V1);
     }
 
     #[test]
     fn the_setting_turns_it_on_or_off() {
-        assert!(webgl_decision(Some(" ON ")).0);
-        assert!(!webgl_decision(Some("off")).0);
-        assert!(!webgl_decision(Some("0")).0);
+        assert_eq!(webgl_decision(Some(" ON ")).0, WebGlMode::V2);
+        assert_eq!(webgl_decision(Some("webgl2")).0, WebGlMode::V2);
+        assert_eq!(webgl_decision(Some("off")).0, WebGlMode::Off);
+        assert_eq!(webgl_decision(Some("0")).0, WebGlMode::Off);
     }
 
     #[test]
     fn the_reason_names_the_setting_when_one_was_given() {
         assert_eq!(webgl_decision(Some("off")).1, "FERRITE_WEBGL=off");
-        assert_eq!(webgl_decision(None).1, "on by default");
+        assert!(webgl_decision(None).1.contains("FERRITE_WEBGL=on"));
     }
 }
 
@@ -599,11 +618,15 @@ mod inner {
                 // workspace Cargo.toml — its `dom_crypto_subtle_enabled`
                 // preference is already on.)
                 let cores = std::thread::available_parallelism().map_or(4, |n| n.get());
-                let (webgl_on, webgl_why) =
+                let (webgl_mode, webgl_why) =
                     super::webgl_decision(std::env::var("FERRITE_WEBGL").ok().as_deref());
                 eprintln!(
                     "[ferrite-webgl] {} ({webgl_why})",
-                    if webgl_on { "on" } else { "off" }
+                    match webgl_mode {
+                        super::WebGlMode::Off => "off",
+                        super::WebGlMode::V1 => "WebGL 1 only",
+                        super::WebGlMode::V2 => "WebGL 1 and 2",
+                    }
                 );
                 let mut prefs = servo::Preferences {
                     dom_indexeddb_enabled: true,
@@ -616,11 +639,11 @@ mod inner {
                     dom_permissions_enabled: true,
                     dom_notification_enabled: true,
                     dom_async_clipboard_enabled: true,
-                    dom_webgl2_enabled: webgl_on,
+                    dom_webgl2_enabled: webgl_mode == super::WebGlMode::V2,
                     // No runtime off-switch exists for WebGL 1 (it is a compile-time
                     // feature); forcing context creation to fail makes
                     // `getContext('webgl')` return null, which pages handle.
-                    webgl_testing_context_creation_error: !webgl_on,
+                    webgl_testing_context_creation_error: webgl_mode == super::WebGlMode::Off,
                     // Seen failing on GitHub (`e.adoptedStyleSheets is undefined`,
                     // dozens of times while its components start) and Google
                     // (`document.fonts.load is not a function`): both ship off.
