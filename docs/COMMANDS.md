@@ -1067,15 +1067,30 @@ worked fully (`docs/TO-DO.md` T-281 and T-305). The cost is that pages may be sl
 Speed is not measured. `FERRITE_RENDERER` is no longer read. If it is set, the app
 prints `FERRITE_RENDERER is ignored: there is only the CPU renderer`.
 
-`FERRITE_WEBGL=on|off|auto` sets whether pages get WebGL. The default is `auto`,
-which is on. With `off`, `getContext('webgl')` returns `null`, and a page falls back
-to its non-3D version. Use `off` if a page's WebGL ever freezes it. The engine has no
-runtime switch for WebGL 1, so `off` forces context creation to fail. Tested on Linux
-only: with `on` a canvas draws and reads back the right pixel for 120 frames; with
-`off` `getContext` returns `null` and the page keeps running. The vendored engine no
-longer panics a page's script thread when the WebGL thread is gone
-(`vendor/servo-script/FERRITE-PATCHES.md` item 2). That patch was compiled but never
-exercised.
+`FERRITE_WEBGL=off|webgl1|on|auto` sets which WebGL pages get. The default is `auto`,
+which is **WebGL 1 only**. `on` gives WebGL 1 and 2. With `off`, `getContext('webgl')`
+returns `null`, and a page falls back to its non-3D version. Use `off` if a page's
+WebGL ever freezes it. The app logs one line at startup, for example:
+
+```
+[ferrite-webgl] WebGL 1 only (WebGL 2 is off by default; FERRITE_WEBGL=on turns it on)
+```
+
+Why WebGL 2 is off by default: the engine has a known bug on macOS (servo/servo issue
+#48550, fixed upstream in pull request #48620). A WebGL 2 page calls `drawBuffers` or
+`readBuffer` on the default framebuffer, which leaves a GL error pending. In a release
+build the error stays pending until the buffer swap, where the macOS graphics layer
+fails to make the next surface (`SurfaceCreationFailed`), and the engine's WebGL thread
+panics. A dead WebGL thread then panics the page's script thread, and the page stops
+responding. Ferrite has two fixes in vendored engine crates:
+`vendor/servo-webgl/FERRITE-PATCHES.md` (drain stale GL errors before the swap, and log
+a failed swap instead of panicking) and `vendor/servo-script/FERRITE-PATCHES.md`
+item 2 (a missing WebGL thread no longer panics the script thread). **Neither has run
+on a Mac.** The upstream `BACK` buffer mapping was not ported.
+
+The engine has no runtime switch for WebGL 1, so `off` forces context creation to fail.
+Tested on Linux only: with `on` or `webgl1` a canvas draws and reads back the right pixel
+for 120 frames; with `off` `getContext` returns `null` and the page keeps running.
 
 Related engine settings:
 
@@ -1237,7 +1252,7 @@ browser. "Scripts" means `scripts/*.sh`. "Eval" means the evaluation examples.
 | `FERRITE_PROFILE` | scripts | `dev` (default) or `release` |
 | `FERRITE_PYTHON` | `setup-local.sh` | the interpreter for the Laya venv |
 | `FERRITE_RENDERER` | app | ignored; there is only the CPU renderer (`docs/TO-DO.md` T-281) |
-| `FERRITE_WEBGL` | app | `on`, `off` or `auto` (default); `auto` is on (`docs/TO-DO.md` T-305) |
+| `FERRITE_WEBGL` | app | `off`, `webgl1`, `on` (WebGL 1 and 2) or `auto` (default, WebGL 1 only) (`docs/TO-DO.md` T-305) |
 | `FERRITE_USER_AGENT` | app | overrides the User-Agent string (it wins over Settings) |
 | `FERRITE_DEFENSE` | app, eval | `on` (default; any value that is not known also means `on`), `off`, `sanitizer_only`, `loop_only` |
 | `FERRITE_MODEL_SMALL`, `FERRITE_MODEL_MAIN` | app, eval, model examples | model tags; no default |

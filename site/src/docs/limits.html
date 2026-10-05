@@ -105,7 +105,7 @@ summary: Every known limit of Ferrite's defense, its evaluation (including the o
 <h3>Speed and the renderer</h3>
 <ul>
   <li><strong>Speed on real hardware has not been measured.</strong> One thing was measured, in the headless engine on Linux. It is the fix that stopped the shell from copying and re-uploading the whole page on every tick. Two things were not measured anywhere. They are the thread pools sized to the core count, and the release profile as <code>just run-fast</code> builds it. An on-disk HTTP cache was tried and then removed. The engine's disk cache stores only entries pushed out of memory, and it did nothing across restarts.</li>
-  <li><strong>There is no GPU renderer.</strong> It was tried and removed. On an Apple M1 (a CI build) its self-test passed, but with it Google never finished loading and could not be scrolled or clicked, and the engine's WebGL thread panicked. With the CPU renderer, GitHub worked fully. Pages are drawn on the CPU everywhere, so they may be slower. <code>FERRITE_WEBGL=off</code> turns WebGL off if a page's WebGL ever freezes it.</li>
+  <li><strong>There is no GPU renderer.</strong> It was tried and removed. On an Apple M1 (a CI build) its self-test passed, but with it Google never finished loading and could not be scrolled or clicked, and the engine's WebGL thread panicked. With the CPU renderer, GitHub worked fully. Pages are drawn on the CPU everywhere, so they may be slower. <code>FERRITE_WEBGL=off</code> turns WebGL off if a page's WebGL ever freezes it. WebGL 2 is off by default (<code>FERRITE_WEBGL=on</code> turns it on) because of a known engine bug on macOS. Ferrite has two fixes for it in vendored engine crates, and neither has run on a Mac.</li>
 </ul>
 
 <h3>Logs and builds</h3>
