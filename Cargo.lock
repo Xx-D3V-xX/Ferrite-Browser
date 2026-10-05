@@ -8980,8 +8980,6 @@ dependencies = [
 [[package]]
 name = "servo-script-bindings"
 version = "0.6.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "8c1b94222a1b3484cb6a0e22f0ba7256affac6e29b5f7c1f5b88795c76e0e3aa"
 dependencies = [
  "atomic_refcell",
  "bitflags 2.11.0",

@@ -519,6 +519,10 @@ pub(crate) fn next_frame_seq() -> u64 {
 #[cfg(feature = "servo")]
 const WEB_COMPAT_JS: &str = include_str!("web_compat.js");
 
+/// The Cache API (`caches`), built on IndexedDB; see the script's own header.
+#[cfg(feature = "servo")]
+const STORAGE_COMPAT_JS: &str = include_str!("storage_compat.js");
+
 #[cfg(feature = "servo")]
 mod inner {
     use std::cell::RefCell;
@@ -735,6 +739,7 @@ mod inner {
                     let manager = servo::UserContentManager::new(servo);
                     manager.add_script(Rc::new(servo::UserScript::from(super::SVG_COMPAT_JS)));
                     manager.add_script(Rc::new(servo::UserScript::from(super::WEB_COMPAT_JS)));
+                    manager.add_script(Rc::new(servo::UserScript::from(super::STORAGE_COMPAT_JS)));
                     Rc::new(manager)
                 })
                 .clone()
@@ -1121,11 +1126,22 @@ mod inner {
 
     impl WebViewDelegate for HeadlessDelegate {
         /// Ferrite has no permission prompt yet, so every request Servo
-        /// forwards (notifications, persistent storage, wake lock) is refused
-        /// outright rather than left unanswered. Servo does not forward
-        /// geolocation or getUserMedia here at all, which is why those stay
-        /// switched off (docs/TO-DO.md T-265).
+        /// forwards (notifications, persistent storage, ...) is refused outright
+        /// rather than left unanswered. The one exception is the screen wake lock:
+        /// it exposes nothing about the user and costs nothing, so a page that
+        /// asks (Speedometer, video players) gets it instead of an error in its
+        /// console. The engine's wake-lock backend does nothing on the operating
+        /// system, so granting it does not actually keep the screen awake.
+        /// Servo does not forward geolocation or getUserMedia here at all, which
+        /// is why those stay switched off (docs/TO-DO.md T-265).
         fn request_permission(&self, _webview: servo::WebView, request: servo::PermissionRequest) {
+            if matches!(
+                request.feature(),
+                servo::PermissionFeature::ScreenWakeLock(_)
+            ) {
+                request.allow();
+                return;
+            }
             eprintln!(
                 "[ferrite-session] denied permission request: {:?}",
                 request.feature()
@@ -2514,13 +2530,14 @@ mod user_agent_tests {
 
 #[cfg(all(test, feature = "servo"))]
 mod svg_compat_tests {
-    use super::{SVG_COMPAT_JS, WEB_COMPAT_JS};
+    use super::{STORAGE_COMPAT_JS, SVG_COMPAT_JS, WEB_COMPAT_JS};
 
     #[test]
     fn the_compat_scripts_parse_under_node() {
         for (name, source) in [
             ("svg_compat.js", SVG_COMPAT_JS),
             ("web_compat.js", WEB_COMPAT_JS),
+            ("storage_compat.js", STORAGE_COMPAT_JS),
         ] {
             parses_under_node(name, source);
         }

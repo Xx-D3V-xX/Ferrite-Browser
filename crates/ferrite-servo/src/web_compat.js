@@ -21,6 +21,13 @@
  * resolving `finished`), and a `fill: forwards` or `both` animation leaves the
  * last keyframe's values on the element. It is skipped when the engine has the
  * real one.
+ *
+ * The same goes for a handful of small interfaces Servo 0.6 lacks that sites call
+ * without checking, or check and then take a slower path for: `requestIdleCallback`,
+ * `scheduler.postTask`, Web Locks (`navigator.locks`, within one page), `screen.orientation`,
+ * `navigator.mediaDevices` (no devices: it says so, and refuses), `document.startViewTransition`
+ * (runs the update, shows no transition) and `Element.checkVisibility`. Each is skipped
+ * when the engine has the real one.
  */
 (function () {
   'use strict';
@@ -56,6 +63,13 @@
     if (!target || target === window || !target.tagName) return;
     var tag = String(target.tagName).toLowerCase();
     if (!KINDS[tag]) return;
+    // `src=""` is a placeholder pages use on purpose (a lazy image waiting for its
+    // real address); the engine resolves it to the page's own address, which is
+    // not a failure worth reporting.
+    var raw = target.getAttribute('src');
+    if (raw === null) raw = target.getAttribute('href');
+    if (raw === null) raw = target.getAttribute('data');
+    if (raw !== null && String(raw).trim() === '') return;
     say(tag + ' failed to load: ' + brief(target.currentSrc || target.src || target.href || target.data || '(no address)'));
   }, true);
   window.addEventListener('unhandledrejection', function (event) {
@@ -178,4 +192,187 @@
       });
     }
   } catch (e) { /* a frozen prototype */ }
+})();
+
+(function () {
+  'use strict';
+  function define(target, name, value) {
+    if (!target || typeof target[name] !== 'undefined') return;
+    try {
+      Object.defineProperty(target, name, { value: value, writable: true, configurable: true, enumerable: false });
+    } catch (e) { /* a frozen object */ }
+  }
+  function abortError() { return new DOMException('The operation was aborted.', 'AbortError'); }
+
+  // requestIdleCallback: run when the page has been quiet for a moment, with the
+  // budget the callback's deadline object reports.
+  if (typeof window !== 'undefined') {
+    var idleId = 0, idleTimers = {};
+    define(window, 'requestIdleCallback', function requestIdleCallback(callback, options) {
+      var id = ++idleId, start = Date.now();
+      var delay = options && typeof options.timeout === 'number' ? Math.min(options.timeout, 50) : 1;
+      idleTimers[id] = setTimeout(function () {
+        delete idleTimers[id];
+        var began = Date.now();
+        callback({
+          didTimeout: !!(options && typeof options.timeout === 'number' && began - start >= options.timeout),
+          timeRemaining: function () { return Math.max(0, 50 - (Date.now() - began)); }
+        });
+      }, delay);
+      return id;
+    });
+    define(window, 'cancelIdleCallback', function cancelIdleCallback(id) {
+      if (idleTimers[id]) { clearTimeout(idleTimers[id]); delete idleTimers[id]; }
+    });
+  }
+
+  // scheduler.postTask / scheduler.yield: a timer with the task's priority as its delay.
+  if (typeof window !== 'undefined' && typeof window.scheduler === 'undefined') {
+    var scheduler = {
+      postTask: function postTask(callback, options) {
+        options = options || {};
+        var signal = options.signal;
+        return new Promise(function (resolve, reject) {
+          if (signal && signal.aborted) { reject(signal.reason || abortError()); return; }
+          var delay = Number(options.delay) || (options.priority === 'background' ? 4 : 0);
+          var timer = setTimeout(function () {
+            try { resolve(callback()); } catch (e) { reject(e); }
+          }, delay);
+          if (signal && signal.addEventListener) signal.addEventListener('abort', function () {
+            clearTimeout(timer);
+            reject(signal.reason || abortError());
+          });
+        });
+      },
+      yield: function () { return new Promise(function (resolve) { setTimeout(resolve, 0); }); }
+    };
+    define(window, 'scheduler', scheduler);
+  }
+
+  // Web Locks, for the one page: exclusive locks queue, shared ones run together,
+  // `ifAvailable`, `steal` and `signal` work. Another tab does not see these locks.
+  if (typeof navigator !== 'undefined' && typeof navigator.locks === 'undefined') {
+    var held = {}, queues = {};
+    var granted = function (name) { return held[name] || (held[name] = []); };
+    var pump = function (name) {
+      var queue = queues[name] || (queues[name] = []);
+      var current = granted(name);
+      while (queue.length) {
+        var next = queue[0];
+        var free = next.mode === 'shared'
+          ? current.every(function (l) { return l.mode === 'shared'; })
+          : current.length === 0;
+        if (!free) break;
+        queue.shift();
+        run(next, name);
+      }
+    };
+    var run = function (req, name) {
+      var lock = { name: name, mode: req.mode };
+      granted(name).push(lock);
+      var release = function () {
+        var list = granted(name), i = list.indexOf(lock);
+        if (i >= 0) list.splice(i, 1);
+        pump(name);
+      };
+      lock.release = release;
+      var result;
+      try { result = Promise.resolve(req.callback(lock)); } catch (e) { result = Promise.reject(e); }
+      result.then(function (v) { release(); req.resolve(v); }, function (e) { release(); req.reject(e); });
+    };
+    var LockManager = function LockManager() { throw new TypeError('Illegal constructor'); };
+    LockManager.prototype.request = function request(name, a, b) {
+      var options = typeof a === 'function' ? {} : (a || {});
+      var callback = typeof a === 'function' ? a : b;
+      name = String(name);
+      if (typeof callback !== 'function') return Promise.reject(new TypeError('A callback is required'));
+      if (name.charAt(0) === '-') return Promise.reject(new DOMException('Names starting with "-" are reserved', 'NotSupportedError'));
+      var mode = options.mode === 'shared' ? 'shared' : 'exclusive';
+      var signal = options.signal;
+      if (signal && signal.aborted) return Promise.reject(signal.reason || abortError());
+      return new Promise(function (resolve, reject) {
+        var req = { mode: mode, callback: callback, resolve: resolve, reject: reject };
+        var current = granted(name), queue = queues[name] || (queues[name] = []);
+        var free = queue.length === 0 && (mode === 'shared'
+          ? current.every(function (l) { return l.mode === 'shared'; })
+          : current.length === 0);
+        if (options.steal) {
+          current.splice(0, current.length);
+          run(req, name);
+        } else if (options.ifAvailable && !free) {
+          try { resolve(callback(null)); } catch (e) { reject(e); }
+        } else {
+          queue.push(req);
+          if (signal && signal.addEventListener) signal.addEventListener('abort', function () {
+            var i = queue.indexOf(req);
+            if (i >= 0) { queue.splice(i, 1); reject(signal.reason || abortError()); pump(name); }
+          });
+          pump(name);
+        }
+      });
+    };
+    LockManager.prototype.query = function query() {
+      var out = { held: [], pending: [] };
+      Object.keys(held).forEach(function (n) { held[n].forEach(function (l) { out.held.push({ name: n, mode: l.mode }); }); });
+      Object.keys(queues).forEach(function (n) { queues[n].forEach(function (r) { out.pending.push({ name: n, mode: r.mode }); }); });
+      return Promise.resolve(out);
+    };
+    var manager = Object.create(LockManager.prototype);
+    try { Object.defineProperty(navigator, 'locks', { get: function () { return manager; }, configurable: true, enumerable: true }); } catch (e) { /* locked */ }
+  }
+
+  // screen.orientation: a landscape desktop screen that cannot be locked.
+  if (typeof screen !== 'undefined' && typeof screen.orientation === 'undefined') {
+    var orientation = {
+      type: 'landscape-primary', angle: 0, onchange: null,
+      lock: function () { return Promise.reject(new DOMException('Orientation lock is not supported', 'NotSupportedError')); },
+      unlock: function () {},
+      addEventListener: function () {}, removeEventListener: function () {}, dispatchEvent: function () { return true; }
+    };
+    try { Object.defineProperty(screen, 'orientation', { get: function () { return orientation; }, configurable: true, enumerable: true }); } catch (e) { /* locked */ }
+  }
+
+  // navigator.mediaDevices: there is no camera or microphone to offer. Pages that
+  // call it without checking get an answer ("none") instead of a TypeError.
+  if (typeof navigator !== 'undefined' && typeof navigator.mediaDevices === 'undefined' && window.isSecureContext) {
+    var devices = {
+      enumerateDevices: function () { return Promise.resolve([]); },
+      getSupportedConstraints: function () { return {}; },
+      getUserMedia: function () { return Promise.reject(new DOMException('Requested device not found', 'NotFoundError')); },
+      getDisplayMedia: function () { return Promise.reject(new DOMException('Permission denied', 'NotAllowedError')); },
+      ondevicechange: null,
+      addEventListener: function () {}, removeEventListener: function () {}, dispatchEvent: function () { return true; }
+    };
+    try { Object.defineProperty(navigator, 'mediaDevices', { get: function () { return devices; }, configurable: true, enumerable: true }); } catch (e) { /* locked */ }
+  }
+
+  // document.startViewTransition: update the page, show no transition.
+  if (typeof document !== 'undefined' && typeof document.startViewTransition === 'undefined') {
+    define(Document.prototype, 'startViewTransition', function startViewTransition(update) {
+      var callback = typeof update === 'function' ? update : (update && update.update);
+      var done = new Promise(function (resolve, reject) {
+        Promise.resolve().then(function () { return callback ? callback() : undefined; }).then(resolve, reject);
+      });
+      var finished = done.then(function () { return undefined; });
+      finished.catch(function () { /* the page sees it through `updateCallbackDone` */ });
+      return { ready: done.then(function () { return undefined; }), updateCallbackDone: done, finished: finished, skipTransition: function () {}, types: new Set() };
+    });
+  }
+
+  // Element.checkVisibility: rendered, and (with the options) visible and opaque.
+  if (typeof Element !== 'undefined') {
+    define(Element.prototype, 'checkVisibility', function checkVisibility(options) {
+      options = options || {};
+      if (!this.isConnected) return false;
+      var el = this;
+      while (el && el.nodeType === 1) {
+        var cs = getComputedStyle(el);
+        if (cs.display === 'none') return false;
+        if (el === this && (options.checkVisibilityCSS || options.visibilityProperty) && cs.visibility !== 'visible') return false;
+        if ((options.checkOpacity || options.opacityProperty) && cs.opacity === '0') return false;
+        el = el.parentElement;
+      }
+      return true;
+    });
+  }
 })();

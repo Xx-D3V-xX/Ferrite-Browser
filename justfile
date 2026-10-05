@@ -136,6 +136,13 @@ probe-input *ARGS:
 probe-web-api:
     cargo run -p ferrite-servo --features servo --example web_api_probe
 
+# Checks page storage in the real engine: IndexedDB indexes and cursors, the Cache
+# API (`caches`), localStorage and sessionStorage, served from loopback. Needs the
+# real Servo build.
+# Check IndexedDB, the Cache API and web storage in the real engine.
+probe-storage:
+    cargo run -p ferrite-servo --features servo --example storage_probe
+
 # Runs the real page script in a headless Servo session and drives a form by
 # `@ref`: digest, type, tick, select, click, scroll. Needs the real Servo build.
 # Check that the page script reads a form and drives it by @ref in the real engine.

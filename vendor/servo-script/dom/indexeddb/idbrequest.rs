@@ -8,15 +8,17 @@ use dom_struct::dom_struct;
 use js::context::JSContext;
 use js::conversions::ToJSValConvertible;
 use js::jsapi::Heap;
-use js::jsval::{DoubleValue, JSVal, ObjectValue, UndefinedValue};
+use js::jsval::{DoubleValue, JSVal, NullValue, ObjectValue, UndefinedValue};
 use js::rust::HandleValue;
 use profile_traits::generic_callback::GenericCallback;
+use script_bindings::cell::DomRefCell;
 use script_bindings::reflector::{DomObject, reflect_dom_object_with_cx};
 use serde::{Deserialize, Serialize};
 use servo_base::generic_channel::GenericSend;
 use storage_traits::indexeddb::{
     AsyncOperation, AsyncReadOnlyOperation, BackendError, BackendResult, IndexedDBKeyType,
-    IndexedDBRecord, IndexedDBThreadMsg, IndexedDBTxnMode, PutItemResult, SyncOperation,
+    IndexedDBKeyRange, IndexedDBRecord, IndexedDBThreadMsg, IndexedDBTxnMode, PutItemResult,
+    SyncOperation,
 };
 use stylo_atoms::Atom;
 
@@ -24,18 +26,20 @@ use crate::dom::bindings::codegen::Bindings::IDBRequestBinding::{
     IDBRequestMethods, IDBRequestReadyState,
 };
 use crate::dom::bindings::codegen::Bindings::IDBTransactionBinding::IDBTransactionMode;
+use crate::dom::bindings::codegen::UnionTypes::IDBObjectStoreOrIDBIndexOrIDBCursor;
 use crate::dom::bindings::error::{Error, Fallible, create_dom_exception};
 use crate::dom::bindings::inheritance::Castable;
 use crate::dom::bindings::refcounted::Trusted;
 use crate::dom::bindings::reflector::DomGlobal;
-use crate::dom::bindings::root::{DomRoot, MutNullableDom};
+use crate::dom::bindings::root::{Dom, DomRoot, MutNullableDom};
 use crate::dom::bindings::structuredclone;
 use crate::dom::domexception::DOMException;
 use crate::dom::event::{Event, EventBubbles, EventCancelable};
 use crate::dom::eventtarget::EventTarget;
 use crate::dom::globalscope::GlobalScope;
-use crate::dom::indexeddb::idbcursor::{IterationParam, iterate_cursor};
+use crate::dom::indexeddb::idbcursor::{IDBCursor, IterationParam, iterate_cursor};
 use crate::dom::indexeddb::idbcursorwithvalue::IDBCursorWithValue;
+use crate::dom::indexeddb::idbindex::{IDBIndex, index_records};
 use crate::dom::indexeddb::idbobjectstore::IDBObjectStore;
 use crate::dom::indexeddb::idbtransaction::IDBTransaction;
 use crate::dom::indexeddb::key::key_type_to_jsval;
@@ -44,8 +48,46 @@ use crate::realms::enter_auto_realm;
 #[derive(Clone)]
 struct RequestListener {
     request: Trusted<IDBRequest>,
-    iteration_param: Option<IterationParam>,
+    job: Option<RequestJob>,
     request_id: u64,
+}
+
+/// What the script side still has to do with the records the backend sends back for
+/// an `Iterate` operation.
+#[derive(Clone)]
+pub(crate) enum RequestJob {
+    /// Step a cursor: <https://www.w3.org/TR/IndexedDB-3/#iterate-a-cursor>.
+    Cursor(IterationParam),
+    /// Answer a query on an index (Ferrite addition; see `IDBIndex`).
+    IndexQuery(IndexQuery),
+}
+
+/// A `get`, `getKey`, `getAll`, `getAllKeys` or `count` on an index. The backend
+/// keeps no index data, so it sends the store's records and the answer is worked out
+/// from them here (`idbindex::index_records`).
+#[derive(Clone)]
+pub(crate) struct IndexQuery {
+    pub(crate) index: Trusted<IDBIndex>,
+    pub(crate) range: IndexedDBKeyRange,
+    pub(crate) kind: IndexQueryKind,
+}
+
+#[derive(Clone, Copy)]
+pub(crate) enum IndexQueryKind {
+    Get,
+    GetKey,
+    GetAll(Option<u32>),
+    GetAllKeys(Option<u32>),
+    Count,
+}
+
+/// <https://www.w3.org/TR/IndexedDB-3/#request-source>
+#[derive(JSTraceable, MallocSizeOf)]
+#[cfg_attr(crown, crown::unrooted_must_root_lint::must_root)]
+pub(crate) enum RequestSource {
+    Store(Dom<IDBObjectStore>),
+    Index(Dom<IDBIndex>),
+    Cursor(Dom<IDBCursor>),
 }
 
 pub enum IdbResult {
@@ -164,7 +206,24 @@ impl RequestListener {
         let cx: &mut JSContext = &mut realm;
         rooted!(&in(cx) let mut answer = UndefinedValue());
 
-        if let Ok(data) = result {
+        if let Ok(mut data) = result {
+            // An index query arrives as the store's records; turn it into the answer
+            // the request asks for before it is converted below.
+            if let (IdbResult::Iterate(_), Some(RequestJob::IndexQuery(query))) =
+                (&data, &self.job)
+            {
+                let IdbResult::Iterate(records) = data else {
+                    unreachable!("matched above")
+                };
+                data = match index_answer(cx, &global, query, records) {
+                    Ok(answer) => answer,
+                    Err(e) => {
+                        warn!("Error answering an index query");
+                        Self::handle_async_request_error(&global, cx, request, e, self.request_id);
+                        return;
+                    },
+                };
+            }
             match data {
                 IdbResult::Key(key) => key_type_to_jsval(cx, &key, answer.handle_mut()),
                 IdbResult::Keys(keys) => {
@@ -212,9 +271,9 @@ impl RequestListener {
                     answer.handle_mut().set(DoubleValue(count as f64));
                 },
                 IdbResult::Iterate(records) => {
-                    let param = self.iteration_param.as_ref().expect(
-                        "iteration_param must be provided by IDBRequest::execute_async for Iterate",
-                    );
+                    let Some(RequestJob::Cursor(param)) = self.job.as_ref() else {
+                        unreachable!("a cursor job is provided by execute_async for Iterate")
+                    };
                     let cursor = match iterate_cursor(&global, cx, param, records) {
                         Ok(cursor) => cursor,
                         Err(e) => {
@@ -242,6 +301,10 @@ impl RequestListener {
                                     .set(ObjectValue(*cursor.reflector().get_jsobject()));
                             },
                         }
+                    } else {
+                        // The cursor ran off the end of its records: the request's
+                        // result is null (not undefined), as the specification says.
+                        answer.handle_mut().set(NullValue());
                     }
                 },
                 IdbResult::None => {
@@ -396,7 +459,7 @@ pub struct IDBRequest {
     #[ignore_malloc_size_of = "mozjs"]
     result: Heap<JSVal>,
     error: MutNullableDom<DOMException>,
-    source: MutNullableDom<IDBObjectStore>,
+    source: DomRefCell<Option<RequestSource>>,
     transaction: MutNullableDom<IDBTransaction>,
     ready_state: Cell<IDBRequestReadyState>,
 }
@@ -418,8 +481,14 @@ impl IDBRequest {
         reflect_dom_object_with_cx(Box::new(IDBRequest::new_inherited()), global, cx)
     }
 
-    pub fn set_source(&self, source: Option<&IDBObjectStore>) {
-        self.source.set(source);
+    pub(crate) fn set_source(&self, source: Option<RequestSource>) {
+        *self.source.borrow_mut() = source;
+    }
+
+    /// Makes a finished request pending again: a cursor that is told to continue
+    /// delivers its next record on the request it was opened with.
+    pub(crate) fn set_ready_state_pending(&self) {
+        self.ready_state.set(IDBRequestReadyState::Pending);
     }
 
     pub fn set_ready_state_done(&self) {
@@ -462,7 +531,7 @@ impl IDBRequest {
         source: &IDBObjectStore,
         operation_fn: F,
         request: Option<DomRoot<IDBRequest>>,
-        iteration_param: Option<IterationParam>,
+        job: Option<RequestJob>,
     ) -> Fallible<DomRoot<IDBRequest>>
     where
         T: Into<IdbResult> + for<'a> Deserialize<'a> + Serialize + Send + Sync + 'static,
@@ -479,15 +548,22 @@ impl IDBRequest {
         let request_id = transaction.allocate_request_id();
 
         // Step 3: If request was not given, let request be a new request with source as source.
+        let request_given = request.is_some();
         let request = request.unwrap_or_else(|| {
             let new_request = IDBRequest::new(cx, &global);
-            new_request.set_source(Some(source));
+            new_request.set_source(Some(RequestSource::Store(Dom::from_ref(source))));
             new_request.set_transaction(&transaction);
             new_request
         });
 
         // Step 4: Add request to the end of transaction’s request list.
-        transaction.add_request(&request);
+        if request_given {
+            // A cursor moving on: the request is already in the list, and is pending again.
+            request.set_ready_state_pending();
+            transaction.mark_request_pending_again();
+        } else {
+            transaction.add_request(&request);
+        }
 
         // Step 5: Run the operation, and queue a returning task in parallel
         // the result will be put into `receiver`
@@ -499,7 +575,7 @@ impl IDBRequest {
 
         let response_listener = RequestListener {
             request: Trusted::new(&request),
-            iteration_param: iteration_param.clone(),
+            job: job.clone(),
             request_id,
         };
 
@@ -529,14 +605,11 @@ impl IDBRequest {
             operation,
             AsyncOperation::ReadOnly(AsyncReadOnlyOperation::Iterate { .. })
         ) {
-            assert!(
-                iteration_param.is_some(),
-                "iteration_param must be provided for Iterate"
-            );
+            assert!(job.is_some(), "a job must be provided for Iterate");
         } else {
             assert!(
-                iteration_param.is_none(),
-                "iteration_param should not be provided for operation other than Iterate"
+                job.is_none(),
+                "a job should not be provided for an operation other than Iterate"
             );
         }
 
@@ -594,8 +667,18 @@ impl IDBRequestMethods<crate::DomTypeHolder> for IDBRequest {
     }
 
     /// <https://www.w3.org/TR/IndexedDB-3/#dom-idbrequest-source>
-    fn GetSource(&self) -> Option<DomRoot<IDBObjectStore>> {
-        self.source.get()
+    fn GetSource(&self) -> Option<IDBObjectStoreOrIDBIndexOrIDBCursor> {
+        self.source.borrow().as_ref().map(|source| match source {
+            RequestSource::Store(store) => {
+                IDBObjectStoreOrIDBIndexOrIDBCursor::IDBObjectStore(store.as_rooted())
+            },
+            RequestSource::Index(index) => {
+                IDBObjectStoreOrIDBIndexOrIDBCursor::IDBIndex(index.as_rooted())
+            },
+            RequestSource::Cursor(cursor) => {
+                IDBObjectStoreOrIDBIndexOrIDBCursor::IDBCursor(cursor.as_rooted())
+            },
+        })
     }
 
     /// <https://www.w3.org/TR/IndexedDB-3/#dom-idbrequest-transaction>
@@ -613,4 +696,52 @@ impl IDBRequestMethods<crate::DomTypeHolder> for IDBRequest {
 
     // https://www.w3.org/TR/IndexedDB-3/#dom-idbrequest-onerror
     event_handler!(error, GetOnerror, SetOnerror);
+}
+
+/// Turns the store's records into the answer to a query on an index.
+///
+/// The backend keeps no index data (its `index_data` tables are created and never
+/// written), so an index is computed from the records: each record's index keys are
+/// worked out from its value (`IDBIndex::index_records`), the ones in the query's
+/// range are kept in index order, and the answer is built from those.
+fn index_answer(
+    cx: &mut JSContext,
+    global: &GlobalScope,
+    query: &IndexQuery,
+    records: Vec<IndexedDBRecord>,
+) -> Result<IdbResult, Error> {
+    let index = query.index.root();
+    let entries: Vec<IndexedDBRecord> = index_records(cx, global, &index, records)?
+        .into_iter()
+        .filter(|record| query.range.contains(&record.key))
+        .collect();
+    let limit = |count: Option<u32>| match count {
+        Some(count) if count > 0 => count as usize,
+        _ => usize::MAX,
+    };
+    Ok(match query.kind {
+        IndexQueryKind::Get => entries
+            .into_iter()
+            .next()
+            .map_or(IdbResult::None, |record| IdbResult::Value(record.value)),
+        IndexQueryKind::GetKey => entries
+            .into_iter()
+            .next()
+            .map_or(IdbResult::None, |record| IdbResult::Key(record.primary_key)),
+        IndexQueryKind::GetAll(count) => IdbResult::Values(
+            entries
+                .into_iter()
+                .take(limit(count))
+                .map(|record| record.value)
+                .collect(),
+        ),
+        IndexQueryKind::GetAllKeys(count) => IdbResult::Keys(
+            entries
+                .into_iter()
+                .take(limit(count))
+                .map(|record| record.primary_key)
+                .collect(),
+        ),
+        IndexQueryKind::Count => IdbResult::Count(entries.len() as u64),
+    })
 }

@@ -467,7 +467,10 @@ pub(crate) fn evaluate_key_path_on_value(
         // Step 1. If keyPath is a list of strings, then:
         KeyPath::StringSequence(key_path) => {
             // Step 1.1. Let result be a new Array object created as if by the expression [].
-            rooted!(&in(cx) let mut result = unsafe { JS_NewObject(cx, ptr::null()) });
+            // Ferrite: this made a plain Object (`JS_NewObject`), which is not a valid
+            // key, so every compound key path (`keyPath: ['a', 'b']`) gave a
+            // "DataError". An Array it is.
+            rooted!(&in(cx) let mut result = unsafe { NewArrayObject1(cx.raw_cx(), 0) });
 
             // Step 1.2. Let i be 0.
             // Step 1.3. For each item in keyPath:
@@ -835,4 +838,83 @@ pub(crate) fn extract_key(
 
     // Step 5. Return key.
     Ok(ExtractionResult::Key(key))
+}
+
+/// The keys one record contributes to an index.
+///
+/// Ferrite addition (servo-script 0.6.0 had no index support beyond bookkeeping).
+/// Evaluates the index's key path on `value` and converts the result, following
+/// <https://www.w3.org/TR/IndexedDB-3/#store-a-record-into-an-object-store> step 7
+/// (an index only holds a record when its key path gives a valid key) and, for a
+/// multiEntry index,
+/// <https://www.w3.org/TR/IndexedDB-3/#convert-a-value-to-a-multientry-key>: an
+/// array result gives one key per valid, distinct element. A record whose value does
+/// not give a key is simply not in the index, so that case returns an empty list.
+#[expect(unsafe_code)]
+pub(crate) fn extract_index_keys(
+    cx: &mut JSContext,
+    value: HandleValue,
+    key_path: &KeyPath,
+    multi_entry: bool,
+) -> Result<Vec<IndexedDBKeyType>, Error> {
+    rooted!(&in(cx) let mut r = UndefinedValue());
+    if let EvaluationResult::Failure =
+        evaluate_key_path_on_value(cx, value, key_path, r.handle_mut())?
+    {
+        return Ok(vec![]);
+    }
+
+    if multi_entry && r.is_object() {
+        rooted!(&in(cx) let object = r.to_object());
+        // SAFETY: the SpiderMonkey calls below get a rooted object and a live context.
+        unsafe {
+            let mut is_array = false;
+            if !IsArrayObject(cx, r.handle(), &mut is_array) {
+                return Err(Error::JSFailed);
+            }
+            if is_array {
+                let mut len = 0;
+                if !GetArrayLength(cx, object.handle(), &mut len) {
+                    return Err(Error::JSFailed);
+                }
+                let mut keys: Vec<IndexedDBKeyType> = vec![];
+                for index in 0..len {
+                    rooted!(&in(cx) let mut id: PropertyKey);
+                    if !JS_IndexToId(cx, index, id.handle_mut()) {
+                        return Err(Error::JSFailed);
+                    }
+                    let mut hop = false;
+                    if !JS_HasOwnPropertyById(cx, object.handle(), id.handle(), &mut hop) {
+                        return Err(Error::JSFailed);
+                    }
+                    if !hop {
+                        continue;
+                    }
+                    rooted!(&in(cx) let mut entry = UndefinedValue());
+                    if !js::rust::wrappers2::JS_GetPropertyById(
+                        cx,
+                        object.handle(),
+                        id.handle(),
+                        entry.handle_mut(),
+                    ) {
+                        return Err(Error::JSFailed);
+                    }
+                    if let ConversionResult::Valid(key) =
+                        convert_value_to_key(cx, entry.handle(), Some(vec![r.handle()]))?
+                    {
+                        if !keys.contains(&key) {
+                            keys.push(key);
+                        }
+                    }
+                }
+                return Ok(keys);
+            }
+
+        }
+    }
+
+    match convert_value_to_key(cx, r.handle(), None)? {
+        ConversionResult::Valid(key) => Ok(vec![key]),
+        ConversionResult::Invalid => Ok(vec![]),
+    }
 }

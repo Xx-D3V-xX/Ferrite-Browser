@@ -1,0 +1,224 @@
+<!doctype html><meta charset=utf-8><title>idb</title><body>
+<pre id=out>running</pre>
+<script>
+var results = [], pending = 0;
+function log(s){ results.push(s); console.log(s); document.getElementById('out').textContent = results.join('\n'); }
+function ok(name, cond, extra){ log((cond ? 'PASS ' : 'FAIL ') + name + (cond ? '' : ' :: ' + JSON.stringify(extra))); }
+function P(req){ return new Promise(function(res, rej){ req.onsuccess = function(){ res(req.result); }; req.onerror = function(){ rej(req.error); }; }); }
+function collect(req, perStep){ // walk a cursor with continue(); returns array of perStep(cursor)
+  return new Promise(function(res, rej){
+    var out = [];
+    req.onsuccess = function(){ var c = req.result; if (!c) { res(out); return; } out.push(perStep(c)); c['continue'](); };
+    req.onerror = function(){ rej(req.error); };
+  });
+}
+function done(tx){ return new Promise(function(res, rej){ tx.oncomplete = res; tx.onabort = function(){ rej(tx.error); }; }); }
+
+var data = [
+  {id: 1, name: 'carol', email: 'c@x', tags: ['a','b'], n: 30},
+  {id: 2, name: 'alice', email: 'a@x', tags: ['b'], n: 10},
+  {id: 3, name: 'bob',   email: 'b@x', tags: ['a','c','a'], n: 20},
+  {id: 4, name: 'alice', email: 'a2@x', tags: [], n: 40},
+  {id: 5, name: 'dave',  email: 'd@x', tags: ['c'], n: 50},
+  {id: 6, noname: true,  email: 'e@x', tags: 'notarray', n: 60}
+];
+
+(async function(){
+ try {
+  var name = 'ferrite-test-' + Date.now();
+  var db = await new Promise(function(res, rej){
+    var r = indexedDB.open(name, 1);
+    r.onupgradeneeded = function(){
+      var s = r.result.createObjectStore('people', {keyPath: 'id'});
+      s.createIndex('by_name', 'name');
+      s.createIndex('by_tags', 'tags', {multiEntry: true});
+      s.createIndex('by_email', 'email', {unique: true});
+      data.forEach(function(d){ s.put(d); });
+    };
+    r.onsuccess = function(){ res(r.result); }; r.onerror = function(){ rej(r.error); };
+  });
+  var tx = db.transaction('people'); var st = tx.objectStore('people'); var byName = st.index('by_name');
+
+  ok('index.get', (await P(byName.get('bob'))).id === 3);
+  ok('index.get first of dup (lowest primary key)', (await P(byName.get('alice'))).id === 2);
+  ok('index.get missing is undefined', (await P(byName.get('zed'))) === undefined);
+  ok('index.getKey', (await P(byName.getKey('dave'))) === 5);
+  var all = await P(byName.getAll());
+  ok('index.getAll order (name, then id)', all.map(function(x){return x.id;}).join() === '2,4,3,1,5', all.map(function(x){return x.id;}));
+  ok('record without the key path is not in the index', all.length === 5);
+  ok('index.getAll(range)', (await P(byName.getAll(IDBKeyRange.bound('alice','bob')))).map(function(x){return x.id;}).join() === '2,4,3');
+  ok('index.getAll(query, count)', (await P(byName.getAll(null, 2))).length === 2);
+  ok('index.getAllKeys', (await P(byName.getAllKeys())).join() === '2,4,3,1,5');
+  ok('index.count', (await P(byName.count())) === 5);
+  ok('index.count(key)', (await P(byName.count('alice'))) === 2);
+  var multi = tx.objectStore('people').index('by_tags');
+  ok('multiEntry getAllKeys("a") has each record once', (await P(multi.getAllKeys('a'))).join() === '1,3', null);
+  ok('multiEntry count', (await P(multi.count())) === 7, null); // a:1,3  b:1,2  c:3,5  notarray:6 => 7
+  ok('multiEntry index ignores a non-array string? (kept as one key)', (await P(multi.getAllKeys('notarray'))).join() === '6');
+
+  // cursors
+  var names = await collect(byName.openCursor(), function(c){ return c.key + ':' + c.primaryKey; });
+  ok('index cursor walks in order', names.join() === 'alice:2,alice:4,bob:3,carol:1,dave:5', names);
+  var prev = await collect(byName.openCursor(null, 'prev'), function(c){ return c.key + ':' + c.primaryKey; });
+  ok('index cursor prev', prev.join() === 'dave:5,carol:1,bob:3,alice:4,alice:2', prev);
+  var uniq = await collect(byName.openCursor(null, 'nextunique'), function(c){ return c.key + ':' + c.primaryKey; });
+  ok('index cursor nextunique', uniq.join() === 'alice:2,bob:3,carol:1,dave:5', uniq);
+  var pu = await collect(byName.openCursor(null, 'prevunique'), function(c){ return c.key + ':' + c.primaryKey; });
+  ok('index cursor prevunique', pu.join() === 'dave:5,carol:1,bob:3,alice:2', pu);
+  var ranged = await collect(byName.openCursor(IDBKeyRange.lowerBound('bob', true)), function(c){ return c.key; });
+  ok('index cursor with range', ranged.join() === 'carol,dave', ranged);
+  var kc = await collect(byName.openKeyCursor(), function(c){ return c.key + ':' + c.primaryKey + ':' + (c.value === undefined); });
+  ok('index key cursor has no value', kc[0] === 'alice:2:true', kc);
+
+  // continue(key), advance, continuePrimaryKey
+  var steps = await new Promise(function(res, rej){
+    var out = [], req = byName.openCursor();
+    var phase = 0;
+    req.onsuccess = function(){
+      var c = req.result; if (!c) { res(out); return; }
+      out.push(c.key + ':' + c.primaryKey + ':' + c.value.id);
+      if (phase === 0) { phase = 1; c['continue']('carol'); }
+      else if (phase === 1) { phase = 2; c.advance(1); }
+      else c['continue']();
+    };
+    req.onerror = function(){ rej(req.error); };
+  });
+  ok('continue(key) then advance', steps.join() === 'alice:2:2,carol:1:1,dave:5:5', steps);
+  var adv = await new Promise(function(res){
+    var out = [], req = byName.openCursor(), first = true;
+    req.onsuccess = function(){ var c = req.result; if (!c) { res(out); return; } out.push(c.primaryKey); if (first) { first = false; c.advance(3); } else c['continue'](); };
+  });
+  ok('advance(3) skips two records', adv.join() === '2,1,5', adv);
+  var cpk = await new Promise(function(res){
+    var out = [], req = byName.openCursor(), first = true;
+    req.onsuccess = function(){ var c = req.result; if (!c) { res(out); return; } out.push(c.key + ':' + c.primaryKey); if (first) { first = false; c.continuePrimaryKey('alice', 4); } else c['continue'](); };
+  });
+  ok('continuePrimaryKey', cpk.join() === 'alice:2,alice:4,bob:3,carol:1,dave:5', cpk);
+  var endNull = await new Promise(function(res){ var req = byName.openCursor('zzz'); req.onsuccess = function(){ res(req.result); }; });
+  ok('an empty cursor gives null', endNull === null, endNull);
+  var lastNull = await new Promise(function(res){ var req = st.openCursor(IDBKeyRange.only(6)); req.onsuccess = function(){ var c = req.result; if (c) c['continue'](); else res(req.result); }; });
+  ok('a finished cursor leaves result null', lastNull === null, lastNull);
+
+  // errors
+  var threw = function(f){ try { f(); return null; } catch (e) { return e.name; } };
+  ok('advance(0) is a TypeError', await new Promise(function(res){ var req = st.openCursor(); req.onsuccess = function(){ req.onsuccess = null; res(threw(function(){ req.result.advance(0); })); }; }) === 'TypeError');
+  ok('continue(wrong direction key) is a DataError', await new Promise(function(res){ var req = st.openCursor(); req.onsuccess = function(){ var c = req.result; c['continue'](3); req.onsuccess = function(){ req.onsuccess = null; res(threw(function(){ req.result['continue'](1); })); }; }; }) === 'DataError');
+  ok('continuePrimaryKey on a store cursor is an InvalidAccessError', await new Promise(function(res){ var req = st.openCursor(); req.onsuccess = function(){ res(threw(function(){ req.result.continuePrimaryKey(1, 1); })); }; }) === 'InvalidAccessError');
+  ok('second continue before the next record is an InvalidStateError', await new Promise(function(res){ var req = st.openCursor(); req.onsuccess = function(){ req.onsuccess = null; var c = req.result; c['continue'](); res(threw(function(){ c['continue'](); })); }; }) === 'InvalidStateError');
+  ok('update on a read-only transaction is a ReadOnlyError', await new Promise(function(res){ var req = st.openCursor(); req.onsuccess = function(){ res(threw(function(){ req.result.update({id: 1}); })); }; }) === 'ReadOnlyError');
+  ok('index.get(undefined) is a DataError', threw(function(){ byName.get(undefined); }) === 'DataError');
+  ok('index.get() with no argument is a TypeError', threw(function(){ byName.get(); }) === 'TypeError');
+  ok('request.source for an index request', byName.get('bob').source === byName);
+
+  // store cursor, update and delete in a read-write transaction
+  var tx2 = db.transaction('people', 'readwrite'); var st2 = tx2.objectStore('people');
+  var visited = await new Promise(function(res, rej){
+    var out = [], req = st2.openCursor();
+    req.onsuccess = function(){
+      var c = req.result; if (!c) { res(out); return; }
+      out.push(c.key);
+      if (c.key === 2) { var v = c.value; v.name = 'zoe'; var u = c.update(v); u.onsuccess = function(){ out.push('u' + u.result); }; }
+      if (c.key === 5) { var d = c['delete'](); d.onsuccess = function(){ out.push('d'); }; }
+      c['continue']();
+    };
+    req.onerror = function(){ rej(req.error); };
+  });
+  await done(tx2);
+  ok('store cursor visits every record', visited.filter(function(x){ return typeof x === 'number'; }).join() === '1,2,3,4,5,6', visited);
+  ok('cursor.update reports the key and cursor.delete finishes', visited.indexOf('u2') >= 0 && visited.indexOf('d') >= 0, visited);
+  var tx3 = db.transaction('people'); var st3 = tx3.objectStore('people');
+  ok('update changed the record', (await P(st3.get(2))).name === 'zoe');
+  ok('delete removed the record', (await P(st3.get(5))) === undefined);
+  ok('the index follows the update', (await P(st3.index('by_name').getAllKeys('zoe'))).join() === '2');
+  ok('update with a different in-line key is a DataError', await new Promise(function(res){
+    var t = db.transaction('people', 'readwrite'), rq = t.objectStore('people').openCursor();
+    rq.onsuccess = function(){ res(threw(function(){ rq.result.update({id: 99, name: 'x'}); })); };
+  }) === 'DataError');
+  // cursor on a key-only cursor update
+  ok('update on a key cursor is an InvalidStateError', await new Promise(function(res){
+    var t = db.transaction('people', 'readwrite'), rq = t.objectStore('people').openKeyCursor();
+    rq.onsuccess = function(){ res(threw(function(){ rq.result.update({id: 1}); })); };
+  }) === 'InvalidStateError');
+  db.close();
+  indexedDB.deleteDatabase(name);
+
+  // -------- the Cache API --------
+  ok('caches exists', typeof caches === 'object' && typeof Cache === 'function');
+  await caches['delete']('t1'); await caches['delete']('t2');
+  var c1 = await caches.open('t1');
+  await c1.put('/index.html?x=1', new Response('hello', {status: 200, statusText: 'OK', headers: {'content-type': 'text/plain', 'x-a': '1'}}));
+  var hit = await c1.match('/index.html?x=1');
+  ok('cache.match returns the stored response', hit && hit.status === 200 && (await hit.text()) === 'hello' && hit.headers.get('x-a') === '1');
+  ok('cache.match misses on another query', (await c1.match('/index.html?x=2')) === undefined);
+  ok('cache.match ignoreSearch', !!(await c1.match('/index.html?x=2', {ignoreSearch: true})));
+  ok('cache.match with a POST request misses', (await c1.match(new Request('/index.html?x=1', {method: 'POST', body: 'a'}))) === undefined);
+  await c1.put('/b.txt', new Response('bee'));
+  await c1.put('/a.txt', new Response('ay'));
+  ok('cache.keys is in insertion order', (await c1.keys()).map(function(r){ return new URL(r.url).pathname; }).join() === '/index.html,/b.txt,/a.txt', (await c1.keys()).map(function(r){return r.url;}));
+  await c1.put('/index.html?x=1', new Response('again'));
+  ok('put replaces the same request', (await (await c1.match('/index.html?x=1')).text()) === 'again' && (await c1.keys()).length === 3);
+  ok('cache.matchAll', (await c1.matchAll()).length === 3);
+  ok('cache.delete', (await c1['delete']('/b.txt')) === true && (await c1['delete']('/b.txt')) === false && (await c1.keys()).length === 2);
+  var t2 = await caches.open('t2');
+  ok('caches.keys', (await caches.keys()).filter(function(n){ return n === 't1' || n === 't2'; }).join() === 't1,t2', await caches.keys());
+  ok('caches.has', (await caches.has('t2')) === true && (await caches.has('nope')) === false);
+  ok('caches.match searches every cache', (await (await caches.match('/a.txt')).text()) === 'ay');
+  ok('caches.match with cacheName', (await caches.match('/a.txt', {cacheName: 't2'})) === undefined);
+  var rejected = 'no'; try { await c1.put('/p', new Response('x', {status: 206})); } catch (e) { rejected = e.name; }
+  ok('put rejects a 206', rejected === 'TypeError', rejected);
+  var rejected2 = 'no'; try { await c1.put('/p', new Response('x', {headers: {vary: '*'}})); } catch (e) { rejected2 = e.name; }
+  ok('put rejects Vary: *', rejected2 === 'TypeError', rejected2);
+  await c1.add('/index.html'); // fetch + put from the same origin
+  ok('cache.add fetches and stores', (await (await c1.match('/index.html')).text()).indexOf('Cache API') > 0);
+  ok('caches.delete', (await caches['delete']('t1')) === true && (await caches.has('t1')) === false);
+  await caches['delete']('t2');
+
+  // -------- small interfaces the engine lacks (web_compat.js) --------
+  var idle = await new Promise(function(res){ requestIdleCallback(function(d){ res(d); }); });
+  ok('requestIdleCallback gives a deadline', typeof idle.timeRemaining() === 'number' && idle.didTimeout === false);
+  var idleCancelled = await new Promise(function(res){ var ran = false; var id = requestIdleCallback(function(){ ran = true; }); cancelIdleCallback(id); setTimeout(function(){ res(ran); }, 80); });
+  ok('cancelIdleCallback stops it', idleCancelled === false);
+  ok('scheduler.postTask resolves with the result', (await scheduler.postTask(function(){ return 7; }, {priority: 'background'})) === 7);
+  var ac = new AbortController(); var pt = scheduler.postTask(function(){ return 1; }, {delay: 50, signal: ac.signal}); ac.abort();
+  ok('scheduler.postTask can be aborted', await pt.then(function(){ return 'ran'; }, function(e){ return e.name; }) === 'AbortError');
+  var order = [];
+  var l1 = navigator.locks.request('a', function(){ order.push('1 in'); return new Promise(function(r){ setTimeout(function(){ order.push('1 out'); r('one'); }, 40); }); });
+  var l2 = navigator.locks.request('a', function(){ order.push('2 in'); return 'two'; });
+  var l3 = navigator.locks.request('a', {ifAvailable: true}, function(lock){ order.push('3 ' + (lock === null ? 'unavailable' : 'got')); });
+  await Promise.all([l1, l2, l3]);
+  ok('Web Locks: exclusive locks queue, ifAvailable does not wait', order.join() === '1 in,3 unavailable,1 out,2 in', order);
+  var shared = [];
+  await Promise.all([1, 2].map(function(n){ return navigator.locks.request('s', {mode: 'shared'}, function(){ shared.push('in' + n); return new Promise(function(r){ setTimeout(function(){ shared.push('out' + n); r(); }, 30); }); }); }));
+  ok('Web Locks: shared locks run together', shared.join() === 'in1,in2,out1,out2', shared);
+  var q = await navigator.locks.query();
+  ok('Web Locks: query', Array.isArray(q.held) && q.held.length === 0);
+  ok('screen.orientation', screen.orientation.type.indexOf('landscape') === 0 && screen.orientation.angle === 0);
+  ok('mediaDevices.enumerateDevices is empty', (await navigator.mediaDevices.enumerateDevices()).length === 0);
+  ok('mediaDevices.getUserMedia is refused', await navigator.mediaDevices.getUserMedia({video: true}).then(function(){ return 'ok'; }, function(e){ return e.name; }) === 'NotFoundError');
+  var vt = 'no'; var vtr = document.startViewTransition(function(){ vt = 'updated'; });
+  await vtr.finished;
+  ok('startViewTransition runs the update', vt === 'updated');
+  var box = document.createElement('div'); document.body.appendChild(box);
+  var hidden = document.createElement('div'); hidden.style.display = 'none'; document.body.appendChild(hidden);
+  ok('checkVisibility', box.checkVisibility() === true && hidden.checkVisibility() === false);
+  var an = box.animate([{opacity: 0}, {opacity: 1}], {duration: 20, fill: 'forwards'});
+  await an.finished;
+  ok('Element.animate finishes and fills forwards', box.style.opacity === '1' && an.playState === 'finished');
+
+  var sentinel = await navigator.wakeLock.request('screen').then(function(x){ return x; }, function(e){ return e.name + ': ' + e.message; });
+  ok('wake lock is granted', sentinel && sentinel.type === 'screen' && sentinel.released === false, String(sentinel));
+  if (sentinel && sentinel.release) await sentinel.release();
+
+  // -------- web storage --------
+  localStorage.setItem('k', 'v'); sessionStorage.setItem('s', 'w');
+  ok('localStorage round trip', localStorage.getItem('k') === 'v' && localStorage.length >= 1);
+  ok('sessionStorage round trip', sessionStorage.getItem('s') === 'w');
+  localStorage.removeItem('k'); sessionStorage.clear();
+  ok('removeItem and clear', localStorage.getItem('k') === null && sessionStorage.length === 0);
+  var est = navigator.storage && await navigator.storage.estimate();
+  ok('navigator.storage.estimate', !!est && typeof est.quota === 'number', est);
+ } catch (e) { log('EXCEPTION ' + (e && e.stack || e)); }
+ var fails = results.filter(function(r){ return r.indexOf('FAIL') === 0 || r.indexOf('EXCEPTION') === 0; }).length;
+ document.title = 'DONE pass=' + results.filter(function(r){return r.indexOf('PASS')===0;}).length + ' fail=' + fails;
+})();
+</script>
