@@ -21,6 +21,7 @@ use url::Url;
 use uuid::Uuid;
 
 use crate::dom::bindings::codegen::Bindings::URLBinding::URLMethods;
+use crate::dom::bindings::codegen::UnionTypes::BlobOrMediaSource;
 use crate::dom::bindings::error::{Error, ErrorResult, Fallible};
 use crate::dom::bindings::reflector::DomGlobal;
 use crate::dom::bindings::root::{DomRoot, MutNullableDom};
@@ -192,14 +193,24 @@ impl URLMethods<crate::DomTypeHolder> for URL {
     }
 
     /// <https://w3c.github.io/FileAPI/#dfn-createObjectURL>
-    fn CreateObjectURL(global: &GlobalScope, blob: &Blob) -> DOMString {
+    fn CreateObjectURL(global: &GlobalScope, obj: BlobOrMediaSource) -> DOMString {
         // XXX: Second field is an unicode-serialized Origin, it is a temporary workaround
         //      and should not be trusted. See issue https://github.com/servo/servo/issues/11722
         let origin = global.origin();
 
-        let id = blob.get_blob_url_id();
-
-        DOMString::from(URL::unicode_serialization_blob_url(origin.immutable(), &id))
+        match obj {
+            BlobOrMediaSource::Blob(blob) => {
+                let id = blob.get_blob_url_id();
+                DOMString::from(URL::unicode_serialization_blob_url(origin.immutable(), &id))
+            },
+            // Ferrite: a `MediaSource` has no bytes in the blob store; the URL is a key
+            // the media element looks up in its global when it loads the `src`.
+            BlobOrMediaSource::MediaSource(source) => {
+                let url = URL::unicode_serialization_blob_url(origin.immutable(), &Uuid::new_v4());
+                global.register_media_source_url(&url, &source);
+                DOMString::from(url)
+            },
+        }
     }
 
     /// <https://w3c.github.io/FileAPI/#dfn-revokeObjectURL>
@@ -208,6 +219,8 @@ impl URLMethods<crate::DomTypeHolder> for URL {
         // if the value provided for the url argument does not have an entry in the Blob URL Store,
         // this method call does nothing. User agents may display a message on the error console.
         let origin = global.origin().immutable().clone();
+
+        global.revoke_media_source_url(&url.str());
 
         if let Ok(url) = ServoUrl::parse(&url.str()) &&
             url.fragment().is_none() &&

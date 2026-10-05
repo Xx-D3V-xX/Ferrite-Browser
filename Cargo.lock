@@ -9336,6 +9336,7 @@ dependencies = [
  "elliptic-curve",
  "encoding_rs",
  "euclid",
+ "ferrite-mse",
  "flate2",
  "glow 0.17.0",
  "headers",

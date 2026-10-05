@@ -64,6 +64,7 @@ use crate::dom::bindings::codegen::Bindings::TextTrackBinding::{
 use crate::dom::bindings::codegen::Bindings::URLBinding::URLMethods;
 use crate::dom::bindings::codegen::Bindings::WindowBinding::Window_Binding::WindowMethods;
 use crate::dom::bindings::codegen::UnionTypes::{
+    BlobOrMediaSource,
     MediaStreamOrBlob, VideoTrackOrAudioTrackOrTextTrack,
 };
 use crate::dom::bindings::error::{Error, ErrorResult, Fallible};
@@ -90,6 +91,7 @@ use crate::dom::html::htmlvideoelement::HTMLVideoElement;
 use crate::dom::mediaerror::MediaError;
 use crate::dom::mediafragmentparser::MediaFragmentParser;
 use crate::dom::medialist::MediaList;
+use crate::dom::mediasource::MediaSource;
 use crate::dom::mediastream::MediaStream;
 use crate::dom::node::virtualmethods::VirtualMethods;
 use crate::dom::node::{Node, NodeDamage, NodeTraits, UnbindContext};
@@ -524,6 +526,9 @@ pub(crate) struct HTMLMediaElement {
     ready_state: Cell<ReadyState>,
     /// <https://html.spec.whatwg.org/multipage/#dom-media-srcobject>
     src_object: DomRefCell<Option<SrcObject>>,
+    /// Ferrite: the `MediaSource` this element plays, if its `src` is an object URL made
+    /// for one (<https://w3c.github.io/media-source/#mediasource-attach>).
+    media_source: MutNullableDom<MediaSource>,
     /// <https://html.spec.whatwg.org/multipage/#dom-media-currentsrc>
     current_src: DomRefCell<String>,
     /// Incremented whenever tasks associated with this element are cancelled.
@@ -656,6 +661,7 @@ impl HTMLMediaElement {
             network_state: Cell::new(NetworkState::Empty),
             ready_state: Cell::new(ReadyState::HaveNothing),
             src_object: Default::default(),
+            media_source: Default::default(),
             current_src: DomRefCell::new("".to_owned()),
             generation_id: Cell::new(0),
             fired_loadeddata_event: Cell::new(false),
@@ -1518,6 +1524,16 @@ impl HTMLMediaElement {
 
     /// <https://html.spec.whatwg.org/multipage/#concept-media-load-resource>
     fn resource_fetch_algorithm(&self, cx: &JSContext, resource: Resource) {
+        // Ferrite: an object URL made for a `MediaSource` is not fetched: the page
+        // supplies the data.
+        if let Resource::Url(ref url) = resource &&
+            url.scheme() == "blob" &&
+            let Some(source) = self.global().media_source_for_url(url.as_str())
+        {
+            self.load_media_source(cx, &source);
+            return;
+        }
+
         if let Err(e) = self.create_media_player(&resource) {
             error!("Create media player error {:?}", e);
             self.resource_selection_algorithm_failure_steps(cx);
@@ -1580,11 +1596,16 @@ impl HTMLMediaElement {
                 // Steps 5.remote.2-5.remote.8
                 self.fetch_request(cx, None, None);
             },
+            // Handled before the player was made.
+            Resource::MediaSource(_) => {},
             Resource::Object => {
                 if let Some(ref src_object) = *self.src_object.borrow() {
                     match src_object {
                         SrcObject::Blob(blob) => {
-                            let blob_url = URL::CreateObjectURL(&self.global(), blob);
+                            let blob_url = URL::CreateObjectURL(
+                                &self.global(),
+                                BlobOrMediaSource::Blob(DomRoot::from_ref(blob)),
+                            );
                             *self.blob_url.borrow_mut() =
                                 Some(ServoUrl::parse(&blob_url.str()).expect("infallible"));
                             self.fetch_request(cx, None, None);
@@ -2063,6 +2084,11 @@ impl HTMLMediaElement {
         // Step 11. Set the current playback position to the new playback position.
         self.current_playback_position.set(time);
 
+        // Ferrite: seeking an ended `MediaSource` opens it again.
+        if let Some(source) = self.media_source.get() {
+            source.reopen_if_ended();
+        }
+
         if let Some(ref player) = *self.player.borrow() &&
             let Err(error) = player.lock().unwrap().seek(time)
         {
@@ -2070,6 +2096,9 @@ impl HTMLMediaElement {
         }
 
         self.current_seek_position.set(time);
+
+        // Ferrite: whether the new position is buffered decides the ready state.
+        self.media_source_changed();
 
         // Step 12. Wait until the user agent has established whether or not the media data for the
         // new playback position is available, and, if it is, until it has decoded enough data to
@@ -2132,6 +2161,7 @@ impl HTMLMediaElement {
                     return Err(());
                 }
             },
+            Resource::MediaSource(id) => StreamType::MediaSource(id),
             _ => StreamType::Seekable,
         };
 
@@ -2225,6 +2255,13 @@ impl HTMLMediaElement {
     }
 
     fn reset_media_player(&self, no_gc: &NoGC) {
+        // Ferrite: a `MediaSource` is detached when the element lets go of it
+        // (<https://w3c.github.io/media-source/#mediasource-detach>).
+        if let Some(source) = self.media_source.get() {
+            self.media_source.set(None);
+            source.detach();
+        }
+
         if self.player.borrow().is_none() {
             return;
         }
@@ -2407,6 +2444,11 @@ impl HTMLMediaElement {
         // The following steps should be run once on the initial `metadata` signal from the media
         // engine.
         if self.ready_state.get() != ReadyState::HaveNothing {
+            return;
+        }
+
+        // Ferrite: with a `MediaSource` the initialization segments are the metadata.
+        if self.media_source.get().is_some() {
             return;
         }
 
@@ -2644,6 +2686,10 @@ impl HTMLMediaElement {
     }
 
     fn playback_duration_changed(&self, duration: Option<Duration>) {
+        // Ferrite: with a `MediaSource` the page sets the duration.
+        if self.media_source.get().is_some() {
+            return;
+        }
         let duration = duration.map_or(f64::INFINITY, |duration| duration.as_secs_f64());
 
         if self.duration.get() == duration {
@@ -2763,6 +2809,14 @@ impl HTMLMediaElement {
         self.official_playback_position.set(position);
         self.time_marches_on();
 
+        // Ferrite: the playhead decides what the buffers may drop and how much is ahead.
+        if let Some(source) = self.media_source.get() {
+            source
+                .shared()
+                .set_position((position * 1_000_000_000.0) as i64);
+            self.media_source_changed();
+        }
+
         let media_position_state =
             MediaPositionState::new(self.duration.get(), self.playback_rate.get(), position);
         debug!(
@@ -2798,13 +2852,17 @@ impl HTMLMediaElement {
         match *state {
             PlaybackState::Paused => {
                 media_session_playback_state = MediaSessionPlaybackState::Paused;
-                if self.ready_state.get() == ReadyState::HaveMetadata {
+                if self.ready_state.get() == ReadyState::HaveMetadata &&
+                    self.media_source.get().is_none()
+                {
                     self.change_ready_state(ReadyState::HaveEnoughData);
                 }
             },
             PlaybackState::Playing => {
                 media_session_playback_state = MediaSessionPlaybackState::Playing;
-                if self.ready_state.get() == ReadyState::HaveMetadata {
+                if self.ready_state.get() == ReadyState::HaveMetadata &&
+                    self.media_source.get().is_none()
+                {
                     self.change_ready_state(ReadyState::HaveEnoughData);
                 }
             },
@@ -2826,8 +2884,173 @@ impl HTMLMediaElement {
         );
     }
 
+    fn load_media_source(&self, cx: &JSContext, source: &MediaSource) {
+        if !source.attach(self) {
+            // The `MediaSource` is already in use.
+            self.resource_selection_algorithm_failure_steps(cx);
+            return;
+        }
+        self.media_source.set(Some(source));
+        if self
+            .create_media_player(&Resource::MediaSource(source.registry_id()))
+            .is_err()
+        {
+            self.resource_selection_algorithm_failure_steps(cx);
+        }
+        // The player builds its streams once the page has appended something.
+    }
+
+    /// What the buffered ranges say about the ready state at `position`.
+    /// <https://w3c.github.io/media-source/#htmlmediaelement-extensions>
+    fn media_source_ready_state(&self, source: &MediaSource, position: f64) -> ReadyState {
+        // A stream rarely starts at exactly zero: this much before the first frame
+        // still counts as inside it.
+        const GAP: f64 = 0.1;
+        const FUTURE: f64 = 0.1;
+        const ENOUGH: f64 = 3.0;
+        let ended = source.is_ended();
+        let Some((_, end)) = source
+            .buffered_seconds()
+            .into_iter()
+            .find(|&(start, end)| position >= start - GAP && (position < end || (ended && position <= end)))
+        else {
+            return ReadyState::HaveMetadata;
+        };
+        let duration = source.duration_seconds();
+        if ended || (duration.is_finite() && end >= duration - 0.05) {
+            return ReadyState::HaveEnoughData;
+        }
+        match end - position {
+            ahead if ahead >= ENOUGH => ReadyState::HaveEnoughData,
+            ahead if ahead >= FUTURE => ReadyState::HaveFutureData,
+            _ => ReadyState::HaveCurrentData,
+        }
+    }
+
+    /// Ferrite: something about the `MediaSource` changed (data appended or removed, the
+    /// stream ended, the playhead moved): the ready state follows what is buffered.
+    pub(crate) fn media_source_changed(&self) {
+        let Some(source) = self.media_source.get() else {
+            return;
+        };
+        if self.network_state.get() == NetworkState::Empty {
+            return;
+        }
+        if self.ready_state.get() == ReadyState::HaveNothing {
+            if !source.shared().ready() {
+                return;
+            }
+            self.media_source_metadata(&source);
+        }
+        let position = if self.seeking.get() && !self.current_seek_position.get().is_nan() {
+            self.current_seek_position.get()
+        } else {
+            self.current_playback_position.get()
+        };
+        let old = self.ready_state.get();
+        let new = self.media_source_ready_state(&source, position);
+        if new == old {
+            return;
+        }
+        self.change_ready_state(new);
+        // Playing and the data ran out.
+        if old >= ReadyState::HaveFutureData &&
+            new <= ReadyState::HaveCurrentData &&
+            !self.Paused()
+        {
+            self.queue_media_element_task_to_fire_event(atom!("timeupdate"));
+            self.queue_media_element_task_to_fire_event(atom!("waiting"));
+        }
+    }
+
+    /// <https://w3c.github.io/media-source/#htmlmediaelement-extensions>: every
+    /// `SourceBuffer` has had its initialization segment, so the element has metadata.
+    fn media_source_metadata(&self, source: &MediaSource) {
+        let duration = source.duration_seconds();
+        self.duration
+            .set(if duration.is_nan() { f64::INFINITY } else { duration });
+        self.queue_media_element_task_to_fire_event(atom!("durationchange"));
+
+        if self.downcast::<HTMLVideoElement>().is_some() {
+            let size = source.video_size();
+            let this = Trusted::new(self);
+            let generation_id = self.generation_id.get();
+            self.owner_global()
+                .task_manager()
+                .media_element_task_source()
+                .queue(task!(media_source_size: move |cx| {
+                    let this = this.root();
+                    if generation_id != this.generation_id.get() {
+                        return;
+                    }
+                    if let (Some(video), Some((width, height))) =
+                        (this.downcast::<HTMLVideoElement>(), size)
+                    {
+                        video.set_natural_dimensions(cx.no_gc(), Some(width), Some(height));
+                    }
+                    this.upcast::<EventTarget>().fire_event(cx, atom!("resize"));
+                }));
+        }
+
+        self.change_ready_state(ReadyState::HaveMetadata);
+
+        // A `currentTime` set before there was metadata applies now.
+        let start = self.default_playback_start_position.get();
+        self.default_playback_start_position.set(0.);
+        if start > 0. {
+            self.seek(start, /* approximate_for_speed */ false);
+        }
+    }
+
+    /// Ferrite: the `MediaSource`'s duration changed.
+    pub(crate) fn media_source_duration_changed(&self, duration: f64) {
+        if self.ready_state.get() == ReadyState::HaveNothing {
+            // `media_source_metadata` reads it when the time comes.
+            return;
+        }
+        if self.duration.get() == duration || (self.duration.get().is_nan() && duration.is_nan()) {
+            return;
+        }
+        self.duration.set(duration);
+        self.queue_media_element_task_to_fire_event(atom!("durationchange"));
+        if self.current_playback_position.get() > duration {
+            self.seek(duration, /* approximate_for_speed */ false);
+        }
+    }
+
+    /// Ferrite: `endOfStream("network")` or `("decode")`, or a buffer that cannot be
+    /// parsed.
+    pub(crate) fn media_source_error(&self, code: u16) {
+        let this = Trusted::new(self);
+        let generation_id = self.generation_id.get();
+        self.owner_global()
+            .task_manager()
+            .media_element_task_source()
+            .queue(task!(media_source_error: move |cx| {
+                let this = this.root();
+                if generation_id != this.generation_id.get() {
+                    return;
+                }
+                this.media_data_processing_fatal_steps(code, cx);
+            }));
+    }
+
     fn seekable(&self) -> TimeRangesContainer {
         let mut seekable = TimeRangesContainer::default();
+        // Ferrite: with a `MediaSource` the page decides what can be sought:
+        // <https://w3c.github.io/media-source/#htmlmediaelement-extensions>.
+        if let Some(source) = self.media_source.get() {
+            if let Some((start, end)) = source.live_seekable() {
+                let _ = seekable.add(start, end);
+            } else if source.duration_seconds().is_finite() && source.duration_seconds() > 0.0 {
+                let _ = seekable.add(0.0, source.duration_seconds());
+            } else {
+                for (start, end) in source.buffered_seconds() {
+                    let _ = seekable.add(start, end);
+                }
+            }
+            return seekable;
+        }
         if let Some(ref player) = *self.player.borrow() {
             let ranges = player.lock().unwrap().seekable();
             for range in ranges {
@@ -3391,7 +3614,11 @@ impl HTMLMediaElementMethods<crate::DomTypeHolder> for HTMLMediaElement {
     /// <https://html.spec.whatwg.org/multipage/#dom-media-buffered>
     fn Buffered(&self, cx: &mut JSContext) -> DomRoot<TimeRanges> {
         let mut buffered = TimeRangesContainer::default();
-        if let Some(ref player) = *self.player.borrow() {
+        if let Some(source) = self.media_source.get() {
+            for (start, end) in source.buffered_seconds() {
+                let _ = buffered.add(start, end);
+            }
+        } else if let Some(ref player) = *self.player.borrow() {
             let ranges = player.lock().unwrap().buffered();
             for range in ranges {
                 let _ = buffered.add(range.start, range.end);
@@ -3674,6 +3901,8 @@ impl MicrotaskRunnable for MediaElementMicrotask {
 enum Resource {
     Object,
     Url(ServoUrl),
+    /// A `MediaSource`, by its number in `ferrite_mse`'s registry.
+    MediaSource(u64),
 }
 
 #[derive(Debug, MallocSizeOf, PartialEq)]

@@ -10,7 +10,7 @@ function once(el, type, ms){ return new Promise(function(res){ var t = setTimeou
  try {
   var v = document.getElementById('v'), a = document.createElement('audio');
   ok('canPlayType: webm, ogg and wav', !!v.canPlayType('video/webm; codecs="vp8"') && !!a.canPlayType('audio/ogg; codecs="vorbis"') && !!a.canPlayType('audio/wav'));
-  ok('MediaSource is absent (so players fall back to plain files)', typeof MediaSource === 'undefined');
+  ok('MediaSource exists and says what it can play', typeof MediaSource === 'function' && MediaSource.isTypeSupported('video/webm; codecs="vp8"'));
   var meta = v.readyState >= 1 || await once(v, 'loadedmetadata', 8000);
   ok('video metadata', meta && v.videoWidth === 320 && v.videoHeight === 240 && Math.abs(v.duration - 3) < 0.3, [v.videoWidth, v.videoHeight, v.duration, v.error && v.error.message]);
   var can = v.readyState >= 3 || await once(v, 'canplay', 8000);

@@ -1,0 +1,188 @@
+<!doctype html><meta charset=utf-8><title>mse</title>
+<body style="margin:0;background:#fff">
+<script>
+function log(s){ console.log(s); }
+function ok(name, cond, extra){ log((cond ? 'PASS ' : 'FAIL ') + name + (cond ? '' : ' :: ' + JSON.stringify(extra))); }
+function wait(ms){ return new Promise(function(r){ setTimeout(r, ms); }); }
+function once(el, type, ms){ return new Promise(function(res){ var t = setTimeout(function(){ res(false); }, ms); el.addEventListener(type, function(){ clearTimeout(t); res(true); }, {once: true}); }); }
+function get(name){ return fetch(name).then(function(r){ return r.arrayBuffer(); }).then(function(b){ return new Uint8Array(b); }); }
+// Splits an MP4 into its initialization segment (everything before the first moof) and
+// its media segments (each moof with the mdat after it).
+function split(bytes){
+  var dv = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength), i = 0, init = null, frags = [], start = 0, seenMoof = false;
+  while (i + 8 <= bytes.length) {
+    var size = dv.getUint32(i), type = String.fromCharCode(bytes[i+4], bytes[i+5], bytes[i+6], bytes[i+7]);
+    if (type === 'moof') { if (!seenMoof) { init = bytes.subarray(0, i); seenMoof = true; } start = i; }
+    if (type === 'mdat' && seenMoof) { frags.push(bytes.subarray(start, i + size)); }
+    i += size;
+  }
+  return {init: init, frags: frags};
+}
+function append(sb, data){
+  return new Promise(function(res, rej){
+    function done(){ sb.removeEventListener('updateend', done); sb.removeEventListener('error', fail); res(true); }
+    function fail(){ sb.removeEventListener('updateend', done); sb.removeEventListener('error', fail); res(false); }
+    sb.addEventListener('updateend', done); sb.addEventListener('error', fail);
+    try { sb.appendBuffer(data); } catch (e) { sb.removeEventListener('updateend', done); sb.removeEventListener('error', fail); rej(e); }
+  });
+}
+function open(video){
+  var ms = new MediaSource();
+  var url = URL.createObjectURL(ms);
+  video.src = url;
+  return new Promise(function(res){ ms.addEventListener('sourceopen', function(){ res({ms: ms, url: url}); }, {once: true}); });
+}
+function frameDrawn(v){
+  var cv = document.createElement('canvas'); cv.width = 320; cv.height = 240; var cx = cv.getContext('2d');
+  cx.drawImage(v, 0, 0, 320, 240); var d = cx.getImageData(0, 0, 320, 240).data;
+  var sum = 0; for (var p = 0; p < d.length; p += 4 * 101) sum += d[p] + d[p+1] + d[p+2];
+  return sum > 0;
+}
+function fresh(){
+  var old = document.getElementById('v'); if (old) old.remove();
+  var v = document.createElement('video'); v.id = 'v'; v.muted = true; v.width = 320; v.height = 240; v.playsInline = true;
+  document.body.appendChild(v); return v;
+}
+var MP4 = 'video/mp4; codecs="avc1.42c00d, mp4a.40.2"';
+var MP4V = 'video/mp4; codecs="avc1.42c00d"';
+var MP4A = 'audio/mp4; codecs="mp4a.40.2"';
+var WEBM = 'video/webm; codecs="vp9, opus"';
+(async function(){
+ try {
+  ok('MediaSource, SourceBuffer and SourceBufferList exist', typeof MediaSource === 'function' && typeof SourceBuffer === 'function' && typeof SourceBufferList === 'function');
+  ok('isTypeSupported: H.264+AAC in MP4, VP9+Opus in WebM', MediaSource.isTypeSupported(MP4) && MediaSource.isTypeSupported(WEBM), [MediaSource.isTypeSupported(MP4), MediaSource.isTypeSupported(WEBM)]);
+  ok('isTypeSupported is false for what cannot be played', !MediaSource.isTypeSupported('video/mp4') && !MediaSource.isTypeSupported('video/x-flv; codecs="avc1.42c00d"') && !MediaSource.isTypeSupported('video/mp4; codecs="nonsense"'));
+
+  // ---- One buffer with audio and video, played from start to end.
+  var v = fresh(), o = await open(v), ms = o.ms;
+  ok('readyState is open once attached', ms.readyState === 'open', ms.readyState);
+  var file = split(await get('av_h264_aac.mp4'));
+  ok('the file has an init segment and several media segments', file.init && file.frags.length >= 3, file.frags.length);
+  var sb = ms.addSourceBuffer(MP4);
+  ok('addSourceBuffer lists the buffer', ms.sourceBuffers.length === 1 && ms.sourceBuffers[0] === sb);
+  ok('a new buffer is not updating', sb.updating === false && sb.mode === 'segments');
+  var meta = once(v, 'loadedmetadata', 8000);
+  ok('appending the init segment works', await append(sb, file.init));
+  ok('loadedmetadata fires', await meta);
+  ok('the size comes from the init segment', v.videoWidth === 320 && v.videoHeight === 240, [v.videoWidth, v.videoHeight]);
+  ms.duration = 2;
+  ok('duration is what the page set', Math.abs(v.duration - 2) < 0.01 && Math.abs(ms.duration - 2) < 0.01, [v.duration, ms.duration]);
+  ok('nothing is buffered before a media segment', sb.buffered.length === 0 && v.buffered.length === 0);
+  var allOk = true;
+  for (var i = 0; i < file.frags.length; i++) allOk = (await append(sb, file.frags[i])) && allOk;
+  ok('every media segment appends', allOk);
+  ok('buffered covers the clip', sb.buffered.length === 1 && sb.buffered.start(0) < 0.2 && sb.buffered.end(0) > 1.8, sb.buffered.length ? [sb.buffered.start(0), sb.buffered.end(0)] : 'empty');
+  ok('the element reports the same', v.buffered.length === 1 && v.buffered.end(0) > 1.8);
+  ok('enough data to play', v.readyState >= 3 || await once(v, 'canplay', 8000), v.readyState);
+  ms.endOfStream();
+  ok('endOfStream ends the source', ms.readyState === 'ended');
+  var playing = once(v, 'playing', 8000);
+  try { await v.play(); } catch (e) { ok('play()', false, e.name + ': ' + e.message); }
+  ok('playing', await playing && !v.paused);
+  await wait(900);
+  ok('time advances', v.currentTime > 0.4, v.currentTime);
+  ok('a decoded frame can be drawn', frameDrawn(v));
+  ok('the clip ends', v.ended || await once(v, 'ended', 8000), [v.currentTime, v.ended]);
+  ok('currentTime is at the end', Math.abs(v.currentTime - 2) < 0.2, v.currentTime);
+
+  // ---- Seeking back after the end plays again.
+  var seeked = once(v, 'seeked', 8000);
+  v.currentTime = 0.5;
+  ok('seeking reopens the stream (readyState)', ms.readyState === 'open' || ms.readyState === 'ended');
+  ok('seeked fires', await seeked);
+  ok('currentTime is where the seek went', Math.abs(v.currentTime - 0.5) < 0.3, v.currentTime);
+  var p2 = once(v, 'playing', 8000); try { await v.play(); } catch (e) {}
+  await p2;
+  ok('plays on after the seek and ends', v.ended || await once(v, 'ended', 8000), [v.currentTime, v.ended]);
+
+  // ---- timestampOffset puts the same clip after itself; remove() takes a part out.
+  ms.endOfStream; 
+  if (ms.readyState === 'ended') { sb.timestampOffset = 2; }
+  ok('timestampOffset can be set', sb.timestampOffset === 2, sb.timestampOffset);
+  var more = true; for (var j = 0; j < file.frags.length; j++) more = (await append(sb, file.frags[j])) && more;
+  ok('a second copy appends at the offset', more && sb.buffered.end(sb.buffered.length - 1) > 3.8, sb.buffered.length ? sb.buffered.end(sb.buffered.length - 1) : 'empty');
+  ok('the duration grows to what was buffered', ms.duration > 3.8 || (ms.duration >= 2), ms.duration);
+  sb.timestampOffset = 0;
+  var rm = once(sb, 'updateend', 4000); sb.remove(0, 1);
+  ok('remove() ends with updateend', await rm);
+  ok('what was removed is no longer buffered', sb.buffered.length === 0 || sb.buffered.start(0) >= 0.5, sb.buffered.length ? sb.buffered.start(0) : 'empty');
+  var threw = null; sb.appendBuffer(file.frags[0]); try { sb.appendBuffer(file.frags[1]); } catch (e) { threw = e.name; }
+  ok('appendBuffer while updating throws InvalidStateError', threw === 'InvalidStateError', threw);
+  await once(sb, 'updateend', 4000);
+  var abortOk = false; try { sb.abort(); abortOk = true; } catch (e) {}
+  ok('abort() works on an idle buffer', abortOk);
+
+  // ---- Detaching.
+  var closed = once(ms, 'sourceclose', 4000);
+  v.removeAttribute('src'); v.load();
+  ok('detaching fires sourceclose', await closed);
+  ok('a closed source has no buffers and a NaN duration', ms.readyState === 'closed' && ms.sourceBuffers.length === 0 && isNaN(ms.duration), [ms.readyState, ms.sourceBuffers.length, ms.duration]);
+  URL.revokeObjectURL(o.url);
+
+  // ---- Video and audio in two buffers, as adaptive players do.
+  v = fresh(); o = await open(v); ms = o.ms;
+  var fv = split(await get('v_h264.mp4')), fa = split(await get('a_aac.mp4'));
+  var sv = ms.addSourceBuffer(MP4V), sa = ms.addSourceBuffer(MP4A);
+  ok('two buffers', ms.sourceBuffers.length === 2);
+  var meta2 = once(v, 'loadedmetadata', 8000);
+  await append(sv, fv.init);
+  ok('no metadata until every buffer has its init segment', v.readyState === 0);
+  await append(sa, fa.init);
+  ok('metadata once both have', await meta2 && v.videoWidth === 320);
+  ms.duration = 2;
+  for (var a1 = 0; a1 < fv.frags.length; a1++) await append(sv, fv.frags[a1]);
+  ok('the element is not ready while a track has nothing', v.buffered.length === 0 || v.buffered.end(0) < 2);
+  for (var a2 = 0; a2 < fa.frags.length; a2++) await append(sa, fa.frags[a2]);
+  ms.endOfStream();
+  ok('buffered is what both tracks have', v.buffered.length === 1 && v.buffered.end(0) > 1.8, v.buffered.length ? v.buffered.end(0) : 'empty');
+  var pl = once(v, 'playing', 8000); try { await v.play(); } catch (e) {}
+  ok('plays video and audio from two buffers', await pl);
+  ok('and ends', v.ended || await once(v, 'ended', 8000), v.currentTime);
+
+  // ---- WebM.
+  v = fresh(); o = await open(v); ms = o.ms;
+  var w = await get('av_vp9_opus.webm');
+  var sw = ms.addSourceBuffer(WEBM);
+  var meta3 = once(v, 'loadedmetadata', 8000);
+  var wok = true; for (var k = 0; k < w.length; k += 20000) wok = (await append(sw, w.subarray(k, Math.min(w.length, k + 20000)))) && wok;
+  ok('a WebM appended in small pieces', wok);
+  ok('WebM metadata', await meta3 && v.videoWidth === 320, v.videoWidth);
+  ms.endOfStream();
+  ok('WebM duration from its content', Math.abs(ms.duration - 2) < 0.3, ms.duration);
+  var pw = once(v, 'playing', 8000); try { await v.play(); } catch (e) {}
+  ok('plays WebM', await pw);
+  ok('WebM ends', v.ended || await once(v, 'ended', 8000), v.currentTime);
+
+  // ---- Running out of data: playback stalls and carries on when more arrives.
+  v = fresh(); o = await open(v); ms = o.ms;
+  sb = ms.addSourceBuffer(MP4);
+  await append(sb, file.init); ms.duration = 2;
+  await append(sb, file.frags[0]); await append(sb, file.frags[1]);
+  var have = sb.buffered.length ? sb.buffered.end(0) : 0;
+  var starts = once(v, 'playing', 8000); try { await v.play(); } catch (e) {}
+  await starts;
+  var waiting = await once(v, 'waiting', 8000);
+  ok('the element waits when the data runs out', waiting, [v.currentTime, have]);
+  var t1 = v.currentTime; await wait(700);
+  ok('time stands still while it waits', Math.abs(v.currentTime - t1) < 0.25 && v.currentTime <= have + 0.2, [t1, v.currentTime, have]);
+  for (var m = 2; m < file.frags.length; m++) await append(sb, file.frags[m]);
+  ms.endOfStream();
+  ok('and plays on to the end when more arrives', v.ended || await once(v, 'ended', 10000), [v.currentTime, v.ended]);
+
+  // ---- Errors.
+  v = fresh(); o = await open(v); ms = o.ms;
+  sb = ms.addSourceBuffer(MP4);
+  var bad = new Uint8Array(64); for (var q = 0; q < 64; q++) bad[q] = (q * 37) & 255; bad[3] = 4; bad[4] = 109; bad[5] = 111; bad[6] = 111; bad[7] = 118;
+  var err = once(sb, 'error', 4000), verr = once(v, 'error', 4000);
+  sb.appendBuffer(bad);
+  ok('garbage fires error on the buffer', await err);
+  ok('and fails the element with MEDIA_ERR_DECODE', await verr && v.error && v.error.code === 3, v.error && v.error.code);
+  ok('the source ends', ms.readyState === 'ended', ms.readyState);
+  var t = null; try { ms.addSourceBuffer('video/x-flv'); } catch (e) { t = e.name; }
+  ok('addSourceBuffer refuses an unsupported type', t === 'NotSupportedError', t);
+  t = null; try { new MediaSource().addSourceBuffer(MP4); } catch (e) { t = e.name; }
+  ok('addSourceBuffer on a source that is not open throws InvalidStateError', t === 'InvalidStateError', t);
+ } catch (e) { log('EXCEPTION ' + e + (e && e.stack ? ' ' + e.stack : '')); }
+ document.title = 'DONE';
+})();
+</script>

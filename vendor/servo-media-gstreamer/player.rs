@@ -542,7 +542,13 @@ impl GStreamerPlayer {
 
         // Set player position interval update to 0.5 seconds.
         let mut config = player.config();
-        config.set_position_update_interval(500u32);
+        // Ferrite: a page that supplies its own data (Media Source Extensions) watches the
+        // playhead closely to know when it is about to run out.
+        let interval = match self.stream_type {
+            StreamType::MediaSource(_) => 100u32,
+            _ => 500u32,
+        };
+        config.set_position_update_interval(interval);
         player
             .set_config(config)
             .map_err(|e| PlayerError::Backend(e.to_string()))?;

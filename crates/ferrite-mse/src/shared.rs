@@ -39,6 +39,8 @@ struct Slot {
     /// The track as each initialization segment described it; the last is current.
     infos: Vec<TrackInfo>,
     buf: TrackBuffer,
+    /// Its `SourceBuffer` was removed: nothing reads or waits for it any more.
+    retired: bool,
 }
 
 struct State {
@@ -112,6 +114,7 @@ impl Shared {
         st.slots.push(Slot {
             infos: vec![info],
             buf: TrackBuffer::new(),
+            retired: false,
         });
         self.wake.notify_all();
         st.slots.len() - 1
@@ -156,14 +159,10 @@ impl Shared {
                 return None;
             }
             let ready = st.buffers > 0 && st.initialized >= st.buffers;
-            let all_have_frames =
-                !st.slots.is_empty() && st.slots.iter().all(|s| !s.buf.is_empty());
-            if ready
-                && (all_have_frames || (st.ended && st.slots.iter().any(|s| !s.buf.is_empty())))
-            {
-                return st
-                    .slots
-                    .iter()
+            let live = || st.slots.iter().filter(|s| !s.retired);
+            let all_have_frames = live().next().is_some() && live().all(|s| !s.buf.is_empty());
+            if ready && (all_have_frames || (st.ended && live().any(|s| !s.buf.is_empty()))) {
+                return live()
                     .filter_map(|s| s.buf.buffered().first().map(|r| r.0))
                     .min();
             }
@@ -198,6 +197,33 @@ impl Shared {
         s.infos.get(config as usize).or(s.infos.last()).cloned()
     }
 
+    fn make_room(&self, st: &mut State, incoming: usize) -> Result<(), QuotaExceeded> {
+        let used: usize = st.slots.iter().map(|s| s.buf.bytes()).sum();
+        if used + incoming <= self.quota {
+            return Ok(());
+        }
+        let need = used + incoming - self.quota;
+        let before = st.position - KEEP_BEHIND;
+        let mut freed = 0;
+        for s in st.slots.iter_mut() {
+            freed += s.buf.evict_before(before, need.saturating_sub(freed));
+            if freed >= need {
+                break;
+            }
+        }
+        if freed < need {
+            return Err(QuotaExceeded);
+        }
+        Ok(())
+    }
+
+    /// Makes room for `bytes` more (evicting what was played), or says there is none:
+    /// `appendBuffer` throws `QuotaExceededError` then, before it takes the data.
+    pub fn reserve(&self, bytes: usize) -> Result<(), QuotaExceeded> {
+        let mut st = self.lock();
+        self.make_room(&mut st, bytes)
+    }
+
     /// Adds frames to a track, evicting played data first if the quota needs it.
     pub fn append(&self, slot: usize, mut samples: Vec<Sample>) -> Result<(), QuotaExceeded> {
         let incoming: usize = samples.iter().map(|s| s.data.len()).sum();
@@ -205,21 +231,7 @@ impl Shared {
         if slot >= st.slots.len() {
             return Ok(());
         }
-        let used: usize = st.slots.iter().map(|s| s.buf.bytes()).sum();
-        if used + incoming > self.quota {
-            let need = used + incoming - self.quota;
-            let before = st.position - KEEP_BEHIND;
-            let mut freed = 0;
-            for s in st.slots.iter_mut() {
-                freed += s.buf.evict_before(before, need.saturating_sub(freed));
-                if freed >= need {
-                    break;
-                }
-            }
-            if freed < need {
-                return Err(QuotaExceeded);
-            }
-        }
+        self.make_room(&mut st, incoming)?;
         let config = (st.slots[slot].infos.len() - 1) as u32;
         for s in &mut samples {
             s.config = config;
@@ -239,6 +251,17 @@ impl Shared {
         self.wake.notify_all();
     }
 
+    /// A track whose `SourceBuffer` was removed: its frames go, and nothing reads or
+    /// waits for it from now on.
+    pub fn retire(&self, slot: usize) {
+        let mut st = self.lock();
+        if let Some(s) = st.slots.get_mut(slot) {
+            s.buf = TrackBuffer::new();
+            s.retired = true;
+        }
+        self.wake.notify_all();
+    }
+
     /// One track's buffered ranges.
     pub fn buffered(&self, slot: usize) -> Vec<(i64, i64)> {
         self.lock()
@@ -248,12 +271,28 @@ impl Shared {
             .unwrap_or_default()
     }
 
-    /// What the media element reports as `buffered`: the time every track has. After
-    /// the stream ends, a track that stops short of the longest one counts as reaching
-    /// it.
+    /// What a `SourceBuffer` reports as `buffered`, and the media element with every
+    /// track: the time all of `slots` have. After the stream ends, a track that stops
+    /// short of the longest one counts as reaching it.
+    pub fn buffered_of(&self, slots: &[usize]) -> Vec<(i64, i64)> {
+        let st = self.lock();
+        Self::intersection(&st, slots.iter().copied())
+    }
+
+    /// What the media element reports as `buffered`: the time every track has.
     pub fn buffered_all(&self) -> Vec<(i64, i64)> {
         let st = self.lock();
-        let mut all: Vec<Vec<(i64, i64)>> = st.slots.iter().map(|s| s.buf.buffered()).collect();
+        let live: Vec<usize> = (0..st.slots.len())
+            .filter(|&i| !st.slots[i].retired)
+            .collect();
+        Self::intersection(&st, live.into_iter())
+    }
+
+    fn intersection(st: &State, slots: impl Iterator<Item = usize>) -> Vec<(i64, i64)> {
+        let mut all: Vec<Vec<(i64, i64)>> = slots
+            .filter_map(|i| st.slots.get(i))
+            .map(|s| s.buf.buffered())
+            .collect();
         if all.is_empty() {
             return Vec::new();
         }
@@ -418,7 +457,7 @@ impl TrackHandle {
                     position: st.seek_to,
                 };
             }
-            let Some(slot) = st.slots.get(self.slot) else {
+            let Some(slot) = st.slots.get(self.slot).filter(|s| !s.retired) else {
                 return Next::Closed;
             };
             if let Cursor::Seek(time) = self.cursor
@@ -677,6 +716,36 @@ mod tests {
         assert!(h.stale());
         assert!(matches!(h.next(SHORT), Next::Flush { .. }));
         assert!(!h.stale());
+    }
+
+    #[test]
+    fn a_retired_track_is_left_out_and_stops_its_feeder() {
+        let shared = Shared::new();
+        shared.register_buffer();
+        shared.register_buffer();
+        let v = shared.add_track(info(1, TrackKind::Video));
+        let a = shared.add_track(info(2, TrackKind::Audio));
+        shared.buffer_initialized();
+        shared.buffer_initialized();
+        shared.append(v, run(0, 25, 5)).unwrap();
+        shared.append(a, run(0, 10, 1)).unwrap();
+        assert_eq!(shared.buffered_all(), vec![(0, 400 * MS)]);
+        assert_eq!(shared.buffered_of(&[v]), vec![(0, 1000 * MS)]);
+        let mut h = shared.handle(a);
+        shared.retire(a);
+        assert_eq!(h.next(SHORT), Next::Closed);
+        assert_eq!(shared.buffered_all(), vec![(0, 1000 * MS)]);
+    }
+
+    #[test]
+    fn reserve_makes_room_or_refuses() {
+        let shared = Shared::with_quota(2000);
+        let slot = shared.add_track(info(1, TrackKind::Video));
+        shared.append(slot, run(0, 15, 5)).unwrap(); // 1500 bytes
+        assert!(shared.reserve(400).is_ok());
+        assert_eq!(shared.reserve(1000), Err(QuotaExceeded));
+        shared.set_position(3000 * MS);
+        assert!(shared.reserve(1000).is_ok());
     }
 
     #[test]

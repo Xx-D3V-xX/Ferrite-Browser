@@ -107,6 +107,9 @@ webxr = [
 name = "script"
 path = "lib.rs"
 
+[dependencies.ferrite-mse]
+path = "../../crates/ferrite-mse"
+
 [dependencies.aes]
 version = "0.9"
 features = ["zeroize"]
