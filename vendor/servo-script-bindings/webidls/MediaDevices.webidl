@@ -17,8 +17,26 @@ partial interface Navigator {
 };
 
 partial interface MediaDevices {
-    // MediaTrackSupportedConstraints getSupportedConstraints();
+    MediaTrackSupportedConstraints getSupportedConstraints();
     Promise<MediaStream> getUserMedia(optional MediaStreamConstraints constraints = {});
+};
+
+// Ferrite: https://w3c.github.io/mediacapture-screen-share/
+partial interface MediaDevices {
+    Promise<MediaStream> getDisplayMedia(optional DisplayMediaStreamOptions options = {});
+};
+
+dictionary DisplayMediaStreamOptions {
+    (boolean or MediaTrackConstraints) video = true;
+    (boolean or MediaTrackConstraints) audio = false;
+};
+
+dictionary MediaTrackSupportedConstraints {
+    boolean width = true;
+    boolean height = true;
+    boolean aspectRatio = true;
+    boolean frameRate = true;
+    boolean sampleRate = true;
 };
 
 

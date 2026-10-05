@@ -1187,6 +1187,35 @@ mod tests {
         .unwrap()
     }
 
+    /// A page's request for the camera, the microphone or the screen is answered by the
+    /// person, on the browser's own card, and by no one else (see
+    /// `ferrite_servo::permissions`). The agent has no action that answers it, grants
+    /// one, or starts a capture, so an injected instruction to "allow the camera"
+    /// cannot even be expressed as a step: every such name fails to parse.
+    #[test]
+    fn the_agent_has_no_action_that_answers_or_grants_a_permission() {
+        for name in [
+            "answer_permission",
+            "allow_permission",
+            "grant_permission",
+            "accept_permission",
+            "allow_camera",
+            "allow_microphone",
+            "allow_screen_share",
+            "share_screen",
+            "start_capture",
+            "get_user_media",
+            "accept_prompt",
+            "browser_permission",
+        ] {
+            let json = format!(r#"{{"action":"{name}"}}"#);
+            assert!(
+                serde_json::from_str::<AgentAction>(&json).is_err(),
+                "`{name}` must not be an action the agent can take"
+            );
+        }
+    }
+
     #[tokio::test]
     async fn the_loop_stops_when_the_model_finishes() {
         let provider = MockProvider::new()

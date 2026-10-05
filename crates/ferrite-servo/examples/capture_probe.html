@@ -1,0 +1,59 @@
+<!doctype html><meta charset=utf-8><title>capture</title>
+<body style="margin:0"><video id=v muted playsinline width=320 height=240></video>
+<script>
+window.__r = null;
+function done(v){ window.__r = String(typeof v === 'string' ? v : JSON.stringify(v)).replace(/["\\]/g, ''); }
+function name(p){ return p.then(function(){ return 'granted'; }, function(e){ return e.name; }); }
+var held = {};
+async function s1(){ done(await name(navigator.mediaDevices.getUserMedia({audio: true, video: true}))); }
+async function s2(){
+  var st = await navigator.mediaDevices.getUserMedia({audio: true, video: true});
+  held.st = st;
+  var v = document.getElementById('v'); v.srcObject = st; v.play().catch(function(){});
+  await new Promise(function(r){ setTimeout(r, 2500); });
+  var vt = st.getVideoTracks()[0], at = st.getAudioTracks()[0], set = vt.getSettings();
+  done({kinds: st.getTracks().map(function(t){ return t.kind + ':' + t.label + ':' + t.readyState + ':' + t.enabled; }),
+        settings: [set.width, set.height], active: st.active, idLen: st.id.length,
+        videoWidth: v.videoWidth, videoTime: v.currentTime});
+}
+async function s3(){
+  var st = held.st, vt = st.getVideoTracks()[0], at = st.getAudioTracks()[0];
+  vt.enabled = false; var disabled = vt.enabled === false && vt.readyState === 'live';
+  var clone = vt.clone(); vt.stop();
+  var cloneLive = clone.readyState === 'live' && vt.readyState === 'ended'; // the clone still holds the device
+  clone.stop(); at.stop();
+  done({disabled: disabled, cloneLive: cloneLive, ended: [vt, clone, at].every(function(t){ return t.readyState === 'ended'; }), active: st.active});
+}
+async function s4(){ var st = await navigator.mediaDevices.getUserMedia({audio: true}); st.getTracks().forEach(function(t){ t.stop(); }); done('granted'); }
+async function s5(){ done(await name(navigator.mediaDevices.getUserMedia({audio: true}).then(function(st){ st.getTracks().forEach(function(t){ t.stop(); }); }))); }
+async function s6(){ done(await name(navigator.mediaDevices.getUserMedia({audio: true}))); }
+async function s7(){
+  var st = await navigator.mediaDevices.getDisplayMedia({video: true});
+  held.screen = st; var t = st.getVideoTracks()[0];
+  held.ended = false; t.onended = function(){ held.ended = true; };
+  done({n: st.getTracks().length, label: t.label, surface: t.getSettings().displaySurface, kind: t.kind});
+}
+async function s12(){
+  var v = document.getElementById('v'); v.srcObject = held.screen; v.play().catch(function(){});
+  await new Promise(function(r){ setTimeout(r, 3000); });
+  done({w: v.videoWidth, h: v.videoHeight, playing: v.currentTime > 0});
+}
+async function s8(){ var t = held.screen.getVideoTracks()[0]; await new Promise(function(r){ setTimeout(r, 300); }); done({state: t.readyState, ended: held.ended, active: held.screen.active}); }
+async function s9(){ done(await name(navigator.mediaDevices.getDisplayMedia({video: true}))); }
+async function s10(){
+  var sc = navigator.mediaDevices.getSupportedConstraints();
+  var devs = await navigator.mediaDevices.enumerateDevices();
+  var tp = await name(navigator.mediaDevices.getUserMedia({}));
+  done({width: sc.width, frameRate: sc.frameRate, isArray: Array.isArray(devs), emptyConstraints: tp});
+}
+async function s11(){
+  'use strict';
+  var out = {};
+  try { Object.defineProperty(MediaDevices.prototype, 'getUserMedia', {value: function(){}}); out.redefine = 'allowed'; } catch (e) { out.redefine = 'refused'; }
+  try { delete window.__ferriteCapture; } catch (e) {}
+  out.hook = typeof window.__ferriteCapture === 'object';
+  var st = await navigator.mediaDevices.getUserMedia({video: true});
+  held.cam = st; out.live = st.getTracks().length;
+  done(out);
+}
+</script>

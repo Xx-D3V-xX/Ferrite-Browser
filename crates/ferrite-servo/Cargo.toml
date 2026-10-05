@@ -26,6 +26,8 @@ log = { workspace = true }
 # fails to compile.
 rustls = { workspace = true }
 url = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
 
 # Optional — only resolved when the `servo` feature is enabled.
 # The crates.io package `servo`; Rust imports use `use servo::...`.
@@ -50,4 +52,8 @@ png = "0.17"
 
 [[example]]
 name = "media_probe"
+required-features = ["media"]
+
+[[example]]
+name = "capture_probe"
 required-features = ["media"]

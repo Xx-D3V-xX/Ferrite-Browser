@@ -24,6 +24,10 @@ pub(crate) struct TabDiag {
     pub log: TabLog,
     pub control: Option<PendingControl>,
     pub crash: Option<CrashState>,
+    /// A camera, microphone or screen request the page is waiting on.
+    pub permission: Option<ferrite_servo::permissions::PermissionPrompt>,
+    /// What the page has live: camera, microphone, screen.
+    pub capture: (bool, bool, bool),
 }
 
 /// Empties every session's queues into the tabs' logs; shows crashes and page
@@ -37,6 +41,7 @@ pub(crate) fn drain_all(state: &mut FerriteBrowser) -> Task<FerriteBrowserMessag
     }
 
     let active = state.active_tab;
+    let agent_running = state.agent_is_running;
     let preserve = state.devtools.preserve;
     let area = state.content_area_size.get();
     let mut mirrored = 0usize;
@@ -80,6 +85,20 @@ pub(crate) fn drain_all(state: &mut FerriteBrowser) -> Task<FerriteBrowserMessag
             crate::wake_flag(&mut state.busy_ticks);
         }
 
+        // The agent's presence is told to the engine side every tick, so a request
+        // that arrives while it works is marked and a standing "allow" is not used.
+        session.set_agent_active(agent_running);
+        let prompt = session.permission_prompt();
+        if diag.permission != prompt {
+            diag.permission = prompt;
+            crate::wake_flag(&mut state.busy_ticks);
+        }
+        let capture = session.capture_active();
+        if diag.capture != capture {
+            diag.capture = capture;
+            crate::wake_flag(&mut state.busy_ticks);
+        }
+
         let engine_control = session.page_control();
         if controls::differs(diag.control.as_ref(), engine_control.as_ref()) {
             diag.control = engine_control.map(|control| {
@@ -91,6 +110,13 @@ pub(crate) fn drain_all(state: &mut FerriteBrowser) -> Task<FerriteBrowserMessag
                 pending
             });
             crate::wake_flag(&mut state.busy_ticks);
+        }
+    }
+    // An agent step held back by a request waiting on the person goes on once there is
+    // none (answered, or the page moved on).
+    if state.deferred_agent_step.is_some() && crate::permission::active_prompt(state).is_none() {
+        if let Some(step) = state.deferred_agent_step.take() {
+            tasks.push(Task::done(step));
         }
     }
     if skipped > 0 {

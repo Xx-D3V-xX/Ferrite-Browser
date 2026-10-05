@@ -523,22 +523,65 @@
   installPopoverStyles();
 })();
 
-// Capture stays refused, whatever the engine offers. With a media backend built in the
-// engine has `navigator.mediaDevices` of its own and would hand out the camera or the
-// microphone without asking the user (it has no permission prompt for them), so
-// `getUserMedia` and `getDisplayMedia` are replaced by an answer of "not allowed" and
-// `enumerateDevices` lists nothing (device names are an identifier). The stand-in above
-// does the same when the engine has none.
+// Capture bookkeeping. `getUserMedia` and `getDisplayMedia` are the engine's own (the
+// person is asked before either does anything, see `permissions.rs`); this records the
+// tracks they hand out so the browser can show that a page is capturing and end it
+// ("stop sharing"), which the engine has no way to tell the embedder. The wrappers
+// replace the engine's methods on the prototype and cannot be reconfigured by the page,
+// and `window.__ferriteCapture` cannot be removed or replaced, so a page cannot make a
+// live capture look idle. (A page can of course stop its own tracks, which is what
+// ends them.)
 (function () {
   'use strict';
-  if (typeof navigator === 'undefined' || !navigator.mediaDevices || navigator.mediaDevices.__ferriteGuarded) return;
-  var md = navigator.mediaDevices;
-  function refuse() { return Promise.reject(new DOMException('Permission denied', 'NotAllowedError')); }
-  try {
-    Object.defineProperty(md, 'getUserMedia', { value: refuse, configurable: true, writable: true });
-    Object.defineProperty(md, 'getDisplayMedia', { value: refuse, configurable: true, writable: true });
-    Object.defineProperty(md, 'enumerateDevices', { value: function () { return Promise.resolve([]); }, configurable: true, writable: true });
-    Object.defineProperty(md, '__ferriteGuarded', { value: true });
-  } catch (e) { /* a frozen object: nothing more can be done from here */ }
-  if (typeof navigator.getUserMedia === 'function') navigator.getUserMedia = function (c, ok, fail) { if (fail) fail(new DOMException('Permission denied', 'NotAllowedError')); };
+  if (typeof MediaDevices === 'undefined' || typeof MediaStreamTrack === 'undefined') return;
+  var proto = MediaDevices.prototype;
+  if (typeof proto.getUserMedia !== 'function' || window.__ferriteCapture) return;
+  var live = []; // { track, source }
+  function register(track, source) {
+    live.push({ track: track, source: source });
+  }
+  function prune() {
+    live = live.filter(function (e) { return e.track.readyState !== 'ended'; });
+  }
+  function wrap(name, sourceOf) {
+    var original = proto[name];
+    if (typeof original !== 'function') return;
+    var wrapped = function () {
+      var promise = original.apply(this, arguments);
+      promise.then(function (stream) {
+        stream.getTracks().forEach(function (t) { register(t, sourceOf(t)); });
+      }, function () { /* refused: nothing to track */ });
+      return promise;
+    };
+    Object.defineProperty(proto, name, { value: wrapped, writable: false, configurable: false, enumerable: true });
+  }
+  wrap('getUserMedia', function (t) { return t.kind === 'video' ? 'camera' : 'microphone'; });
+  wrap('getDisplayMedia', function () { return 'screen'; });
+  var cloneOf = MediaStreamTrack.prototype.clone;
+  Object.defineProperty(MediaStreamTrack.prototype, 'clone', {
+    value: function clone() {
+      var copy = cloneOf.apply(this, arguments);
+      for (var i = 0; i < live.length; i++) if (live[i].track === this) { register(copy, live[i].source); break; }
+      return copy;
+    }, writable: false, configurable: false, enumerable: true
+  });
+  var api = {
+    // Bit 1 camera, 2 microphone, 4 screen: what is live right now.
+    bits: function () {
+      prune();
+      var b = 0;
+      live.forEach(function (e) { b |= e.source === 'camera' ? 1 : e.source === 'microphone' ? 2 : 4; });
+      return b;
+    },
+    // End every capture: stop the tracks and tell the page, as when a person ends a
+    // share from the browser's own bar.
+    stopAll: function () {
+      var all = live; live = [];
+      all.forEach(function (e) {
+        try { e.track.stop(); } catch (err) { /* already gone */ }
+        try { e.track.dispatchEvent(new Event('ended')); } catch (err) { /* nobody listening */ }
+      });
+    }
+  };
+  Object.defineProperty(window, '__ferriteCapture', { value: Object.freeze(api), writable: false, configurable: false, enumerable: false });
 })();

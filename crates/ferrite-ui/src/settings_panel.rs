@@ -85,6 +85,8 @@ pub enum SettingsMessage {
     Save,
     /// A browser identity was chosen (see the `identity` module).
     SetIdentity(BrowserIdentity),
+    /// Forget a remembered camera, microphone or screen decision for a site.
+    ForgetSitePermission(String, ferrite_servo::permissions::CapabilityKind),
 }
 
 impl std::fmt::Debug for SettingsMessage {
@@ -109,6 +111,7 @@ impl std::fmt::Debug for SettingsMessage {
             Self::RemoveKey => f.write_str("RemoveKey"),
             Self::Save => f.write_str("Save"),
             Self::SetIdentity(i) => write!(f, "SetIdentity({i:?})"),
+            Self::ForgetSitePermission(o, k) => write!(f, "ForgetSitePermission({o:?}, {k:?})"),
         }
     }
 }
@@ -472,6 +475,9 @@ fn start_loading(state: &mut FerriteBrowser) {
 /// Applies one drawer message.
 pub(crate) fn update(state: &mut FerriteBrowser, message: SettingsMessage) {
     match message {
+        SettingsMessage::ForgetSitePermission(origin, kind) => {
+            ferrite_servo::session::forget_site_permission(&origin, kind);
+        }
         SettingsMessage::SelectProvider(choice) => {
             let s = &mut state.settings;
             s.draft.provider = Some(choice);
@@ -921,6 +927,7 @@ pub(crate) fn view(state: &FerriteBrowser) -> Element<'_, FerriteBrowserMessage>
         model_card(state, palette),
         appearance_card(state, palette),
         identity_card(state, palette),
+        site_permissions_card(palette),
         footer(state, palette),
     ]
     .spacing(12)
@@ -1353,6 +1360,59 @@ fn identity_card<'a>(
             column(rows).spacing(6).into(),
             hint(palette, "Applies the next time you open Ferrite."),
         ],
+    )
+}
+
+/// The camera, microphone and screen decisions Ferrite remembers, one row each, with a
+/// button to forget it. (Screen sharing is never remembered as allowed, so only blocks
+/// show for it.)
+fn site_permissions_card(palette: &'static Palette) -> Element<'static, FerriteBrowserMessage> {
+    use ferrite_servo::permissions::Remembered;
+    let entries = ferrite_servo::session::site_permissions();
+    let rows: Vec<Element<FerriteBrowserMessage>> = if entries.is_empty() {
+        vec![hint(
+            palette,
+            "None yet. When a site asks for your camera, microphone or screen you are asked, \
+             and \"Always allow\" or a kept \"Block\" appears here.",
+        )]
+    } else {
+        entries
+            .into_iter()
+            .map(|(origin, kind, decision)| {
+                let verdict = match decision {
+                    Remembered::Allow => "allowed",
+                    Remembered::Block => "blocked",
+                };
+                row![
+                    column![
+                        text(origin.clone())
+                            .size(13)
+                            .color(palette.text)
+                            .wrapping(iced::widget::text::Wrapping::None),
+                        text(format!("{}: {verdict}", kind.name()))
+                            .size(HINT_SIZE)
+                            .color(palette.text_dim),
+                    ]
+                    .spacing(2)
+                    .width(Length::Fill),
+                    button(text("Forget").size(12))
+                        .padding([4, 10])
+                        .style(crate::tokens::outline_btn_style)
+                        .on_press(FerriteBrowserMessage::Settings(
+                            SettingsMessage::ForgetSitePermission(origin, kind),
+                        )),
+                ]
+                .spacing(8)
+                .align_y(iced::Alignment::Center)
+                .into()
+            })
+            .collect()
+    };
+    card(
+        palette,
+        "Site permissions",
+        "What sites may use on your computer. A permission you gave a site is not used while the AI agent is working in the tab.",
+        vec![column(rows).spacing(8).into()],
     )
 }
 

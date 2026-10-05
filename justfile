@@ -128,6 +128,14 @@ build-servo:
 run-media *ARGS:
     cargo run -p ferrite-shell --features ferrite-servo/servo,ferrite-servo/media -- ui {{ARGS}}
 
+# Checks the whole of "a page asks for the camera, microphone or screen": the prompt, the
+# answers, remembered decisions (and that the agent's presence stops them being used),
+# `stop()`, the browser's "stop sharing", and that a page cannot hide a live capture.
+# Uses the engine's test sources for the camera and microphone. Needs GStreamer.
+# Check camera, microphone and screen sharing in the real engine (needs GStreamer).
+probe-capture:
+    cargo run -p ferrite-servo --features servo,media --example capture_probe
+
 # Plays a WebM video and an Ogg file, draws a decoded frame, opens a WebRTC data channel
 # between two peers and checks that camera, microphone and screen capture are refused.
 # Needs the real Servo build with GStreamer.

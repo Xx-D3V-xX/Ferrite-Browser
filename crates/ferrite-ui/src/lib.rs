@@ -231,6 +231,7 @@ mod lifecycle;
 mod markdown;
 mod page_input;
 mod pages;
+mod permission;
 mod runtime_guard;
 mod scroll;
 mod settings_panel;
@@ -1742,6 +1743,11 @@ pub struct FerriteBrowser {
     /// sign-in or another secret): the run is stopped before any model call and
     /// the agent panel shows a card with *Continue*. See `signin`.
     pub signin_handoff: Option<signin::SignInWall>,
+    /// An agent step that came in while a camera, microphone or screen request was
+    /// waiting on the person. It is held (the loop stays as it was) and sent again once
+    /// the request is answered or gone: the agent does not act on a page that is asking
+    /// for something on the person's machine until the person has decided.
+    pub deferred_agent_step: Option<FerriteBrowserMessage>,
     /// An action the guard stopped, put to the person. The run waits here;
     /// nothing outside the prediction runs until they say so. See
     /// `PendingRuntimeConsent`.
@@ -1885,6 +1891,7 @@ impl Default for FerriteBrowser {
             show_settings_panel: false,
             settings: settings_panel::SettingsState::default(),
             signin_handoff: None,
+            deferred_agent_step: None,
             pending_runtime: None,
             tile_favicons: vec![None; QUICK_ACCESS_TILES.len()],
             favicons_cache_dir: None,
@@ -1945,6 +1952,9 @@ pub enum FerriteBrowserMessage {
     DevTools(devtools::Msg),
     /// A reply to the control a page is waiting on (see `controls`).
     Control(controls::Msg),
+    /// The answer to a camera, microphone or screen request, or "Stop sharing"
+    /// (see `permission`).
+    Permission(permission::Msg),
     /// The page-crash banner's buttons (see `crash`).
     Crash(crash::Msg),
     /// A press, move or release on a panel splitter (see `layout`).
@@ -2435,7 +2445,12 @@ pub fn update(
             // that function's own doc comment), so both cases route through
             // this one `EscapePressed` message and are told apart here,
             // where `state` is actually available.
-            if controls::active_control(state).is_some() {
+            if let Some(prompt) = permission::active_prompt(state) {
+                // A request for the camera, microphone or screen is on top of
+                // everything; Escape is "block this time".
+                let answer = permission::choice(prompt, false, false);
+                return permission::update(state, permission::Msg::Answer(answer));
+            } else if controls::active_control(state).is_some() {
                 // A control the page is waiting on is the topmost thing there
                 // is; Escape is "dismiss" (cancel, for a dialog).
                 return controls::update(state, controls::Msg::Dismiss);
@@ -2482,6 +2497,7 @@ pub fn update(
         }
         FerriteBrowserMessage::DevTools(msg) => return devtools::update(state, msg),
         FerriteBrowserMessage::Control(msg) => return controls::update(state, msg),
+        FerriteBrowserMessage::Permission(msg) => return permission::update(state, msg),
         FerriteBrowserMessage::Crash(msg) => return crash::update(state, msg),
         FerriteBrowserMessage::Panels(msg) => layout::update(state, msg),
         FerriteBrowserMessage::WindowResized(size) => {
@@ -2533,8 +2549,12 @@ pub fn update(
             }
         }
         FerriteBrowserMessage::PageKey(event) => {
-            // A control the page is waiting on takes the keyboard; the page
-            // gets none of it until the control is answered.
+            // A request for the camera, microphone or screen takes the keyboard (the
+            // page must not be able to type at, or click through, a card meant for the
+            // person); so does a control the page is waiting on.
+            if permission::active_prompt(state).is_some() {
+                return iced::Task::none();
+            }
             if controls::active_control(state).is_some() {
                 return controls::on_page_key(state, &event);
             }
@@ -3736,6 +3756,21 @@ fn handle_agent_step(
     fast: Option<(FastAction, HistoryItem)>,
 ) -> Task<FerriteBrowserMessage> {
     if run_id != state.run_id {
+        return Task::none();
+    }
+    // Rule: the agent does not act while the page's request for the camera, the
+    // microphone or the screen waits on the person. Hold the step; `tab_diag` sends it
+    // again when the request is answered or withdrawn.
+    if permission::active_prompt(state).is_some() {
+        state.deferred_agent_step = Some(match (fast, action) {
+            (Some((fast, history)), Ok(action)) => FerriteBrowserMessage::FastStepReady {
+                run_id,
+                action,
+                fast,
+                history,
+            },
+            (_, action) => FerriteBrowserMessage::AgentStepReady { run_id, action },
+        });
         return Task::none();
     }
     let Some(mut live) = state.live_loop.take() else {
@@ -6097,6 +6132,10 @@ pub fn view(state: &FerriteBrowser) -> Element<'_, FerriteBrowserMessage> {
         let mut layers = vec![page];
         layers.extend(controls::overlay(state, size));
         layers.extend(crash::banner(state));
+        // The "this page is capturing" bar, and (on top of everything) a request the
+        // page is waiting on a person for.
+        layers.extend(permission::bar(state));
+        layers.extend(permission::overlay(state));
         if layers.len() == 1 {
             layers.remove(0)
         } else {
@@ -6285,7 +6324,7 @@ fn page_key_target(state: &FerriteBrowser) -> Option<&HeadlessServoSession> {
     if state.address_bar_focused || state.show_find_bar || state.devtools.input_focused {
         return None;
     }
-    if controls::active_control(state).is_some() {
+    if controls::active_control(state).is_some() || permission::active_prompt(state).is_some() {
         return None;
     }
     let showing_page = state
@@ -6437,7 +6476,9 @@ fn wake_flag(busy_ticks: &mut u8) {
 /// control it is waiting on is showing, or a panel is being dragged (the pointer
 /// belongs to the splitter, and a release over the page must not click it).
 fn page_input_blocked(state: &FerriteBrowser) -> bool {
-    state.panels.drag.is_some() || controls::active_control(state).is_some()
+    state.panels.drag.is_some()
+        || controls::active_control(state).is_some()
+        || permission::active_prompt(state).is_some()
 }
 
 /// A cheap fingerprint of a favicon, to tell a new icon from the same one

@@ -181,3 +181,6 @@ servo-webgl = { path = "vendor/servo-webgl" }
 servo-layout = { path = "vendor/servo-layout" }
 servo-storage = { path = "vendor/servo-storage" }
 servo-storage-traits = { path = "vendor/servo-storage-traits" }
+servo-embedder-traits = { path = "vendor/servo-embedder-traits" }
+servo-media-streams = { path = "vendor/servo-media-streams" }
+servo-media-gstreamer = { path = "vendor/servo-media-gstreamer" }

@@ -531,6 +531,37 @@ fn apply_style_prefs() {
     stylo_static_prefs::set_pref!("layout.css.at-scope.enabled", true);
 }
 
+/// Remembered site permissions, shared by every tab of the process and kept in the
+/// profile directory (`site-permissions.json`).
+static SITE_PERMISSIONS: std::sync::LazyLock<
+    std::sync::Mutex<crate::permissions::PermissionStore>,
+> = std::sync::LazyLock::new(|| {
+    std::sync::Mutex::new(match profile_dir() {
+        Some(dir) => crate::permissions::PermissionStore::load(dir.join("site-permissions.json")),
+        None => crate::permissions::PermissionStore::in_memory(),
+    })
+});
+
+/// Every remembered site permission, for the settings list.
+pub fn site_permissions() -> Vec<(
+    String,
+    crate::permissions::CapabilityKind,
+    crate::permissions::Remembered,
+)> {
+    SITE_PERMISSIONS
+        .lock()
+        .map(|store| store.entries())
+        .unwrap_or_default()
+}
+
+/// Forget one remembered decision; returns whether there was one.
+pub fn forget_site_permission(origin: &str, kind: crate::permissions::CapabilityKind) -> bool {
+    SITE_PERMISSIONS
+        .lock()
+        .map(|mut store| store.forget(origin, kind))
+        .unwrap_or(false)
+}
+
 /// The Cache API (`caches`), built on IndexedDB; see the script's own header.
 #[cfg(feature = "servo")]
 const STORAGE_COMPAT_JS: &str = include_str!("storage_compat.js");
@@ -947,6 +978,16 @@ mod inner {
     /// Latest favicon (width, height, RGBA8) shared between Servo's delegate and the session.
     type SharedFavicon = Rc<std::cell::RefCell<Option<(u32, u32, Vec<u8>)>>>;
 
+    /// The permission request(s) a page is waiting on a person for. Dropping a
+    /// request unanswered refuses it, so a navigation that clears this slot is a "no".
+    struct PendingPermission {
+        origin: String,
+        agent_active: bool,
+        requests: Vec<(crate::permissions::CapabilityKind, servo::PermissionRequest)>,
+    }
+
+    type SharedPermission = Rc<std::cell::RefCell<Option<PendingPermission>>>;
+
     /// What the engine is waiting on a person for, with a plain-data view of
     /// it for the UI.
     type SharedControl =
@@ -1143,19 +1184,71 @@ mod inner {
         /// arrives and does not carry it to the next page loaded in the same tab,
         /// so a background tab that navigates must be told again.
         throttle: Rc<std::cell::Cell<Option<bool>>>,
+        /// A camera, microphone or screen request waiting for the person.
+        permission: SharedPermission,
+        /// Whether the AI agent is working in this tab (set by the UI).
+        agent_active: Rc<std::cell::Cell<bool>>,
+    }
+
+    /// The kind of access a request is for, if it is one a person is asked about.
+    fn capability_of(
+        feature: servo::PermissionFeature,
+    ) -> Option<crate::permissions::CapabilityKind> {
+        use crate::permissions::CapabilityKind as K;
+        match feature {
+            servo::PermissionFeature::Camera => Some(K::Camera),
+            servo::PermissionFeature::Microphone => Some(K::Microphone),
+            servo::PermissionFeature::ScreenCapture => Some(K::Screen),
+            _ => None,
+        }
+    }
+
+    impl HeadlessDelegate {
+        /// One audit entry per decision about a capture request: who asked, what for,
+        /// whether it was allowed, and whether the agent was working at the time.
+        fn audit_permission(
+            &self,
+            kind: crate::permissions::CapabilityKind,
+            origin: &str,
+            allowed: bool,
+            agent_active: bool,
+            how: &str,
+        ) {
+            let capability = format!(
+                "capture.{}{}{}",
+                kind.name(),
+                if agent_active { ".agent-active" } else { "" },
+                if how == "remembered" {
+                    ".remembered"
+                } else {
+                    ""
+                }
+            );
+            let kind = if allowed {
+                AuditEventKind::CapabilityGranted
+            } else {
+                AuditEventKind::CapabilityDenied
+            };
+            if let Err(e) = self.audit_log.borrow_mut().append(
+                kind,
+                uuid::Uuid::new_v4(),
+                Some(capability),
+                Some(origin.to_string()),
+            ) {
+                eprintln!("[ferrite-session] audit write error: {e}");
+            }
+        }
     }
 
     impl WebViewDelegate for HeadlessDelegate {
-        /// Ferrite has no permission prompt yet, so every request Servo
-        /// forwards (notifications, persistent storage, ...) is refused outright
-        /// rather than left unanswered. The one exception is the screen wake lock:
-        /// it exposes nothing about the user and costs nothing, so a page that
-        /// asks (Speedometer, video players) gets it instead of an error in its
-        /// console. The engine's wake-lock backend does nothing on the operating
-        /// system, so granting it does not actually keep the screen awake.
-        /// Servo does not forward geolocation or getUserMedia here at all, which
-        /// is why those stay switched off (docs/TO-DO.md T-265).
-        fn request_permission(&self, _webview: servo::WebView, request: servo::PermissionRequest) {
+        /// A page asks for something on the person's machine. The screen wake lock is
+        /// granted (it exposes nothing). The camera, the microphone and the screen go
+        /// through `crate::permissions::decide`: refused, allowed, or put to the
+        /// person as a prompt that only the browser's own interface answers. Everything
+        /// else the engine forwards (location, push, MIDI, Bluetooth, ...) is refused
+        /// because nothing in Ferrite backs it.
+        fn request_permission(&self, webview: servo::WebView, request: servo::PermissionRequest) {
+            use crate::permissions::Verdict;
             if matches!(
                 request.feature(),
                 servo::PermissionFeature::ScreenWakeLock(_)
@@ -1163,11 +1256,53 @@ mod inner {
                 request.allow();
                 return;
             }
-            eprintln!(
-                "[ferrite-session] denied permission request: {:?}",
-                request.feature()
-            );
-            request.deny();
+            let Some(kind) = capability_of(request.feature()) else {
+                eprintln!(
+                    "[ferrite-session] denied permission request: {:?}",
+                    request.feature()
+                );
+                request.deny();
+                return;
+            };
+            let url = webview.url().map(|u| u.to_string()).unwrap_or_default();
+            let origin = crate::permissions::origin_of(&url);
+            let agent_active = self.agent_active.get();
+            let verdict = match super::SITE_PERMISSIONS.lock() {
+                Ok(store) => {
+                    crate::permissions::decide(&store, origin.as_deref(), kind, agent_active)
+                }
+                Err(_) => Verdict::Ask,
+            };
+            let shown = origin.clone().unwrap_or_else(|| url.clone());
+            match verdict {
+                Verdict::Allow => {
+                    self.audit_permission(kind, &shown, true, agent_active, "remembered");
+                    request.allow();
+                }
+                Verdict::Deny => {
+                    self.audit_permission(kind, &shown, false, agent_active, "remembered");
+                    request.deny();
+                }
+                Verdict::Ask => {
+                    let mut slot = self.permission.borrow_mut();
+                    match slot.as_mut() {
+                        // The same page asking for more (the camera, then the
+                        // microphone): one card for the lot.
+                        Some(pending) if pending.origin == shown => {
+                            pending.agent_active |= agent_active;
+                            pending.requests.push((kind, request));
+                        }
+                        // A different page: the older prompt is dropped, which refuses it.
+                        _ => {
+                            *slot = Some(PendingPermission {
+                                origin: shown,
+                                agent_active,
+                                requests: vec![(kind, request)],
+                            });
+                        }
+                    }
+                }
+            }
         }
 
         /// A `<select>`, an `alert()`/`confirm()`/`prompt()`, a file or colour
@@ -1224,6 +1359,10 @@ mod inner {
                     .url()
                     .map_or_else(|| "<unknown>".to_string(), |u| u.to_string())
             );
+            // A prompt belongs to the page that asked: a new page refuses it.
+            if status == servo::LoadStatus::Started {
+                self.permission.borrow_mut().take();
+            }
             // A new page in a background tab starts un-throttled: tell the engine
             // again now that the page (and its window) exists.
             if status == servo::LoadStatus::HeadParsed && self.throttle.get() == Some(true) {
@@ -1417,6 +1556,15 @@ mod inner {
         probe_answered: Rc<std::cell::Cell<bool>>,
         /// The throttle state last sent to the engine (`None` before the first).
         throttle_sent: Rc<std::cell::Cell<Option<bool>>>,
+        /// A camera, microphone or screen request waiting for the person.
+        shared_permission: SharedPermission,
+        /// Whether the AI agent is working in this tab; read by the delegate.
+        shared_agent_active: Rc<std::cell::Cell<bool>>,
+        /// Which captures the page has live (bit 1 camera, 2 microphone, 4 screen),
+        /// last read from the page, and when a read was last asked for.
+        capture_bits: Rc<std::cell::Cell<u32>>,
+        capture_polled: std::time::Instant,
+        capture_poll_pending: Rc<std::cell::Cell<bool>>,
     }
 
     impl HeadlessServoSession {
@@ -1508,6 +1656,8 @@ mod inner {
             let shared_net_log: Rc<
                 std::cell::RefCell<std::collections::VecDeque<crate::diag::NetEvent>>,
             > = Rc::default();
+            let shared_permission: SharedPermission = Rc::default();
+            let shared_agent_active: Rc<std::cell::Cell<bool>> = Rc::default();
 
             // ── Rendering context ──────────────────────────────────────────
             let rendering_context = make_rendering_context(PhysicalSize { width, height })?;
@@ -1537,6 +1687,8 @@ mod inner {
                 net_log: shared_net_log.clone(),
                 frame_ready: frame_ready.clone(),
                 throttle: throttle_sent.clone(),
+                permission: shared_permission.clone(),
+                agent_active: shared_agent_active.clone(),
             });
             let webview = make(&servo, rendering_context.clone(), delegate);
 
@@ -1572,6 +1724,11 @@ mod inner {
                 script_watch: super::ScriptWatch::default(),
                 probe_answered: Rc::default(),
                 throttle_sent,
+                shared_permission,
+                shared_agent_active,
+                capture_bits: Rc::default(),
+                capture_polled: std::time::Instant::now(),
+                capture_poll_pending: Rc::default(),
             })
         }
 
@@ -1781,6 +1938,7 @@ mod inner {
         pub fn spin(&mut self) {
             self.pump_engine();
             self.sync_and_read();
+            self.poll_capture();
         }
 
         /// Returns `(width, height, rgba_bytes)` of the most recently rendered
@@ -1877,6 +2035,137 @@ mod inner {
         pub fn apply_display_scale(&self) {
             self.webview
                 .set_hidpi_scale_factor(euclid::Scale::new(super::display_scale()));
+        }
+
+        /// Tell the engine side whether the AI agent is working in this tab. While it
+        /// is, a standing "allow" for the camera or microphone is not applied: the
+        /// person is asked (see `crate::permissions`).
+        pub fn set_agent_active(&self, active: bool) {
+            self.shared_agent_active.set(active);
+        }
+
+        /// The camera, microphone or screen request the page is waiting on, if any.
+        pub fn permission_prompt(&self) -> Option<crate::permissions::PermissionPrompt> {
+            let pending = self.shared_permission.borrow();
+            let pending = pending.as_ref()?;
+            let mut kinds: Vec<_> = pending.requests.iter().map(|(k, _)| *k).collect();
+            kinds.sort();
+            kinds.dedup();
+            Some(crate::permissions::PermissionPrompt {
+                origin: pending.origin.clone(),
+                kinds,
+                agent_active: pending.agent_active,
+            })
+        }
+
+        /// The person's answer to [`Self::permission_prompt`].
+        pub fn answer_permission(&mut self, choice: crate::permissions::PermissionChoice) {
+            use crate::permissions::{PermissionChoice as C, Remembered};
+            let Some(pending) = self.shared_permission.borrow_mut().take() else {
+                return;
+            };
+            let (allow, remember) = match choice {
+                C::Allow { remember } => (true, remember),
+                C::Block { remember } => (false, remember),
+            };
+            let origin = crate::permissions::origin_of(&pending.origin);
+            for (kind, request) in pending.requests {
+                // Audited before it takes effect.
+                let capability = format!(
+                    "capture.{}{}.person",
+                    kind.name(),
+                    if pending.agent_active {
+                        ".agent-active"
+                    } else {
+                        ""
+                    }
+                );
+                match shared_audit_log() {
+                    Ok(log) => {
+                        if let Err(e) = log.borrow_mut().append(
+                            if allow {
+                                AuditEventKind::CapabilityGranted
+                            } else {
+                                AuditEventKind::CapabilityDenied
+                            },
+                            uuid::Uuid::new_v4(),
+                            Some(capability),
+                            Some(pending.origin.clone()),
+                        ) {
+                            eprintln!("[ferrite-session] audit write error: {e}");
+                        }
+                    }
+                    Err(e) => eprintln!("[ferrite-session] audit log unavailable: {e}"),
+                }
+                if remember {
+                    if let (Some(origin), Ok(mut store)) =
+                        (origin.as_deref(), super::SITE_PERMISSIONS.lock())
+                    {
+                        store.remember(
+                            origin,
+                            kind,
+                            if allow {
+                                Remembered::Allow
+                            } else {
+                                Remembered::Block
+                            },
+                        );
+                    }
+                }
+                if allow {
+                    request.allow();
+                } else {
+                    request.deny();
+                }
+            }
+        }
+
+        /// Which captures the page has live right now: `(camera, microphone, screen)`.
+        /// Read from the page by `spin`; a page can end its own tracks but cannot
+        /// make this say "none" while they run (the registry is in a script of ours
+        /// that runs before the page's, and cannot be replaced).
+        pub fn capture_active(&self) -> (bool, bool, bool) {
+            let bits = self.capture_bits.get();
+            (bits & 1 != 0, bits & 2 != 0, bits & 4 != 0)
+        }
+
+        /// End every capture the page has (the "stop sharing" button).
+        pub fn stop_capture(&self) {
+            self.webview.evaluate_javascript(
+                "(function(){var c=window.__ferriteCapture;if(c)c.stopAll();})()",
+                |_| {},
+            );
+            self.capture_bits.set(0);
+        }
+
+        /// Ask the page, without waiting, which captures are live. At most once a
+        /// second and never twice at once.
+        fn poll_capture(&mut self) {
+            if self.capture_poll_pending.get()
+                || self.capture_polled.elapsed() < std::time::Duration::from_millis(1000)
+            {
+                return;
+            }
+            self.capture_polled = std::time::Instant::now();
+            self.capture_poll_pending.set(true);
+            let bits = self.capture_bits.clone();
+            let pending = self.capture_poll_pending.clone();
+            self.webview.evaluate_javascript(
+                "(function(){var c=window.__ferriteCapture;return c?c.bits():0;})()",
+                move |res| {
+                    pending.set(false);
+                    if let Ok(value) = res {
+                        // `Number(3.0)`: the page returns a small integer.
+                        let text = format!("{value:?}");
+                        let number = text
+                            .trim_start_matches("Number(")
+                            .trim_end_matches(')')
+                            .parse::<f64>()
+                            .unwrap_or(0.0);
+                        bits.set((number as u32) & 7);
+                    }
+                },
+            );
         }
 
         /// What the page is waiting on a person for, if anything.
@@ -2393,6 +2682,20 @@ impl HeadlessServoSession {
     }
 
     pub fn answer_control(&mut self, _answer: crate::diag::ControlAnswer) {}
+
+    pub fn set_agent_active(&self, _active: bool) {}
+
+    pub fn permission_prompt(&self) -> Option<crate::permissions::PermissionPrompt> {
+        None
+    }
+
+    pub fn answer_permission(&mut self, _choice: crate::permissions::PermissionChoice) {}
+
+    pub fn capture_active(&self) -> (bool, bool, bool) {
+        (false, false, false)
+    }
+
+    pub fn stop_capture(&self) {}
 
     pub fn cursor(&self) -> crate::diag::PageCursor {
         crate::diag::PageCursor::Default

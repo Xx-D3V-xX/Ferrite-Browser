@@ -2614,6 +2614,8 @@ dependencies = [
  "png 0.17.16",
  "raw-window-handle",
  "rustls",
+ "serde",
+ "serde_json",
  "servo",
  "stylo_static_prefs",
  "url",
@@ -8509,8 +8511,6 @@ dependencies = [
 [[package]]
 name = "servo-embedder-traits"
 version = "0.6.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "ff19298bdaf1f780acc1236fa90925b3a5fb4b7ff14001a61cfbd1cb18179bba"
 dependencies = [
  "accesskit",
  "bitflags 2.11.0",
@@ -8877,8 +8877,6 @@ dependencies = [
 [[package]]
 name = "servo-media-gstreamer"
 version = "0.6.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "9679ac471256437f71e7fca651ba6f00ff2d0992f99e81cd024c865566996426"
 dependencies = [
  "byte-slice-cast",
  "data-url",
@@ -8988,8 +8986,6 @@ dependencies = [
 [[package]]
 name = "servo-media-streams"
 version = "0.6.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "64705340a14b6b4b5207e1770acc13ec91f4c4335b5bed0709a210803a5b46be"
 dependencies = [
  "malloc_size_of_derive",
  "servo-malloc-size-of",

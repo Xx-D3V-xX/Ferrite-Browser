@@ -159,6 +159,15 @@ jobs:
       - name: Run the media probe
         run: cargo run -p ferrite-servo --features servo,media --example media_probe
 
+      - name: Run the capture probe (camera, microphone, screen sharing)
+        run: cargo run -p ferrite-servo --features servo,media --example capture_probe
+
+      - name: Run the capture probe against a real screen (X11)
+        run: |
+          sudo apt-get install -y --no-install-recommends xvfb
+          FERRITE_PROBE_REAL_SCREEN=1 xvfb-run -a -s "-screen 0 1280x800x24" \
+            cargo run -p ferrite-servo --features servo,media --example capture_probe
+
   build-servo-release:
     name: Build Servo release (${{ matrix.name }})
     runs-on: ${{ matrix.os }}
