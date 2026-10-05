@@ -1109,7 +1109,15 @@ every 2 seconds and never waits for the answer. When the page answers again, an 
 line says after how many seconds. Scrolling and clicking go through the page's script
 thread, so a stuck script freezes them while the page still paints
 (`docs/TO-DO.md` T-306). Tested on Linux with a page that blocks its script for 9
-seconds.
+seconds. **This is how the Google results page freeze was found.** The owner's
+`collect-logs.sh` zip held a 5-second `sample` of the frozen app, and all of it was in
+one script thread inside `layout::query::containing_block_for_node`. The cause was an
+infinite loop in the engine, in the walk that finds an element's containing block: an
+ancestor with no layout box (for example a `display: contents` wrapper) made the loop
+ask for the same parent forever. An IntersectionObserver with an explicit `root` runs
+that walk on every frame. Fixed in `vendor/servo-layout/FERRITE-PATCHES.md`, and
+reproduced and checked with a local test page (`docs/TO-DO.md` T-306). Not yet seen on
+a Mac.
 
 Related engine settings:
 

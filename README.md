@@ -107,7 +107,8 @@ conclusion from the evaluation numbers. In particular:
   it.
 - **Rendering.** Real web pages need the Servo build (`just setup-servo`). The
   default build has no web rendering. The engine is Servo 0.6.0 from crates.io
-  plus one vendored patch of one function (`vendor/servo-script`, ADR-022).
+  plus small fixes in three vendored engine crates (`vendor/servo-script`,
+  `vendor/servo-webgl` and `vendor/servo-layout`, ADR-022).
   Pages use features that Servo lacks (`:has()`, `@container`, `aspect-ratio` on
   blocks, ...). So some sites look wrong (`docs/TO-DO.md` T-264). The address bar
   searches Google. The agent's own search prompt still uses DuckDuckGo Lite.
