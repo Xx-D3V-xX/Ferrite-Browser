@@ -1,5 +1,5 @@
 name: CI
-run-name: CI${{ inputs.only_media && ' (media builds only, no release)' || '' }}
+run-name: CI${{ inputs.only_sites && ' (real-site check; media builds only, no release)' || inputs.only_media && ' (media builds only, no release)' || '' }}
 
 # Manual trigger only — no automatic run on push or pull_request, and no
 # schedule. A project-owner decision (docs/TO-DO.md T-210), not the rebuild's
@@ -17,6 +17,14 @@ on:
         description: "With only_media: run only the two quick bundle smoke tests, not the Servo builds."
         type: boolean
         default: false
+      only_sites:
+        description: "Run only the real-site check: load real websites in the engine and report (never publishes a release)."
+        type: boolean
+        default: false
+      sites:
+        description: "With only_sites: site names from scripts/site-check/sites.txt, space-separated (empty: all)."
+        type: string
+        default: ""
 
 jobs:
   # ─────────────────────────────────────────────────────────────
@@ -27,7 +35,7 @@ jobs:
   ci:
     name: Build, Lint & Test (${{ matrix.name }})
     runs-on: ${{ matrix.os }}
-    if: ${{ !inputs.only_media }}
+    if: ${{ !inputs.only_media && !inputs.only_sites }}
 
     strategy:
       fail-fast: false
@@ -138,7 +146,7 @@ jobs:
     name: Media probe (Linux, GStreamer)
     runs-on: ubuntu-latest
     needs: ci
-    if: ${{ !inputs.only_media }}
+    if: ${{ !inputs.only_media && !inputs.only_sites }}
     continue-on-error: true
 
     steps:
@@ -189,7 +197,7 @@ jobs:
     name: Build Servo release (${{ matrix.name }})
     runs-on: ${{ matrix.os }}
     needs: ci
-    if: ${{ !inputs.only_media }}
+    if: ${{ !inputs.only_media && !inputs.only_sites }}
 
     strategy:
       fail-fast: false
@@ -278,7 +286,7 @@ jobs:
     runs-on: ${{ matrix.os }}
     needs: ci
     # `ci` is skipped in a media-only run; a real failure of it still stops this job.
-    if: ${{ !inputs.only_smoke && !cancelled() && (needs.ci.result == 'success' || needs.ci.result == 'skipped') }}
+    if: ${{ !inputs.only_smoke && !inputs.only_sites && !cancelled() && (needs.ci.result == 'success' || needs.ci.result == 'skipped') }}
     continue-on-error: true
 
     strategy:
@@ -431,6 +439,7 @@ jobs:
   # Mac: nothing may load from it) and with Homebrew moved away.
   bundle-smoke-macos:
     name: GStreamer bundle smoke test (macOS)
+    if: ${{ !inputs.only_sites }}
     runs-on: macos-latest
     continue-on-error: true
 
@@ -507,6 +516,7 @@ jobs:
 
   bundle-smoke-windows:
     name: GStreamer bundle smoke test (Windows)
+    if: ${{ !inputs.only_sites }}
     runs-on: windows-latest
     timeout-minutes: 45
     continue-on-error: true
@@ -592,3 +602,57 @@ jobs:
             if ($LASTEXITCODE -eq 0) { "ok      $el" } else { "MISSING $el"; $missing = $true }
           }
           if ($missing) { throw "the bundle is missing elements" }
+
+  # ─────────────────────────────────────────────────────────────
+  # The real-site check (only with `only_sites`): loads real websites in the
+  # engine and reports, per site, the title, load time, console errors, a crash
+  # and a screenshot. The machines Ferrite is developed on cannot reach the web;
+  # these can. A report, not a gate: it fails only if the loader cannot be built.
+  # ─────────────────────────────────────────────────────────────
+  site-check:
+    name: Real-site check (Linux)
+    runs-on: ubuntu-latest
+    if: ${{ inputs.only_sites }}
+    timeout-minutes: 150
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install system dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            build-essential clang cmake ninja-build pkg-config gperf python3 m4 \
+            libssl-dev libsqlite3-dev libfontconfig1-dev libfreetype-dev \
+            libharfbuzz-dev liblzma-dev libxkbcommon-dev libx11-dev \
+            libxcb-render0-dev libxcb-shape0-dev libxcb-xfixes0-dev \
+            libwayland-dev libegl1-mesa-dev libgl1-mesa-dev libgles2-mesa-dev \
+            libvulkan-dev libudev-dev libdbus-1-dev libglib2.0-dev libunwind-dev \
+            libgstreamer1.0-dev libgstreamer-plugins-base1.0-dev \
+            libgstreamer-plugins-bad1.0-dev \
+            gstreamer1.0-plugins-good gstreamer1.0-plugins-bad gstreamer1.0-libav \
+            xvfb fonts-noto-core fonts-noto-color-emoji
+
+      - name: Install Rust stable
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache dependencies
+        uses: Swatinem/rust-cache@v2
+        with:
+          key: servo-media-linux
+
+      - name: Build the page loader
+        run: cargo build --release -p ferrite-servo --features servo,media --example page_shot
+
+      - name: Load the sites
+        run: |
+          xvfb-run -a scripts/site-check/run.sh target/release/examples/page_shot site-check ${{ inputs.sites }}
+          cat site-check/summary.md >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Upload logs and screenshots
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: site-check
+          path: site-check/
+          retention-days: 30

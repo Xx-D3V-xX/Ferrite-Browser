@@ -1,0 +1,14 @@
+<!doctype html>
+<html><head><meta charset="utf-8"><title>controls probe</title>
+<style>
+  html, body { margin: 0; font: 14px sans-serif; }
+  .c { position: absolute; left: 10px; width: 180px; height: 30px; }
+</style></head>
+<body>
+  <!-- Each control is centred on the point controls_probe.rs clicks. -->
+  <select id="s" class="c" style="top: 20px"><option>apple</option><option>banana</option><option>cherry</option></select>
+  <button class="c" style="top: 80px" onclick="window.r = confirm('Sure?')">confirm</button>
+  <button class="c" style="top: 140px" onclick="window.pr = prompt('Name?', '')">prompt</button>
+  <input type="file" class="c" style="top: 200px">
+  <input type="color" id="c" class="c" style="top: 260px; width: 100px" value="#000000">
+</body></html>

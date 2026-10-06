@@ -1,0 +1,34 @@
+# One site per line: name, URL, and optionally a JavaScript expression to ask the
+# page after it loads (separated by " | "). Read by scripts/site-check/run.sh.
+google | https://www.google.com/
+google-search | https://www.google.com/search?q=rust+programming+language
+google-signin | https://accounts.google.com/
+youtube | https://www.youtube.com/
+youtube-watch | https://www.youtube.com/watch?v=aqz-KE-bpKQ | (function(){var v=document.querySelector('video');return v?('video t='+v.currentTime.toFixed(1)+' paused='+v.paused+' ready='+v.readyState+' '+v.videoWidth+'x'+v.videoHeight):'no video element'})()
+github | https://github.com/
+github-repo | https://github.com/servo/servo
+wikipedia | https://en.wikipedia.org/wiki/Web_browser
+mdn | https://developer.mozilla.org/en-US/docs/Web/CSS/grid
+stackoverflow | https://stackoverflow.com/questions/11227809/why-is-processing-a-sorted-array-faster-than-processing-an-unsorted-array
+reddit | https://www.reddit.com/
+x | https://x.com/
+bbc | https://www.bbc.com/news
+nytimes | https://www.nytimes.com/
+amazon | https://www.amazon.com/
+apple | https://www.apple.com/
+microsoft | https://www.microsoft.com/
+cloudflare | https://www.cloudflare.com/
+stripe | https://stripe.com/
+react | https://react.dev/
+nextjs | https://nextjs.org/
+vue | https://vuejs.org/
+angular | https://angular.dev/
+svelte | https://svelte.dev/
+tailwind | https://tailwindcss.com/
+vercel | https://vercel.com/
+medium | https://medium.com/
+notion | https://www.notion.com/
+figma | https://www.figma.com/
+discord | https://discord.com/
+airbnb | https://www.airbnb.com/
+booking | https://www.booking.com/

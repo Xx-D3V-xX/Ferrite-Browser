@@ -1,6 +1,7 @@
 //! Loads a page in the real engine and reports what happened: a PNG of the
 //! rendered frame, the title, how long the load took, every console message,
-//! and a summary of the requests made. The quickest way to answer "does this
+//! a summary of the requests made, a crash if the page's engine crashed, and the
+//! answer to `PAGE_SHOT_JS` if set. The quickest way to answer "does this
 //! page work in Ferrite?" without the app.
 //!
 //!   cargo run -p ferrite-servo --features servo --example page_shot -- \
@@ -66,6 +67,14 @@ fn main() {
         *kinds.entry(event.kind).or_default() += 1;
     }
     println!("REQUESTS {kinds:?}");
+    // PAGE_SHOT_JS: an expression to ask the page once it has loaded (the real-site
+    // check asks a video page whether its video plays).
+    if let Ok(expression) = std::env::var("PAGE_SHOT_JS") {
+        println!("JS      {:?}", session.execute_js(&expression));
+    }
+    if let Some(crash) = session.take_crash() {
+        println!("CRASH   {crash:?}");
+    }
     for entry in session.take_console_entries() {
         println!(
             "CONSOLE {:<5} {}",

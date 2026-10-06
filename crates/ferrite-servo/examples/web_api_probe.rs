@@ -186,15 +186,22 @@ const ASYNC: &[(&str, &str)] = &[
         // A frame on the same host and another port: same site (so the same script
         // thread, as Google's account bar beside www.google.com), another origin. The
         // engine said only "The operation is insecure." here, which told the owner
-        // nothing about which check Google's scripts tripped (T-321). (Reading the
-        // frame's `document` throws nothing at all on this path: T-322.)
-        "cross-origin SecurityError names the property",
+        // nothing about which check Google's scripts tripped (T-321). Reading the
+        // frame's `document` once threw nothing on this path (T-322).
+        "cross-origin window: only the allowed properties, errors name the property",
         "new Promise(function(res,rej){var f=document.createElement('iframe');f.src='http://127.0.0.1:'+window.__otherPort+'/';\
          var t=setTimeout(function(){rej(new Error('frame never loaded'))},5000);\
-         f.onload=function(){clearTimeout(t);var m;\
-         try{f.contentWindow.location.href;m='no error'}catch(e){m=e.name+': '+e.message}\
-         f.remove();\
-         if(/^SecurityError: .*\"href\".*cross-origin/.test(m))res();else rej(new Error(m))};\
+         f.onload=function(){clearTimeout(t);var w=f.contentWindow,bad=[];\
+         function denied(label,fn,prop){try{fn();bad.push(label+': no error')}catch(e){\
+         if(!(e.name==='SecurityError'&&e.message.indexOf(prop)>=0&&/cross-origin/.test(e.message)))bad.push(label+': '+e.name+': '+e.message)}}\
+         denied('location.href',function(){return w.location.href},'href');\
+         denied('document (T-322)',function(){return w.document},'document');\
+         denied('localStorage',function(){return w.localStorage},'localStorage');\
+         denied('set name',function(){w.name='x'},'name');\
+         try{if(typeof w.postMessage!=='function')bad.push('postMessage not a function');\
+         if(w.closed!==false)bad.push('closed is '+w.closed);if(w.parent!==window)bad.push('parent is not this window');\
+         if(w.then!==undefined)bad.push('then is not undefined');w.postMessage('hi','*')}catch(e){bad.push('allowed use threw '+e.name+': '+e.message)}\
+         f.remove();if(bad.length)rej(new Error(bad.join(' | ')));else res()};\
          document.body.appendChild(f)})",
     ),
     (
