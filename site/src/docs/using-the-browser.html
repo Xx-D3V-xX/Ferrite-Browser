@@ -71,7 +71,7 @@ summary: Ferrite's window, tab strip, toolbar and address bar, keyboard shortcut
 <tr><td><kbd>Cmd</kbd>+<kbd>Opt</kbd>+<kbd>I</kbd> (macOS), <kbd>Ctrl</kbd>+<kbd>Shift</kbd>+<kbd>I</kbd> (elsewhere), <kbd>Mod</kbd>+<kbd>J</kbd></td><td>Developer tools</td></tr>
 <tr><td><kbd>F12</kbd></td><td>The <strong>Audit</strong> panel (model calls and the audit log, where each entry is tied to the one before it), <em>not</em> DevTools</td></tr>
 </tbody></table></div>
-<p>Typing, pointer and wheel input go to the page. They go to the browser instead if a field of the browser has focus or a page control is open. Two things are not handled: input-method (IME) composition and HTTP basic-auth prompts. Nobody has tested non-US keyboard layouts, dead keys or key repeat.</p>
+<p>Typing, pointer and wheel input go to the page. They go to the browser instead if a field of the browser has focus or a page control is open. One thing is not handled: input-method (IME) composition. Nobody has tested non-US keyboard layouts, dead keys or key repeat.</p>
 
 <h2>Panels you can resize</h2>
 <p>The agent, library (bookmarks, history, downloads) and settings drawers share the right-hand side. Only one shows at a time. DevTools and the audit panel share the bottom. To resize a panel, drag the edge between the panel and the page. To reset it, double-click the edge.</p>
@@ -82,7 +82,7 @@ summary: Ferrite's window, tab strip, toolbar and address bar, keyboard shortcut
 </ul>
 
 <h2>What a page can ask the browser for</h2>
-<p>A page can ask for these things: dropdown lists, <code>alert()</code>, <code>confirm()</code> and <code>prompt()</code> dialogs, the colour picker, the file picker and the page's context menu. Each one reaches the browser as a request. Ferrite draws each one itself, as an overlay on the page. The page is blocked until you answer. While an overlay is open, the page gets no pointer or key input. You can answer or dismiss every control. <kbd>Esc</kbd> cancels it.</p>
+<p>A page can ask for these things: dropdown lists, <code>alert()</code>, <code>confirm()</code> and <code>prompt()</code> dialogs, the colour picker, the file picker, the page's context menu and a sign-in for a site that uses HTTP authentication. Each one reaches the browser as a request. Ferrite draws each one itself, as an overlay on the page. The page is blocked until you answer. While an overlay is open, the page gets no pointer or key input. You can answer or dismiss every control. <kbd>Esc</kbd> cancels it.</p>
 <p><strong>The page's text is untrusted.</strong> Ferrite draws a dialog's message, an option's label or a menu row as plain text. It removes control characters and bidirectional characters (characters that change the text direction). It also caps the length. A dialog names the site it comes from. It also says that the words come from the page. So a page cannot pass its words off as Ferrite's.</p>
 <div class="shots stack">
   <figure class="shot half">
@@ -98,12 +98,13 @@ summary: Ferrite's window, tab strip, toolbar and address bar, keyboard shortcut
   <figure class="shot half">
   <img class="theme-shot-light" src="{{ROOT}}static/img/controls-file-light.png" width="480" height="270" alt="The file picker card: Choose a file, from localhost, with a field for the full path and a note that the page accepts .pdf and .png, and Cancel and Open buttons." loading="lazy">
   <img class="theme-shot-dark" src="{{ROOT}}static/img/controls-file-dark.png" width="480" height="270" alt="The file picker card in the dark theme: Choose a file, from localhost, with a field for the full path and a note that the page accepts .pdf and .png, and Cancel and Open buttons." loading="lazy">
-  <figcaption>The file picker. Ferrite has no native file dialog yet. So you type or paste the path. Rendered from sample state.</figcaption>
+  <figcaption>The file card. <strong>Choose a file…</strong> opens your system's own file dialog. You can also type or paste the path. Rendered from sample state (an older picture, without the button).</figcaption>
   </figure>
 </div>
 <div class="callout warn">
   <h4>Known gaps</h4>
-  <p>The file picker is a card where you type a path. Nobody has tried the path that the engine gets after you press Open with a real upload. HTTP basic-auth prompts are not handled at all. So a page behind basic auth gets no prompt. Select, <code>confirm()</code>, <code>prompt()</code> and the colour input were checked in the engine. The overlays were driven on Linux at normal pixel density. They were not driven on a Retina screen or a Mac.</p>
+  <p>The file card's <strong>Choose a file…</strong> button runs the system's own picker: <code>osascript</code> on macOS, PowerShell on Windows, and <code>zenity</code> or <code>kdialog</code> on Linux. A Linux without either one keeps the typed field. Nothing from the page goes into that command. The picked path fills the card. Ferrite checks it, and the page gets it only when you press Open. Nobody has opened the picker on a real Mac or Windows machine yet.</p>
+  <p>A site that answers with HTTP authentication (a <code>401</code>) gets a <strong>Sign in</strong> card with a username and a hidden password field. The password goes to that site only when you press Sign in. It never appears in a log. Cancel shows the site's own error page. The agent cannot answer this card. Select, <code>confirm()</code>, <code>prompt()</code> and the colour input were checked in the engine. The overlays were driven on Linux at normal pixel density. They were not driven on a Retina screen or a Mac.</p>
 </div>
 <p>Ferrite follows the page's cursor (pointer, text, crosshair and so on). <code>cursor: none</code> shows the ordinary arrow.</p>
 

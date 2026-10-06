@@ -29,7 +29,7 @@ grep -vE '^\s*(#|$)' "$list" | while IFS= read -r line; do
   # A crash (a signal, not a failed check): load it again under gdb for a backtrace.
   if [ "$code" -ge 128 ] && [ "$code" -ne 143 ] && command -v gdb > /dev/null; then
     echo "-- exit $code: again under gdb" >> "$log"
-    PAGE_SHOT_JS="${js:-document.readyState}" timeout 300 gdb -batch -q -ex run -ex "thread apply all bt 25" \
+    PAGE_SHOT_JS="${js:-document.readyState}" timeout 300 gdb -batch -q -ex run -ex "bt 40" -ex "info threads" -ex "thread apply all bt 12" \
       --args "$bin" "$url" "$wait" "$out/$name-gdb.png" 1280 800 >> "$log" 2>&1
   fi
   title="$(grep -m1 '^TITLE' "$log" | cut -c9- | tr '|' '/' | cut -c1-60)"
@@ -43,7 +43,7 @@ grep -vE '^\s*(#|$)' "$list" | while IFS= read -r line; do
   echo "| $name | $title | $load | ${painted:-} | $errors | $warnings | ${crash:-} | $answer |" >> "$summary"
   grep -E '^(TITLE|LOADED|PAINT|JS|CRASH|CONSOLE (error|warn))' "$log" | head -25
   # The backtrace of the crashing thread, if gdb ran.
-  grep -A30 'received signal' "$log" | head -40
+  grep -A50 'received signal' "$log" | head -60
 done
 echo
 cat "$summary"

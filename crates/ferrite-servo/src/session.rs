@@ -1299,8 +1299,14 @@ mod inner {
 
     /// What the engine is waiting on a person for, with a plain-data view of
     /// it for the UI.
-    type SharedControl =
-        Rc<std::cell::RefCell<Option<(crate::diag::PageControl, servo::EmbedderControl)>>>;
+    type SharedControl = Rc<std::cell::RefCell<Option<(crate::diag::PageControl, Waiting)>>>;
+
+    /// The engine's handle on what a person is to answer: a page control, or
+    /// an HTTP authentication challenge (which the engine asks for apart).
+    enum Waiting {
+        Control(servo::EmbedderControl),
+        Auth(servo::AuthenticationRequest),
+    }
 
     /// `#rrggbb` of an engine colour.
     fn hex_of(c: servo::RgbColor) -> String {
@@ -1619,16 +1625,36 @@ mod inner {
         /// replaces (and so dismisses) an older one.
         fn show_embedder_control(&self, _webview: servo::WebView, control: servo::EmbedderControl) {
             match describe_control(&control) {
-                Some(view) => *self.control.borrow_mut() = Some((view, control)),
+                Some(view) => *self.control.borrow_mut() = Some((view, Waiting::Control(control))),
                 None => drop(control),
             }
         }
 
         fn hide_embedder_control(&self, _webview: servo::WebView, id: servo::EmbedderControlId) {
             let mut slot = self.control.borrow_mut();
-            if slot.as_ref().is_some_and(|(_, c)| c.id() == id) {
+            if slot
+                .as_ref()
+                .is_some_and(|(_, w)| matches!(w, Waiting::Control(c) if c.id() == id))
+            {
                 *slot = None;
             }
+        }
+
+        /// A site (or a proxy) asked for a username and password: kept for the
+        /// UI to ask the person, like a page control. Answering nothing (a
+        /// dismissed card, or a newer control replacing it) sends none, and
+        /// the page shows the site's own "unauthorized" response.
+        fn request_authentication(
+            &self,
+            _webview: servo::WebView,
+            request: servo::AuthenticationRequest,
+        ) {
+            let host = request.url().host_str().unwrap_or("this site").to_string();
+            let view = crate::diag::PageControl::Auth {
+                host,
+                for_proxy: request.for_proxy(),
+            };
+            *self.control.borrow_mut() = Some((view, Waiting::Auth(request)));
         }
 
         fn notify_cursor_changed(&self, _webview: servo::WebView, cursor: servo::Cursor) {
@@ -2548,8 +2574,18 @@ mod inner {
         /// Answers (or dismisses) the page's pending control.
         pub fn answer_control(&mut self, answer: crate::diag::ControlAnswer) {
             use crate::diag::ControlAnswer as A;
-            let Some((_, control)) = self.shared_control.borrow_mut().take() else {
+            let Some((_, waiting)) = self.shared_control.borrow_mut().take() else {
                 return;
+            };
+            let control = match waiting {
+                Waiting::Auth(request) => {
+                    if let A::Credentials { username, password } = answer {
+                        request.authenticate(username, password.0);
+                    }
+                    // Anything else drops the request: no credentials sent.
+                    return;
+                }
+                Waiting::Control(control) => control,
             };
             match (control, answer) {
                 (servo::EmbedderControl::SelectElement(mut select), A::Select(chosen)) => {
@@ -3263,6 +3299,81 @@ mod svg_compat_tests {
             "{}",
             String::from_utf8_lossy(&out.stderr)
         );
+    }
+
+    /// Runs `cq_compat.js` under node with a stub page and returns what its
+    /// rewrite makes of each sheet, or `None` without node.
+    fn cq_rewrites(sheets: &[&str]) -> Option<Vec<String>> {
+        let node_ok = std::process::Command::new("node")
+            .arg("--version")
+            .output()
+            .map(|o| o.status.success())
+            .unwrap_or(false);
+        if !node_ok {
+            eprintln!("SKIPPED: `node` is not installed; cq_compat.js not exercised");
+            return None;
+        }
+        let body = CQ_COMPAT_JS
+            .trim_end()
+            .strip_suffix("})();")
+            .expect("the script is one IIFE");
+        let harness = format!(
+            "const el = () => ({{ sheet: {{ cssRules: [] }}, remove() {{}}, setAttribute() {{}}, \
+             hasAttribute() {{ return false; }}, style: {{ setProperty() {{}} }} }});\n\
+             globalThis.window = {{ addEventListener() {{}} }};\n\
+             globalThis.document = {{ readyState: 'complete', createElement: el, \
+             head: {{ appendChild() {{}} }}, documentElement: {{}}, querySelectorAll: () => [], \
+             addEventListener() {{}} }};\n\
+             globalThis.ResizeObserver = class {{ observe() {{}} }};\n\
+             globalThis.MutationObserver = class {{ observe() {{}} }};\n\
+             globalThis.requestAnimationFrame = () => {{}};\n\
+             {body} globalThis.__cq = transform; }})();\n\
+             console.log(JSON.stringify({sheets}.map(s => {{ try {{ return __cq(s); }} \
+             catch (e) {{ return 'THREW ' + e.message; }} }})));\n",
+            sheets = serde_json::to_string(sheets).unwrap()
+        );
+        let dir = std::env::temp_dir().join(format!("ferrite-cq-compat-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("cq_harness.js");
+        std::fs::write(&path, harness).unwrap();
+        let out = std::process::Command::new("node")
+            .arg(&path)
+            .output()
+            .expect("node runs");
+        let _ = std::fs::remove_dir_all(&dir);
+        assert!(
+            out.status.success(),
+            "{}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        Some(serde_json::from_slice(&out.stdout).expect("a JSON list"))
+    }
+
+    #[test]
+    fn declarations_directly_in_a_block_do_not_break_the_container_rewrite() {
+        // Each of these once threw "text is null" out of the rewrite, which surfaced
+        // as an unhandled promise rejection on Reddit, X, Amazon and other sites.
+        let Some(out) = cq_rewrites(&[
+            "@layer theme, base, components, utilities;",
+            ".a{color:red} trailing",
+            "@media (x){ color: red; .b{c:d} }",
+            "@scope (.a){ color:red; .b{width:3cqi} }",
+            "@container (min-width:1px){ color:red; .b{width:2cqw} }",
+            "@container (min-width:1px){ .a{ x } y }",
+        ]) else {
+            return;
+        };
+        for (i, css) in out.iter().enumerate() {
+            assert!(!css.starts_with("THREW"), "sheet {i}: {css}");
+        }
+        assert_eq!(out[0], "");
+        assert!(out[3].contains("calc(3 * var(--cq-w, 1vw))"), "{}", out[3]);
+        assert!(
+            out[4].contains(r#":where([data-cq~="1"]) .b{width:calc(2 * var(--cq-w, 1vw))}"#),
+            "{}",
+            out[4]
+        );
+        assert!(!out[4].contains("color:red"), "{}", out[4]);
     }
 
     #[test]

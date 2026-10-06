@@ -70,7 +70,10 @@
         i++;
       }
       var prelude = text.slice(start, i).trim();
-      if (i >= n || text[i] === ';') { if (prelude) items.push(makeItem(prelude, null)); i++; continue; }
+      // With no block, only an at-rule is an item (`@layer a, b;`). Anything else is a
+      // declaration sitting directly in a block (nesting, `@scope`, `@starting-style`) or
+      // junk at the end of a sheet, and has nothing for this script to rewrite.
+      if (i >= n || text[i] === ';') { if (prelude[0] === '@') items.push(makeItem(prelude, null)); i++; continue; }
       if (text[i] === '}') { i++; continue; }
       // A block: find its matching brace.
       var bodyStart = ++i, depth = 1; quote = null;
@@ -376,7 +379,10 @@
     var added = false;
     texts.forEach(function (text) {
       if (!text || (text.indexOf('@container') < 0 && text.indexOf('container') < 0 && !/cq(w|h|i|b|min|max)\b/i.test(text))) return;
-      var css = transform(text);
+      // A sheet this script cannot read is left to the engine as it is; it must not stop
+      // the other sheets from being read.
+      var css = '';
+      try { css = transform(text); } catch (e) { css = ''; }
       if (css) { generated += css; added = true; }
     });
     if (added) {

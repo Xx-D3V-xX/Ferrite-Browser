@@ -3436,6 +3436,16 @@ impl ScriptThread {
                         )
                     })
             })
+            // Ferrite: a frame's initial `about:blank` is spawned here with no user
+            // content manager, so the embedder's scripts never ran in it, while a page
+            // reaches for its window's interfaces as soon as it is appended. It runs
+            // its parent's scripts, as a frame that navigates to a URL does.
+            .or_else(|| {
+                incomplete
+                    .parent_info
+                    .and_then(|parent_id| self.documents.borrow().find_window(parent_id))
+                    .map(|parent| (parent.shared_user_scripts(), Default::default()))
+            })
             .unwrap_or_default();
 
         let layout_config = LayoutConfig {

@@ -70,6 +70,8 @@ const REQUIRED: &[(&str, &str)] = &[
     ("requestAnimationFrame", "typeof requestAnimationFrame === 'function'"),
     ("Animation / KeyframeEffect / element.animate", "typeof Animation === 'function' && typeof KeyframeEffect === 'function' && document.createElement('div').animate([{opacity:0},{opacity:1}],1) instanceof Animation"),
     ("getAnimations on elements, the document and shadow roots", "typeof document.getAnimations === 'function' && typeof document.createElement('div').getAnimations === 'function' && typeof document.createElement('div').attachShadow({mode:'open'}).getAnimations === 'function'"),
+    ("SVGAElement and the other missing SVG interfaces answer instanceof by tag", "(function(){var n='http://www.w3.org/2000/svg';var a=document.createElementNS(n,'a'),t=document.createElementNS(n,'text');return typeof SVGAElement==='function'&&a instanceof SVGAElement&&a instanceof SVGElement&&!(t instanceof SVGAElement)&&t instanceof SVGTextContentElement&&!(document.createElement('a') instanceof SVGAElement)})()"),
+    ("PublicKeyCredential says there is no authenticator", "typeof PublicKeyCredential === 'function' && typeof PublicKeyCredential.getClientCapabilities === 'function' && typeof PublicKeyCredential.isUserVerifyingPlatformAuthenticatorAvailable === 'function'"),
     ("AbortController", "typeof AbortController === 'function' && typeof AbortSignal === 'function'"),
     ("URL / URLSearchParams", "new URL('https://a.b/c?d=1').searchParams.get('d') === '1'"),
     ("fetch / Headers / Request", "typeof fetch === 'function' && typeof Headers === 'function' && typeof Request === 'function'"),
@@ -84,6 +86,7 @@ const REQUIRED: &[(&str, &str)] = &[
     ("history.pushState", "typeof history.pushState === 'function'"),
     ("matchMedia", "typeof matchMedia === 'function' && typeof matchMedia('(min-width:1px)').matches === 'boolean'"),
     ("getComputedStyle", "typeof getComputedStyle(document.body).display === 'string'"),
+    ("about:blank iframe has the compatibility interfaces (Animation, serviceWorker)", "(function(){var f=document.createElement('iframe');document.body.appendChild(f);var w=f.contentWindow;var ok=typeof w.Animation==='function'&&typeof w.navigator.serviceWorker==='object'&&typeof w.SVGAElement==='function';f.remove();if(!ok)throw new Error(typeof w.Animation+' '+typeof w.navigator.serviceWorker);return true})()"),
 ];
 
 /// Present in current Chrome, Firefox and Safari and used by real sites, but
@@ -226,6 +229,23 @@ const ASYNC: &[(&str, &str)] = &[
          document.body.appendChild(f)})",
     ),
     (
+        // The compatibility scripts run in frames too, before the frame's own scripts:
+        // airbnb.com's service-worker frame stopped on "navigator.serviceWorker is
+        // undefined".
+        "a same-origin frame's own scripts see the compatibility interfaces",
+        "new Promise(function(res,rej){var f=document.createElement('iframe');f.src='/frame';\
+         var t=setTimeout(function(){rej(new Error('frame never loaded'))},5000);\
+         f.onload=function(){clearTimeout(t);var s=f.contentWindow.__seen;f.remove();\
+         if(!s)rej(new Error('the frame script did not run'));\
+         else if(s.sw!=='object'||s.animate!=='function')rej(new Error(JSON.stringify(s)));else res()};\
+         document.body.appendChild(f)})",
+    ),
+    (
+        "passkey checks answer no",
+        "Promise.all([PublicKeyCredential.getClientCapabilities(),PublicKeyCredential.isUserVerifyingPlatformAuthenticatorAvailable()])\
+         .then(function(r){if(r[0].passkeyPlatformAuthenticator!==false||r[1]!==false)throw new Error(JSON.stringify(r))})",
+    ),
+    (
         "setTimeout/Promise ordering",
         "new Promise(function(res){var o=[];setTimeout(function(){o.push('t');if(o.join('')==='mt')res();else throw new Error(o.join(''))},0);Promise.resolve().then(function(){o.push('m')})})",
     ),
@@ -269,7 +289,8 @@ fn page(other_port: u16) -> String {
     )
 }
 
-/// A one-page loopback server: `/` is the probe page, `/ping` answers `pong`.
+/// A one-page loopback server: `/` is the probe page, `/ping` answers `pong`,
+/// `/frame` is a page for a frame.
 fn serve(listener: TcpListener, page: String) {
     for stream in listener.incoming() {
         let Ok(mut stream) = stream else { continue };
@@ -278,6 +299,16 @@ fn serve(listener: TcpListener, page: String) {
         let request = String::from_utf8_lossy(&buf[..n]);
         let (ctype, body) = if request.starts_with("GET /ping") {
             ("text/plain", "pong".to_string())
+        } else if request.starts_with("GET /frame") {
+            // A frame page reporting what its own window has, as Google Tag Manager's
+            // `sw_iframe.html` on airbnb.com reads `navigator.serviceWorker` inline.
+            (
+                "text/html; charset=utf-8",
+                "<!doctype html><html><head><title>f</title></head><body><script>\
+                 window.__seen={sw:typeof navigator.serviceWorker,animate:typeof document.body.animate}\
+                 </script></body></html>"
+                    .to_string(),
+            )
         } else {
             ("text/html; charset=utf-8", page.clone())
         };

@@ -653,5 +653,7 @@
       });
     }, function () { /* no IndexedDB: nothing remembered */ });
   }
-  resume();
+  // No scope can contain an `about:` address (a new frame's blank page), so a blank
+  // frame does not read the registrations at all; it only has the interface.
+  if (location.protocol !== 'about:') resume();
 })();

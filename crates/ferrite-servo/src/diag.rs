@@ -217,6 +217,9 @@ pub enum PageControl {
         items: Vec<MenuItemView>,
         anchor: DeviceRect,
     },
+    /// HTTP authentication (a `401` or, for a proxy, `407` with a
+    /// `WWW-Authenticate` challenge): a username and password for `host`.
+    Auth { host: String, for_proxy: bool },
 }
 
 /// A person's answer to a [`PageControl`].
@@ -234,6 +237,22 @@ pub enum ControlAnswer {
     Color(String),
     /// A context-menu row by its index.
     Menu(usize),
+    /// A username and password for an [`PageControl::Auth`] prompt.
+    Credentials {
+        username: String,
+        password: Password,
+    },
+}
+
+/// A password on its way to the engine. Its `Debug` form never shows it, so
+/// it cannot reach a log through a `{:?}` of the answer it is in.
+#[derive(Clone, PartialEq, Eq)]
+pub struct Password(pub String);
+
+impl std::fmt::Debug for Password {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("Password(••••)")
+    }
 }
 
 /// A page's process or script thread died.

@@ -834,6 +834,11 @@ impl Window {
         &self.user_scripts
     }
 
+    /// Ferrite: the same scripts, to give a frame this window creates.
+    pub(crate) fn shared_user_scripts(&self) -> Rc<Vec<UserScript>> {
+        self.user_scripts.clone()
+    }
+
     pub(crate) fn get_player_context(&self) -> WindowGLContext {
         self.player_context.clone()
     }

@@ -1,7 +1,7 @@
 //! Checks that the engine's page controls reach the embedder and that answers
-//! take effect: a `<select>`, `confirm()`, `prompt()`, a colour input and a file
-//! input. The page is `controls_probe.html` (or another, given as the argument).
-//! Exits non-zero when a check fails.
+//! take effect: a `<select>`, `confirm()`, `prompt()`, a colour input, a file
+//! input and an HTTP sign-in. The page is `controls_probe.html` (or another,
+//! given as the argument). Exits non-zero when a check fails.
 use std::io::{Read, Write};
 use std::net::TcpListener;
 use std::time::{Duration, Instant};
@@ -53,7 +53,25 @@ fn main() {
         for st in listener.incoming() {
             let Ok(mut st) = st else { continue };
             let mut b = [0u8; 4096];
-            let _ = st.read(&mut b);
+            let n = st.read(&mut b).unwrap_or(0);
+            let request = String::from_utf8_lossy(&b[..n]);
+            if request.starts_with("GET /private") {
+                // HTTP basic authentication: `ann` / `hunter2`.
+                let signed_in = request
+                    .lines()
+                    .any(|l| l.eq_ignore_ascii_case("authorization: Basic YW5uOmh1bnRlcjI="));
+                let (status, extra, body) = if signed_in {
+                    ("200 OK", "", "<title>inside</title>signed in")
+                } else {
+                    (
+                        "401 Unauthorized",
+                        "WWW-Authenticate: Basic realm=\"probe\"\r\n",
+                        "<title>denied</title>no",
+                    )
+                };
+                let _ = write!(st, "HTTP/1.1 {status}\r\n{extra}Content-Type: text/html\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}", body.len());
+                continue;
+            }
             let _ = write!(st, "HTTP/1.1 200 OK\r\nContent-Type: text/html; charset=utf-8\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{page}", page.len());
         }
     });
@@ -163,6 +181,48 @@ fn main() {
     );
     s.answer_control(ControlAnswer::Dismiss);
     println!("CURSOR  {:?}", s.cursor());
+
+    // HTTP authentication: a 401 asks the embedder; Cancel shows the 401 page and
+    // a username and password reach the server.
+    let title = |s: &mut HeadlessServoSession| format!("{:?}", s.execute_js("document.title"));
+    let auth_prompt = |s: &mut HeadlessServoSession| {
+        s.navigate(&format!("http://127.0.0.1:{port}/private"));
+        let t = Instant::now();
+        while t.elapsed() < Duration::from_secs(15) {
+            pump(s, 50);
+            if let Some(control @ PageControl::Auth { .. }) = s.page_control() {
+                return Some(control);
+            }
+        }
+        None
+    };
+    let control = auth_prompt(&mut s);
+    check(
+        matches!(&control, Some(PageControl::Auth { host, for_proxy: false }) if host == "127.0.0.1"),
+        "a 401 asks for a username and password",
+        format!("{control:?}"),
+    );
+    s.answer_control(ControlAnswer::Dismiss);
+    pump(&mut s, 1500);
+    let shown = title(&mut s);
+    check(shown.contains("denied"), "Cancel shows the 401 page", shown);
+    let control = auth_prompt(&mut s);
+    check(
+        matches!(control, Some(PageControl::Auth { .. })),
+        "a second visit asks again",
+        format!("{control:?}"),
+    );
+    s.answer_control(ControlAnswer::Credentials {
+        username: "ann".into(),
+        password: ferrite_servo::diag::Password("hunter2".into()),
+    });
+    pump(&mut s, 1500);
+    let shown = title(&mut s);
+    check(
+        shown.contains("inside"),
+        "the credentials reach the server",
+        shown,
+    );
     println!(
         "{}",
         if failed == 0 {

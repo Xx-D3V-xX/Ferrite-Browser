@@ -8,6 +8,11 @@
  * "no, it is not one": a constructor nothing is an instance of. It adds no
  * behaviour, only a name; it is skipped when the engine defines the real one.
  *
+ * The same holds for the SVG element interfaces Servo lacks (`SVGAElement`,
+ * `SVGTextElement`, `SVGForeignObjectElement`, ...): Svelte's runtime and
+ * nytimes.com test `instanceof SVGAElement` and stopped on "SVGAElement is not
+ * defined". There `instanceof` is answered from the element's namespace and tag.
+ *
  * It also reports, to the page's console, what the engine does not say on its
  * own: an image, script, stylesheet, media file or font that failed to load
  * (with its address), and a promise that was rejected and never handled. A page
@@ -27,7 +32,8 @@
  * The same goes for a handful of small interfaces Servo 0.6 lacks that sites call
  * without checking, or check and then take a slower path for: `requestIdleCallback`,
  * `scheduler.postTask`, Web Locks (`navigator.locks`, within one page), `screen.orientation`,
- * `navigator.mediaDevices` (no devices: it says so, and refuses), `document.startViewTransition`
+ * `navigator.mediaDevices` (no devices: it says so, and refuses), `PublicKeyCredential` (no
+ * authenticator: every capability is false), `document.startViewTransition`
  * (runs the update, shows no transition) and `Element.checkVisibility`. Each is skipped
  * when the engine has the real one.
  */
@@ -40,6 +46,53 @@
         writable: true, configurable: true, enumerable: false
       });
     } catch (e) { /* a page that froze the global object already ran */ }
+  }
+
+  // SVG element interfaces Servo 0.6 does not define. Sites test against them
+  // (`el instanceof SVGAElement` in Svelte's runtime and on nytimes.com) and stop on
+  // "SVGAElement is not defined". Each stand-in answers `instanceof` truthfully, from
+  // the element's namespace and tag, and creates nothing.
+  var SVG_NS = 'http://www.w3.org/2000/svg';
+  var base = typeof window.SVGGraphicsElement === 'function' ? window.SVGGraphicsElement
+    : (typeof window.SVGElement === 'function' ? window.SVGElement : null);
+  var missing = {
+    SVGAElement: ['a'],
+    SVGTextContentElement: ['text', 'tspan', 'textPath'],
+    SVGTextPositioningElement: ['text', 'tspan'],
+    SVGTextElement: ['text'],
+    SVGTSpanElement: ['tspan'],
+    SVGTextPathElement: ['textPath'],
+    SVGForeignObjectElement: ['foreignObject'],
+    SVGClipPathElement: ['clipPath'],
+    SVGMaskElement: ['mask'],
+    SVGPatternElement: ['pattern'],
+    SVGMarkerElement: ['marker'],
+    SVGFilterElement: ['filter'],
+    SVGTitleElement: ['title'],
+    SVGDescElement: ['desc'],
+    SVGStyleElement: ['style'],
+    SVGScriptElement: ['script'],
+    SVGSwitchElement: ['switch'],
+    SVGViewElement: ['view']
+  };
+  if (base) {
+    Object.keys(missing).forEach(function (name) {
+      if (typeof window[name] !== 'undefined') return;
+      var tags = missing[name];
+      var Stand = function () { throw new TypeError('Illegal constructor'); };
+      try {
+        Object.defineProperty(Stand, 'name', { value: name });
+        Stand.prototype = Object.create(base.prototype, {
+          constructor: { value: Stand, writable: true, configurable: true }
+        });
+        Object.defineProperty(Stand, Symbol.hasInstance, {
+          value: function (el) {
+            return !!el && typeof el === 'object' && el.namespaceURI === SVG_NS && tags.indexOf(el.localName) >= 0;
+          }
+        });
+        Object.defineProperty(window, name, { value: Stand, writable: true, configurable: true, enumerable: false });
+      } catch (e) { /* a frozen global: leave it */ }
+    });
   }
 })();
 
@@ -65,6 +118,9 @@
     if (!target || target === window || !target.tagName) return;
     var tag = String(target.tagName).toLowerCase();
     if (!KINDS[tag]) return;
+    // A `<source>` in a `<picture>` only offers an address to its `<img>`, which reports
+    // its own failure.
+    if (tag === 'source' && target.parentNode && String(target.parentNode.tagName).toLowerCase() === 'picture') return;
     // `src=""` is a placeholder pages use on purpose (a lazy image waiting for its
     // real address); the engine resolves it to the page's own address, which is
     // not a failure worth reporting.
@@ -72,11 +128,21 @@
     if (raw === null) raw = target.getAttribute('href');
     if (raw === null) raw = target.getAttribute('data');
     if (raw !== null && String(raw).trim() === '') return;
+    // No address at all (an `<img>` a script has not filled in yet): nothing was loaded.
+    if (raw === null && !target.getAttribute('srcset') && !target.currentSrc) return;
     say(tag + ' failed to load: ' + brief(target.currentSrc || target.src || target.href || target.data || '(no address)'));
   }, true);
   window.addEventListener('unhandledrejection', function (event) {
     var reason = event && event.reason;
-    say('unhandled promise rejection: ' + brief(reason && reason.message ? reason.message : reason));
+    // The first frame of its stack says whose code it was (the page's, or one of these
+    // scripts'), which the message alone does not.
+    var where = '';
+    try {
+      var frame = reason && typeof reason.stack === 'string' ? reason.stack.split('\n')[0] : '';
+      var at = frame.lastIndexOf('@');
+      if (at >= 0) where = ' (at ' + brief(frame.slice(at + 1)) + ')';
+    } catch (e) { /* no stack */ }
+    say('unhandled promise rejection: ' + brief(reason && reason.message ? reason.message : reason) + where);
   });
   try {
     if (document.fonts && document.fonts.addEventListener) {
@@ -449,6 +515,28 @@
       addEventListener: function () {}, removeEventListener: function () {}, dispatchEvent: function () { return true; }
     };
     try { Object.defineProperty(navigator, 'mediaDevices', { get: function () { return devices; }, configurable: true, enumerable: true }); } catch (e) { /* locked */ }
+  }
+
+  // PublicKeyCredential: there is no authenticator (no passkeys, no security keys).
+  // Sites ask before offering a passkey (amazon.com calls getClientCapabilities without
+  // checking that the interface exists) and are told "no", so they offer a password.
+  if (typeof window.PublicKeyCredential === 'undefined' && window.isSecureContext) {
+    var PublicKeyCredential = function PublicKeyCredential() { throw new TypeError('Illegal constructor'); };
+    PublicKeyCredential.isUserVerifyingPlatformAuthenticatorAvailable = function () { return Promise.resolve(false); };
+    PublicKeyCredential.isConditionalMediationAvailable = function () { return Promise.resolve(false); };
+    PublicKeyCredential.getClientCapabilities = function () {
+      return Promise.resolve({
+        conditionalCreate: false, conditionalGet: false, hybridTransport: false,
+        passkeyPlatformAuthenticator: false, userVerifyingPlatformAuthenticator: false,
+        relatedOrigins: false, signalAllAcceptedCredentials: false,
+        signalCurrentUserDetails: false, signalUnknownCredential: false
+      });
+    };
+    PublicKeyCredential.parseCreationOptionsFromJSON = function () { throw new DOMException('Passkeys are not supported', 'NotSupportedError'); };
+    PublicKeyCredential.parseRequestOptionsFromJSON = PublicKeyCredential.parseCreationOptionsFromJSON;
+    try {
+      Object.defineProperty(window, 'PublicKeyCredential', { value: PublicKeyCredential, writable: true, configurable: true, enumerable: false });
+    } catch (e) { /* a frozen global */ }
   }
 
   // document.startViewTransition: update the page, show no transition.

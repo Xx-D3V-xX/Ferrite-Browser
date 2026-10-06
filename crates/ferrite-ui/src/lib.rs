@@ -2133,6 +2133,8 @@ pub enum FerriteBrowserMessage {
     MenuAnimTick,
     /// Advances `tab_open_anim`.
     TabAnimTick,
+    /// Advances the active tab's page-control overlay entrance.
+    ControlAnimTick,
     /// A row of the overflow menu was picked: close the menu, then do it.
     Menu(chrome::MenuCommand),
     /// Open the library drawer on a given tab (from the overflow menu).
@@ -3153,6 +3155,7 @@ pub fn update(
         FerriteBrowserMessage::MenuAnimTick => {
             state.menu_anim = (state.menu_anim + MENU_ANIM_STEP).min(1.0);
         }
+        FerriteBrowserMessage::ControlAnimTick => controls::advance_entrance(state),
         FerriteBrowserMessage::TabAnimTick => {
             state.tab_open_anim = state
                 .tab_open_anim
@@ -6634,6 +6637,14 @@ pub fn subscription(state: &FerriteBrowser) -> Subscription<FerriteBrowserMessag
         Subscription::none()
     };
 
+    // A page control's overlay easing in, only while it is.
+    let control_anim_tick = if controls::entrance_running(state) {
+        time::every(std::time::Duration::from_millis(16))
+            .map(|_| FerriteBrowserMessage::ControlAnimTick)
+    } else {
+        Subscription::none()
+    };
+
     // The overflow menu's slide-in, only while it is opening.
     let menu_anim_tick = if state.show_menu && state.menu_anim < 1.0 {
         time::every(std::time::Duration::from_millis(16))
@@ -6699,6 +6710,7 @@ pub fn subscription(state: &FerriteBrowser) -> Subscription<FerriteBrowserMessag
         consent_anim_tick,
         menu_anim_tick,
         tab_anim_tick,
+        control_anim_tick,
         thread_anim_tick,
     ])
 }
