@@ -7,8 +7,10 @@ name: Release
 # A `workflow_run` workflow only fires from the default branch's copy of this
 # file, so it takes effect once this file is on `main`. It also runs with a
 # write token, so it never checks out or executes the CI run's code: it only
-# downloads the packages CI built and attaches them to the rolling "latest"
-# release.
+# downloads the packages CI built and publishes them twice: as a permanent release
+# of its own (tag build-<CI run number>-<commit>, never replaced or deleted, so an old
+# build is always there to download if a newer one is bad), and as the rolling "latest"
+# release that the site's download buttons point at.
 on:
   workflow_run:
     workflows: [CI]
@@ -20,11 +22,12 @@ permissions:
 
 jobs:
   release:
-    name: Publish rolling release
+    name: Publish release
     runs-on: ubuntu-latest
     if: >-
       github.event.workflow_run.conclusion == 'success' &&
-      github.event.workflow_run.event == 'workflow_dispatch'
+      github.event.workflow_run.event == 'workflow_dispatch' &&
+      !contains(github.event.workflow_run.display_title, 'media builds only')
 
     steps:
       - name: Download the packages built by CI
@@ -53,12 +56,16 @@ jobs:
         run: |
           SHORT="${SHA:0:7}"
           DATE=$(date -u +"%Y-%m-%d %H:%M UTC")
+          echo "BUILD_TAG=build-${{ github.event.workflow_run.run_number }}-$SHORT" >> "$GITHUB_ENV"
           cat <<EOF > release_notes.md
           ## ferrite · latest
 
           > Published automatically after a manual CI run succeeded on every
-          > platform. It always holds the most recent such build, which may be
-          > behind \`main\`.
+          > platform. This is build **${{ github.event.workflow_run.run_number }}**
+          > (\`build-${{ github.event.workflow_run.run_number }}-$SHORT\`). The release called
+          > \`latest\` always holds the newest build; every earlier build stays on the
+          > [releases page](https://github.com/${{ github.repository }}/releases) under its own
+          > \`build-<number>-<commit>\` tag, so if this one is bad you can download an older one.
 
           | Field   | Value |
           |---------|-------|
@@ -99,6 +106,19 @@ jobs:
           body_path: release_notes.md
           prerelease: true
           make_latest: true
+          files: dist/*
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Create the versioned release (kept for good)
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ env.BUILD_TAG }}
+          target_commitish: ${{ github.event.workflow_run.head_sha }}
+          name: "ferrite · build ${{ github.event.workflow_run.run_number }}"
+          body_path: release_notes.md
+          prerelease: true
+          make_latest: false
           files: dist/*
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

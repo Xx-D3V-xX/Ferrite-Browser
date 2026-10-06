@@ -79,7 +79,7 @@ $ just run-fast --no-model-check</code></pre>
 <p>Two GitHub workflows make the downloadable builds. A person starts both by hand:</p>
 <ol>
   <li><strong>CI</strong> is manual only (Actions, <em>Run workflow</em>). It has no push, pull-request or schedule trigger. On Linux, Windows and macOS it runs these checks: format, lint (all targets, warnings denied), the full test suite and a build without Servo. On Linux it also checks for unused dependencies, licences and doc drift. If all of that passes everywhere, a second job builds the <strong>release binary with Servo</strong> on each OS and packages it.</li>
-  <li><strong>Release</strong> runs by itself when a manual CI run finishes. It publishes only if that run succeeded on every job. It replaces the rolling prerelease tagged <code>latest</code>. The notes of that prerelease name the commit, branch and CI run. Release never checks out or runs the CI run's code.</li>
+  <li><strong>Release</strong> runs by itself when a manual CI run finishes. It publishes only if that run succeeded on every job. It makes two releases. One is permanent and has its own tag, <code>build-&lt;run number&gt;-&lt;commit&gt;</code>, and is never replaced, so if a new build is bad you can download an older one from the releases page. The other is the prerelease tagged <code>latest</code>, which is replaced each time and is what the download buttons point at. The notes name the commit, branch and CI run. Release never checks out or runs the CI run's code.</li>
 </ol>
 <div class="table-wrap"><table>
 <thead><tr><th>Platform</th><th>File</th><th>Contents and first launch</th></tr></thead>

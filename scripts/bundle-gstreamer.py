@@ -2,7 +2,7 @@
 """Puts a GStreamer next to the Ferrite app, for a release of the `media` build.
 
     scripts/bundle-gstreamer.py macos   Ferrite.app [--prefix /opt/homebrew]
-    scripts/bundle-gstreamer.py windows STAGE_DIR   [--root C:\\gstreamer\\1.0\\msvc_x86_64]
+    scripts/bundle-gstreamer.py windows STAGE_DIR   [--root "C:\\Program Files\\gstreamer\\1.0\\msvc_x86_64"]
 
 The layout is the one `crates/ferrite-servo/src/bundle.rs` looks for:
 
@@ -128,7 +128,7 @@ def brew_dirs(prefix: Path) -> tuple[list[Path], list[Path]]:
     return plugin_dirs, lib_dirs
 
 
-def bundle_macos(app: Path, prefix: Path) -> None:
+def bundle_macos(app: Path, prefix: Path, main_name: str = "ferrite") -> None:
     frameworks = app / "Contents" / "Frameworks"
     gst = app / "Contents" / "Resources" / "gstreamer"
     plugins_out = gst / "plugins"
@@ -139,6 +139,10 @@ def bundle_macos(app: Path, prefix: Path) -> None:
     found: dict[str, Path] = {}
     for d in plugin_dirs:
         for f in d.glob("*.dylib"):
+            # Homebrew leaves a link behind for a plugin whose package is gone: skip it.
+            if not f.exists():
+                print(f"warning: {f} points at nothing, left out", file=sys.stderr)
+                continue
             found.setdefault(f.name, f)
     chosen = wanted_plugins([str(p) for p in found.values()])
     gone = missing_core([str(p) for p in found.values()])
@@ -147,7 +151,7 @@ def bundle_macos(app: Path, prefix: Path) -> None:
     scanner = next(iter(prefix.glob("opt/gstreamer/libexec/gstreamer-1.0/gst-plugin-scanner")), None) or \
         next(iter(prefix.glob("libexec/gstreamer-1.0/gst-plugin-scanner")), None)
 
-    main = app / "Contents" / "MacOS" / "ferrite"
+    main = app / "Contents" / "MacOS" / main_name
     todo: list[tuple[Path, Path, str]] = []  # (source, destination, rpath to add)
     for p in chosen:
         todo.append((Path(p), plugins_out / Path(p).name, "@loader_path/../../../Frameworks"))
@@ -271,6 +275,14 @@ def self_test() -> int:
         assert not (stage / "gstreamer" / "plugins" / "gstunrelated.dll").exists()
         assert (stage / "gstreamer-1.0-0.dll").exists()
         assert not (stage / "gst-launch-1.0.exe").exists()
+        # A dangling plugin link (Homebrew leaves one for libnice) is skipped, not copied.
+        brew = d / "brew"
+        plug = brew / "lib" / "gstreamer-1.0"
+        plug.mkdir(parents=True)
+        (plug / "libgstcoreelements.dylib").write_bytes(b"x")
+        (plug / "libgstnice.dylib").symlink_to(d / "nowhere.dylib")
+        listed = [f.name for f in plug.glob("*.dylib") if f.exists()]
+        assert listed == ["libgstcoreelements.dylib"], listed
     print("self-test ok")
     return 0
 
@@ -279,15 +291,16 @@ def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("platform", choices=["macos", "windows", "self-test"])
     ap.add_argument("target", nargs="?", help="Ferrite.app (macos) or the stage directory (windows)")
+    ap.add_argument("--main", default="ferrite", help="name of the executable in Contents/MacOS (the smoke test uses another)")
     ap.add_argument("--prefix", default=os.environ.get("HOMEBREW_PREFIX", "/opt/homebrew"))
-    ap.add_argument("--root", default=os.environ.get("GSTREAMER_1_0_ROOT_MSVC_X86_64", r"C:\gstreamer\1.0\msvc_x86_64"))
+    ap.add_argument("--root", default=os.environ.get("GSTREAMER_1_0_ROOT_MSVC_X86_64", r"C:\Program Files\gstreamer\1.0\msvc_x86_64"))
     args = ap.parse_args()
     if args.platform == "self-test":
         return self_test()
     if not args.target:
         ap.error("the target directory is required")
     if args.platform == "macos":
-        bundle_macos(Path(args.target), Path(args.prefix))
+        bundle_macos(Path(args.target), Path(args.prefix), args.main)
     else:
         bundle_windows(Path(args.target), Path(args.root))
     return 0

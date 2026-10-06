@@ -23,6 +23,8 @@ binary="${3:?path to the built ferrite-shell binary}"
 out="${4:-dist}"
 media="${5:-}"
 suffix=""
+# Windows runners have `python`, not always `python3`.
+py="$(command -v python3 || command -v python || echo python3)"
 [ "$media" = "media" ] && suffix="-media"
 
 root="$(cd "$(dirname "$0")/.." && pwd)"
@@ -44,7 +46,7 @@ case "$platform" in
     sed -e "s/@VERSION@/$version/" -e "s/@LABEL@/$label/" \
         "$root/packaging/macos/Info.plist" > "$app/Contents/Info.plist"
     if [ -n "$suffix" ]; then
-      python3 "$root/scripts/bundle-gstreamer.py" macos "$app"
+      "$py" "$root/scripts/bundle-gstreamer.py" macos "$app"
     fi
     # Ad-hoc signature: not a Developer ID, but it lets the bundle run after the
     # one-time "open anyway" approval instead of being reported as damaged.
@@ -64,7 +66,7 @@ case "$platform" in
     mkdir -p "$stage"
     cp "$binary" "$stage/ferrite.exe"
     if [ -n "$suffix" ]; then
-      python3 "$root/scripts/bundle-gstreamer.py" windows "$stage"
+      "$py" "$root/scripts/bundle-gstreamer.py" windows "$stage"
     fi
     zip_name="ferrite-$label-windows-x64$suffix.zip"
     if command -v 7z >/dev/null 2>&1; then

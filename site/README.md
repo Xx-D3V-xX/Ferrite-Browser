@@ -150,3 +150,6 @@ settings: **Pages → Build and deployment → Source: GitHub Actions**.
 The download buttons read the rolling `latest` release through the public
 GitHub API in the visitor's browser and fall back to the releases page when
 there is none.
+Every CI run also leaves a permanent `build-<run>-<commit>` release (see
+`.github/workflows/release.yml`), so an older build can be downloaded if the
+newest is bad.
