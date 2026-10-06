@@ -430,7 +430,10 @@ jobs:
           rm -f "$GST_REGISTRY_1_0"
           DYLD_PRINT_LIBRARIES=1 "$app/Contents/MacOS/gst-inspect" qtdemux >/dev/null 2>"$RUNNER_TEMP/dyld.txt" || true
           echo "loaded images: $(grep -c . "$RUNNER_TEMP/dyld.txt")"
-          if grep -E "/opt/homebrew|/usr/local/(Cellar|opt|lib)" "$RUNNER_TEMP/dyld.txt" | head -20; then echo "LOADED FROM HOMEBREW"; exit 1; fi
+          # (not `grep | head` in an `if`: head always succeeds, so that is true whatever grep found)
+          from_brew="$(grep -E "/opt/homebrew|/usr/local/(Cellar|opt|lib)" "$RUNNER_TEMP/dyld.txt" || true)"
+          if [ -n "$from_brew" ]; then echo "$from_brew" | head -20; echo "LOADED FROM HOMEBREW"; exit 1; fi
+          echo "nothing loaded from Homebrew"
           rm -f "$GST_REGISTRY_1_0"
           echo "--- hide Homebrew"
           sudo mv /opt/homebrew /opt/homebrew.hidden
