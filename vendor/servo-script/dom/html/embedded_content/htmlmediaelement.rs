@@ -2107,7 +2107,7 @@ impl HTMLMediaElement {
                 // The new player is made to start at the target, so it is not seeked.
                 source
                     .shared()
-                    .seek(crate::dom::mediasource::seconds_to_ns(time));
+                    .seek_all(crate::dom::mediasource::seconds_to_ns(time));
                 self.restart_media_source_player(&source);
                 new_player = true;
             }

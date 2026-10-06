@@ -463,7 +463,7 @@ fn make_pad(
             gstreamer_app::AppSrcCallbacks::builder()
                 .seek_data(move |_, offset| {
                     let _guard = push_lock.lock().unwrap();
-                    shared.seek(offset as i64);
+                    shared.seek(slot, offset as i64);
                     true
                 })
                 .build(),
