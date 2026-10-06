@@ -531,7 +531,7 @@ impl OffscreenCanvasMethods<crate::DomTypeHolder> for OffscreenCanvas {
         // output bitmap's origin-clean flag is set to false, then return a
         // promise rejected with a "SecurityError" DOMException.
         if !self.origin_is_clean() {
-            promise.reject_error(cx, Error::Security(None));
+            promise.reject_error(cx, Error::Security(Some("convertToBlob: the canvas holds cross-origin pixels".into())));
             return promise;
         }
 

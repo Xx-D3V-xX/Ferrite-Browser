@@ -5487,7 +5487,7 @@ impl DocumentMethods<crate::DomTypeHolder> for Document {
     fn SetDomain(&self, value: DOMString) -> ErrorResult {
         // Step 1. If this's browsing context is null, then throw a "SecurityError" DOMException.
         if !self.has_browsing_context {
-            return Err(Error::Security(None));
+            return Err(Error::Security(Some("document.domain: this document has no browsing context".into())));
         }
 
         // Step 2. If this Document object's active sandboxing flag set has its sandboxed
@@ -5495,20 +5495,20 @@ impl DocumentMethods<crate::DomTypeHolder> for Document {
         if self.has_active_sandboxing_flag(
             SandboxingFlagSet::SANDBOXED_DOCUMENT_DOMAIN_BROWSING_CONTEXT_FLAG,
         ) {
-            return Err(Error::Security(None));
+            return Err(Error::Security(Some("document.domain: the document is sandboxed against setting it".into())));
         }
 
         // Step 3. Let effectiveDomain be this's origin's effective domain.
         let effective_domain = match self.origin().effective_domain() {
             Some(effective_domain) => effective_domain,
             // Step 4. If effectiveDomain is null, then throw a "SecurityError" DOMException.
-            None => return Err(Error::Security(None)),
+            None => return Err(Error::Security(Some("document.domain: this document's origin has no domain".into()))),
         };
 
         // Step 5. If the given value is not a registrable domain suffix of and is not equal to effectiveDomain, then throw a "SecurityError" DOMException.
         let host =
             match get_registrable_domain_suffix_of_or_is_equal_to(&value.str(), effective_domain) {
-                None => return Err(Error::Security(None)),
+                None => return Err(Error::Security(Some("document.domain: the new value is not a suffix of the current domain".into()))),
                 Some(host) => host,
             };
 
@@ -6354,7 +6354,7 @@ impl DocumentMethods<crate::DomTypeHolder> for Document {
         }
 
         if !self.origin().is_tuple() {
-            return Err(Error::Security(None));
+            return Err(Error::Security(Some("document.cookie: this document's origin is opaque".into())));
         }
 
         let url = self.url();
@@ -6376,7 +6376,7 @@ impl DocumentMethods<crate::DomTypeHolder> for Document {
         }
 
         if !self.origin().is_tuple() {
-            return Err(Error::Security(None));
+            return Err(Error::Security(Some("document.cookie: this document's origin is opaque".into())));
         }
 
         if !cookie.is_valid_for_cookie() {
@@ -6645,7 +6645,7 @@ impl DocumentMethods<crate::DomTypeHolder> for Document {
             .origin()
             .same_origin(&entry_responsible_document.origin())
         {
-            return Err(Error::Security(None));
+            return Err(Error::Security(Some("document.open: called from a script of a different origin".into())));
         }
 
         // Step 5. If document has an active parser whose script nesting level is greater than 0,

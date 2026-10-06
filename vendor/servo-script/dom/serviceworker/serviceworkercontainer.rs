@@ -88,7 +88,7 @@ impl ServiceWorkerContainer {
                     );
                 },
                 JobError::SecurityError => {
-                    promise.reject_error(cx, Error::Security(None));
+                    promise.reject_error(cx, Error::Security(Some("serviceWorker: the script or scope URL is not of this origin".into())));
                 },
             },
             // <https://w3c.github.io/ServiceWorker/#resolve-job-promise>
@@ -491,7 +491,7 @@ impl ServiceWorkerContainerMethods<crate::DomTypeHolder> for ServiceWorkerContai
 
         // Step 6: If the origin of clientURL is not client’s origin, return a promise rejected with a "SecurityError" DOMException.
         if &client_url.origin() != global.origin().immutable() {
-            promise.reject_error(realm, Error::Security(None));
+            promise.reject_error(realm, Error::Security(Some("serviceWorker: the script or scope URL is not of this origin".into())));
             return promise;
         }
 

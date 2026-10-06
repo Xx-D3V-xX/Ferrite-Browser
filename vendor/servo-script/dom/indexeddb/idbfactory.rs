@@ -576,7 +576,7 @@ impl IDBFactoryMethods<crate::DomTypeHolder> for IDBFactory {
         // Step 3: Let storageKey be the result of running obtain a storage key given environment.
         // If failure is returned, then throw a "SecurityError" DOMException and abort these steps.
         let Some(storage_key) = global.obtain_storage_key() else {
-            return Err(Error::Security(None));
+            return Err(Error::Security(Some("indexedDB: this document has no storage key (opaque origin)".into())));
         };
 
         // Note: switching to obtaining a storage bottle map,
@@ -611,7 +611,7 @@ impl IDBFactoryMethods<crate::DomTypeHolder> for IDBFactory {
         // Step 2: Let storageKey be the result of running obtain a storage key given environment.
         // If failure is returned, then throw a "SecurityError" DOMException and abort these steps.
         let Some(storage_key) = global.obtain_storage_key() else {
-            return Err(Error::Security(None));
+            return Err(Error::Security(Some("indexedDB: this document has no storage key (opaque origin)".into())));
         };
 
         // Note: switching to obtaining a storage bottle map,
@@ -645,7 +645,7 @@ impl IDBFactoryMethods<crate::DomTypeHolder> for IDBFactory {
             Some(storage_key) => storage_key,
             None => {
                 let p = Promise::new(cx, &global);
-                p.reject_error(cx, Error::Security(None));
+                p.reject_error(cx, Error::Security(Some("indexedDB: this document has no storage key (opaque origin)".into())));
                 return p;
             },
         };

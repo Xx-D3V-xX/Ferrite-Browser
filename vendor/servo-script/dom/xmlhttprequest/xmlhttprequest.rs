@@ -366,8 +366,8 @@ impl XMLHttpRequestMethods<crate::DomTypeHolder> for XMLHttpRequest {
 
         match maybe_method {
             // Step 4
-            Some(Method::CONNECT) | Some(Method::TRACE) => Err(Error::Security(None)),
-            Some(ref t) if t.as_str() == "TRACK" => Err(Error::Security(None)),
+            Some(Method::CONNECT) | Some(Method::TRACE) => Err(Error::Security(Some("XMLHttpRequest: the CONNECT, TRACE and TRACK methods are forbidden".into()))),
+            Some(ref t) if t.as_str() == "TRACK" => Err(Error::Security(Some("XMLHttpRequest: the CONNECT, TRACE and TRACK methods are forbidden".into()))),
             Some(parsed_method) => {
                 // Step 3
                 if !is_token(&method) {

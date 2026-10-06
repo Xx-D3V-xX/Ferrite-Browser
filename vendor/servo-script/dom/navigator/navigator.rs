@@ -250,7 +250,7 @@ impl Navigator {
         // Step 2. If scheme is neither a safelisted scheme nor
         // a string starting with "web+" followed by one or more ASCII lower alphas, then throw a "SecurityError" DOMException.
         if !SAFELISTED_SCHEMES.contains(&scheme.as_ref()) && !matches_web_plus_protocol(&scheme) {
-            return Err(Error::Security(None));
+            return Err(Error::Security(Some("navigator.registerProtocolHandler: the scheme or URL is not allowed".into())));
         }
         // Step 3. If url does not contain "%s", then throw a "SyntaxError" DOMException.
         if !url.contains("%s") {
@@ -269,11 +269,11 @@ impl Navigator {
         // Step 6. If urlRecord's scheme is not an HTTP(S) scheme or urlRecord's origin
         // is not same origin with environment's origin, then throw a "SecurityError" DOMException.
         if !matches!(url.scheme(), "http" | "https") {
-            return Err(Error::Security(None));
+            return Err(Error::Security(Some("navigator.registerProtocolHandler: the scheme or URL is not allowed".into())));
         }
         let environment_origin = environment.origin().immutable().clone();
         if url.origin() != environment_origin {
-            return Err(Error::Security(None));
+            return Err(Error::Security(Some("navigator.registerProtocolHandler: the scheme or URL is not allowed".into())));
         }
         // Step 7. Assert: the result of Is url potentially trustworthy? given urlRecord is "Potentially Trustworthy".
         assert!(url.is_potentially_trustworthy());
