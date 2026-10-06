@@ -69,6 +69,7 @@ const REQUIRED: &[(&str, &str)] = &[
     ("performance.now/mark/measure", "(function(){performance.mark('a');performance.mark('b');performance.measure('m','a','b');return typeof performance.now()==='number'})()"),
     ("requestAnimationFrame", "typeof requestAnimationFrame === 'function'"),
     ("Animation / KeyframeEffect / element.animate", "typeof Animation === 'function' && typeof KeyframeEffect === 'function' && document.createElement('div').animate([{opacity:0},{opacity:1}],1) instanceof Animation"),
+    ("getAnimations on elements, the document and shadow roots", "typeof document.getAnimations === 'function' && typeof document.createElement('div').getAnimations === 'function' && typeof document.createElement('div').attachShadow({mode:'open'}).getAnimations === 'function'"),
     ("AbortController", "typeof AbortController === 'function' && typeof AbortSignal === 'function'"),
     ("URL / URLSearchParams", "new URL('https://a.b/c?d=1').searchParams.get('d') === '1'"),
     ("fetch / Headers / Request", "typeof fetch === 'function' && typeof Headers === 'function' && typeof Request === 'function'"),

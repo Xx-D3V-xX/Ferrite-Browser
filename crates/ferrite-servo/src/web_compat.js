@@ -289,6 +289,13 @@
         value: function getAnimations() { return []; }, writable: true, configurable: true, enumerable: false
       });
     }
+    // Shadow roots have it too (DocumentOrShadowRoot): Cloudflare's site calls
+    // `this.shadowRoot.getAnimations()`.
+    if (typeof ShadowRoot !== 'undefined' && typeof ShadowRoot.prototype.getAnimations !== 'function') {
+      Object.defineProperty(ShadowRoot.prototype, 'getAnimations', {
+        value: function getAnimations() { return []; }, writable: true, configurable: true, enumerable: false
+      });
+    }
   } catch (e) { /* a frozen prototype */ }
 })();
 

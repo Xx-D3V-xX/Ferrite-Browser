@@ -1,15 +1,16 @@
 # One site per line: name, URL, and optionally a JavaScript expression to ask the
 # page after it loads (separated by " | "). Read by scripts/site-check/run.sh.
+# A name ending in `@slow` gets SITE_CHECK_SLOW_MS (a bot check that takes a while).
 google | https://www.google.com/
 google-search | https://www.google.com/search?q=rust+programming+language
 google-signin | https://accounts.google.com/
 youtube | https://www.youtube.com/
-youtube-watch | https://www.youtube.com/watch?v=aqz-KE-bpKQ | (function(){var v=document.querySelector('video');return v?('video t='+v.currentTime.toFixed(1)+' paused='+v.paused+' ready='+v.readyState+' '+v.videoWidth+'x'+v.videoHeight):'no video element'})()
+youtube-watch | https://www.youtube.com/watch?v=aqz-KE-bpKQ | (function(){var v=document.querySelector('video');var p=document.getElementById('movie_player');var o={video:!!v};if(v){o.t=+v.currentTime.toFixed(1);o.paused=v.paused;o.ready=v.readyState;o.network=v.networkState;o.size=v.videoWidth+'x'+v.videoHeight;o.src=String(v.currentSrc||v.src).slice(0,40);o.error=v.error&&(v.error.code+' '+v.error.message)}try{o.player=p&&p.getPlayerState?p.getPlayerState():'none'}catch(e){o.player='threw '+e}o.mse=typeof MediaSource;try{o.h264=MediaSource.isTypeSupported('video/mp4; codecs="avc1.4d401f"');o.vp9=MediaSource.isTypeSupported('video/webm; codecs="vp9"');o.av1=MediaSource.isTypeSupported('video/mp4; codecs="av01.0.05M.08"');o.opus=MediaSource.isTypeSupported('audio/webm; codecs="opus"')}catch(e){o.mseErr=String(e)}var err=document.querySelector('.ytp-error-content-wrap-reason');if(err)o.ytError=err.textContent.trim().slice(0,80);return JSON.stringify(o)})()
 github | https://github.com/
 github-repo | https://github.com/servo/servo
 wikipedia | https://en.wikipedia.org/wiki/Web_browser
 mdn | https://developer.mozilla.org/en-US/docs/Web/CSS/grid
-stackoverflow | https://stackoverflow.com/questions/11227809/why-is-processing-a-sorted-array-faster-than-processing-an-unsorted-array
+stackoverflow@slow | https://stackoverflow.com/questions/11227809/why-is-processing-a-sorted-array-faster-than-processing-an-unsorted-array
 reddit | https://www.reddit.com/
 x | https://x.com/
 bbc | https://www.bbc.com/news
@@ -26,7 +27,7 @@ angular | https://angular.dev/
 svelte | https://svelte.dev/
 tailwind | https://tailwindcss.com/
 vercel | https://vercel.com/
-medium | https://medium.com/
+medium@slow | https://medium.com/
 notion | https://www.notion.com/
 figma | https://www.figma.com/
 discord | https://discord.com/

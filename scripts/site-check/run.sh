@@ -11,28 +11,39 @@ mkdir -p "$out"
 wait_ms="${SITE_CHECK_WAIT_MS:-15000}"
 summary="$out/summary.md"
 {
-  echo "| site | title | load | errors | warnings | crash | page answer |"
-  echo "|---|---|---|---|---|---|---|"
+  echo "| site | title | load | painted | errors | warnings | crash | page answer |"
+  echo "|---|---|---|---|---|---|---|---|"
 } > "$summary"
 list="${SITE_CHECK_LIST:-$(dirname "$0")/sites.txt}"
 grep -vE '^\s*(#|$)' "$list" | while IFS= read -r line; do
   name="$(echo "$line" | awk -F' \\| ' '{print $1}' | xargs)"
   url="$(echo "$line" | awk -F' \\| ' '{print $2}' | xargs)"
   js="$(echo "$line" | awk -F' \\| ' '{print $3}')"
+  wait="$wait_ms"
+  case "$name" in *@slow) name="${name%@slow}"; wait="${SITE_CHECK_SLOW_MS:-40000}" ;; esac
   if [ "$#" -gt 0 ] && ! printf '%s\n' "$@" | grep -qx "$name"; then continue; fi
   echo "== $name $url"
   log="$out/$name.log"
-  PAGE_SHOT_JS="${js:-document.readyState}" timeout 120 "$bin" "$url" "$wait_ms" "$out/$name.png" 1280 800 > "$log" 2>&1
+  PAGE_SHOT_JS="${js:-document.readyState}" timeout 150 "$bin" "$url" "$wait" "$out/$name.png" 1280 800 > "$log" 2>&1
   code=$?
+  # A crash (a signal, not a failed check): load it again under gdb for a backtrace.
+  if [ "$code" -ge 128 ] && [ "$code" -ne 143 ] && command -v gdb > /dev/null; then
+    echo "-- exit $code: again under gdb" >> "$log"
+    PAGE_SHOT_JS="${js:-document.readyState}" timeout 300 gdb -batch -q -ex run -ex "thread apply all bt 25" \
+      --args "$bin" "$url" "$wait" "$out/$name-gdb.png" 1280 800 >> "$log" 2>&1
+  fi
   title="$(grep -m1 '^TITLE' "$log" | cut -c9- | tr '|' '/' | cut -c1-60)"
   load="$(grep -m1 '^LOADED' "$log" | cut -c9- | cut -c1-30)"
+  painted="$(grep -m1 '^PAINT' "$log" | cut -c9- | cut -d' ' -f1)"
   errors="$(grep -c '^CONSOLE error' "$log")"
   warnings="$(grep -c '^CONSOLE warn' "$log")"
   crash="$(grep -m1 '^CRASH' "$log" | cut -c9- | cut -c1-60)"
   [ "$code" -ne 0 ] && crash="${crash} exit $code"
   answer="$(grep -m1 '^JS' "$log" | cut -c9- | tr '|' '/' | cut -c1-80)"
-  echo "| $name | $title | $load | $errors | $warnings | ${crash:-} | $answer |" >> "$summary"
-  grep -E '^(TITLE|LOADED|JS|CRASH|CONSOLE error)' "$log" | head -15
+  echo "| $name | $title | $load | ${painted:-} | $errors | $warnings | ${crash:-} | $answer |" >> "$summary"
+  grep -E '^(TITLE|LOADED|PAINT|JS|CRASH|CONSOLE (error|warn))' "$log" | head -25
+  # The backtrace of the crashing thread, if gdb ran.
+  grep -A30 'received signal' "$log" | head -40
 done
 echo
 cat "$summary"

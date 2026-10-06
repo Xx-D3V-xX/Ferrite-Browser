@@ -42,13 +42,25 @@ fn main() {
     let started = Instant::now();
     session.navigate(&url);
 
+    // The load counts once the new page has started loading and then completed:
+    // the blank page the tab starts on is complete before the navigation begins.
+    let mut started_loading = false;
+    let blank_url = session.current_url().to_string();
     let mut complete_at = None;
     let deadline = started + Duration::from_millis(wait_ms);
     while Instant::now() < deadline {
         session.spin();
         std::thread::sleep(Duration::from_millis(8));
-        if complete_at.is_none() && *session.load_status() == LoadStatus::Complete {
-            complete_at = Some(started.elapsed());
+        // A page that loads between two polls is only seen as a new URL.
+        if session.current_url() != blank_url {
+            started_loading = true;
+        }
+        match *session.load_status() {
+            LoadStatus::Complete if started_loading && complete_at.is_none() => {
+                complete_at = Some(started.elapsed());
+            }
+            LoadStatus::Complete => {}
+            _ => started_loading = true,
         }
     }
 
@@ -105,6 +117,23 @@ fn main() {
             };
             if h > 10 {
                 println!("PIXELS  top {} bottom {}", at(5), at(h - 5));
+            }
+            // How much of the picture is not its most common colour: about 0% is
+            // a blank page (the real-site check reads this, not the picture).
+            let mut counts = std::collections::HashMap::<[u8; 3], usize>::new();
+            for pixel in rgba.as_chunks::<4>().0.iter().step_by(7) {
+                *counts.entry([pixel[0], pixel[1], pixel[2]]).or_default() += 1;
+            }
+            let total: usize = counts.values().sum();
+            if let Some((colour, most)) = counts.iter().max_by_key(|(_, n)| **n) {
+                println!(
+                    "PAINT   {:.1}% painted over the background rgb({},{},{}), {} colours",
+                    100.0 * (total - most) as f64 / total.max(1) as f64,
+                    colour[0],
+                    colour[1],
+                    colour[2],
+                    counts.len()
+                );
             }
         }
         None => println!("FRAME   none rendered"),
