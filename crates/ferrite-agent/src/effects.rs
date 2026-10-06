@@ -50,6 +50,8 @@ pub fn primitive_of_action(action: &AgentAction) -> Option<Primitive> {
         | AgentAction::Hover { .. }
         | AgentAction::SetChecked { .. }
         | AgentAction::SubmitForm { .. } => Primitive::Click,
+        // As `ferrite_engine::Call::primitive`: Enter or Space is a click.
+        AgentAction::PressKey { key, .. } if ferrite_engine::key_activates(key) => Primitive::Click,
         AgentAction::TypeText { .. }
         | AgentAction::SelectOption { .. }
         | AgentAction::PressKey { .. } => Primitive::DomWrite,

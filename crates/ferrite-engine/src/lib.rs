@@ -336,6 +336,9 @@ impl Call {
                 Primitive::Click
             }
             // A key press is input into whatever has focus.
+            // Enter submits a form and Space presses a focused button: a click's
+            // effect, so never weaker than one (T-237). Other keys are input.
+            Call::PressKey(_, key) if key_activates(key) => Primitive::Click,
             Call::TypeText(..) | Call::SelectOption(..) | Call::PressKey(..) => Primitive::DomWrite,
             Call::FillForm(_) => Primitive::FormFill,
             Call::Scroll(..) | Call::ScrollTo(_) => Primitive::Scroll,
@@ -571,6 +574,17 @@ pub trait BrowserEngine {
     }
 }
 
+/// Whether pressing `key` can activate something (submit a form, press a
+/// button), as a click would: Enter and Space, by their key names.
+#[must_use]
+pub fn key_activates(key: &str) -> bool {
+    key == " "
+        || matches!(
+            key.trim().to_ascii_lowercase().as_str(),
+            "enter" | "return" | "numpadenter" | "space" | "spacebar"
+        )
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -587,11 +601,22 @@ mod tests {
         ] {
             assert_eq!(call.primitive(), Primitive::DomRead, "{call:?}");
         }
-        // Key input is input.
+        // Key input is input, but a key that submits or presses is a click.
         assert_eq!(
-            Call::PressKey(None, "Enter".into()).primitive(),
+            Call::PressKey(None, "a".into()).primitive(),
             Primitive::DomWrite
         );
+        assert_eq!(
+            Call::PressKey(Some("#q".into()), "Tab".into()).primitive(),
+            Primitive::DomWrite
+        );
+        for key in ["Enter", "Return", "NumpadEnter", " ", "Space"] {
+            assert_eq!(
+                Call::PressKey(None, key.into()).primitive(),
+                Primitive::Click,
+                "{key}"
+            );
+        }
         // Pointer-driven or submitting actions are never weaker than a click.
         for call in [
             Call::Hover("@1".into()),

@@ -492,8 +492,21 @@ fn is_action_rejected(
     if rejected.contains(&action_tool_id(action)) {
         return true;
     }
-    if let Some(origin) = action_url(action).and_then(origin_of_url) {
-        if rejected_origins.contains(&origin) {
+    if let Some(url) = action_url(action) {
+        // A URL with no scheme (`attacker.example/x`) has no origin of its own,
+        // but the engine may still load it as `https://` or `http://`: either
+        // origin, if rejected, blocks it (T-237).
+        let candidates = match origin_of_url(url) {
+            Some(origin) => vec![origin],
+            None => ["https://", "http://"]
+                .iter()
+                .filter_map(|scheme| origin_of_url(&format!("{scheme}{}", url.trim())))
+                .collect(),
+        };
+        if candidates
+            .iter()
+            .any(|origin| rejected_origins.contains(origin))
+        {
             return true;
         }
     }
@@ -2028,8 +2041,11 @@ pub enum FerriteBrowserMessage {
     AgentTaskInputChanged(String),
     AgentTaskSubmitted,
     AgentToolLogged(String),
-    AgentCompleted(String),
-    AgentFailed(String),
+    /// The run (`run_id`) ended with an answer. A message from a run that is
+    /// no longer the current one is ignored (T-237).
+    AgentCompleted(u64, String),
+    /// The run (`run_id`) failed; ignored from an earlier run, as above.
+    AgentFailed(u64, String),
     StopAgent,
     /// The person pressed *Continue* on the sign-in handoff card: the agent
     /// picks up from the page as it is now.
@@ -2645,11 +2661,15 @@ pub fn update(
         FerriteBrowserMessage::AgentToolLogged(s) => {
             state.agent_log.push(AgentLogEntry::Note(s));
         }
-        FerriteBrowserMessage::AgentCompleted(s) => {
-            return conclude_run(state, Outcome::Answered(s));
+        FerriteBrowserMessage::AgentCompleted(run_id, s) => {
+            if run_id == state.run_id {
+                return conclude_run(state, Outcome::Answered(s));
+            }
         }
-        FerriteBrowserMessage::AgentFailed(s) => {
-            return conclude_run(state, Outcome::Failed(s));
+        FerriteBrowserMessage::AgentFailed(run_id, s) => {
+            if run_id == state.run_id {
+                return conclude_run(state, Outcome::Failed(s));
+            }
         }
         FerriteBrowserMessage::SigninContinue => {
             let (Some(wall), Some(mut live)) =
@@ -3722,10 +3742,10 @@ fn submit_task(state: &mut FerriteBrowser) -> Task<FerriteBrowserMessage> {
         let dry_record = match orch.run(&ipi_task, &driver).await {
             Ok(r) => r,
             Err(e) => {
-                let _ = event_tx.send(FerriteBrowserMessage::AgentFailed(format!(
-                    "dry run failed: {}",
-                    e
-                )));
+                let _ = event_tx.send(FerriteBrowserMessage::AgentFailed(
+                    run_id,
+                    format!("dry run failed: {}", e),
+                ));
                 return;
             }
         };
@@ -7377,6 +7397,31 @@ mod tests {
             last.content.contains("blocked by user consent"),
             "rejected tool id must be blocked, not executed: {last:?}"
         );
+    }
+
+    #[test]
+    fn a_rejected_origin_also_blocks_a_url_written_without_a_scheme() {
+        let rejected: std::collections::HashSet<String> = ["https://attacker.example".to_string()]
+            .into_iter()
+            .collect();
+        let none = std::collections::HashSet::new();
+        for url in [
+            "attacker.example/payload",
+            "  attacker.example",
+            "https://attacker.example/x",
+        ] {
+            let action = AgentAction::Navigate {
+                url: url.to_string(),
+            };
+            assert!(
+                is_action_rejected(&action, &none, &rejected),
+                "{url} must be blocked"
+            );
+        }
+        let elsewhere = AgentAction::Navigate {
+            url: "docs.example/page".to_string(),
+        };
+        assert!(!is_action_rejected(&elsewhere, &none, &rejected));
     }
 
     #[tokio::test]
