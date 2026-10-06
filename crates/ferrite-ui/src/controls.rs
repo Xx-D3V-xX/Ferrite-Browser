@@ -456,6 +456,8 @@ pub(crate) struct FileState {
     pub content: text_editor::Content,
     pub single: String,
     pub checks: Vec<PathCheck>,
+    /// Why the system file picker could not be shown, if it could not.
+    pub picker_note: Option<String>,
 }
 
 impl FileState {
@@ -466,6 +468,26 @@ impl FileState {
             content: text_editor::Content::new(),
             single: String::new(),
             checks: Vec::new(),
+            picker_note: None,
+        }
+    }
+
+    /// Fills the card with what the system picker returned (nothing for a
+    /// cancelled picker), to be checked and confirmed like typed paths.
+    fn take_picked(&mut self, picked: Result<Vec<std::path::PathBuf>, String>) {
+        match picked {
+            Ok(paths) if paths.is_empty() => {}
+            Ok(paths) => {
+                let lines: Vec<String> = paths.iter().map(|p| p.display().to_string()).collect();
+                if self.multiple {
+                    self.content = text_editor::Content::with_text(&lines.join("\n"));
+                } else {
+                    self.single = lines[0].clone();
+                }
+                self.picker_note = None;
+                self.recheck();
+            }
+            Err(why) => self.picker_note = Some(why),
         }
     }
 
@@ -553,6 +575,10 @@ pub enum Msg {
     ReplyChanged(String),
     FileAction(text_editor::Action),
     FileTextChanged(String),
+    /// Show the system's own file picker.
+    BrowseFiles,
+    /// What the system picker returned (nothing if cancelled).
+    FilesPicked(Result<Vec<std::path::PathBuf>, String>),
     ColorChanged(String),
     MenuHover(usize),
     MenuChoose(usize),
@@ -570,6 +596,8 @@ pub(crate) enum Outcome {
     Answer(ControlAnswer),
     /// Scroll the list to this offset.
     ScrollTo(f32),
+    /// Show the system file picker (several files or one).
+    Browse(bool),
 }
 
 impl PendingControl {
@@ -683,6 +711,11 @@ impl PendingControl {
             (ControlUi::File(f), _, Msg::FileTextChanged(text)) => {
                 f.single = text;
                 f.recheck();
+                Outcome::Nothing
+            }
+            (ControlUi::File(f), _, Msg::BrowseFiles) => Outcome::Browse(f.multiple),
+            (ControlUi::File(f), _, Msg::FilesPicked(picked)) => {
+                f.take_picked(picked);
                 Outcome::Nothing
             }
             (ControlUi::File(f), _, Msg::Accept) => {
@@ -862,6 +895,11 @@ pub(crate) fn update(state: &mut FerriteBrowser, msg: Msg) -> iced::Task<Ferrite
             select_scroll_id(),
             scrollable::AbsoluteOffset { x: 0.0, y },
         ),
+        Outcome::Browse(multiple) => {
+            iced::Task::perform(crate::native_picker::pick(multiple), |r| {
+                control_msg(Msg::FilesPicked(r))
+            })
+        }
     }
 }
 
@@ -1499,15 +1537,43 @@ fn file_view<'a>(
     f: &'a FileState,
     host: &str,
 ) -> Element<'a, FerriteBrowserMessage> {
-    let mut body: Vec<Element<FerriteBrowserMessage>> = vec![text(if f.multiple {
-        "Ferrite has no file browser yet. Type or paste the full path of each file, one per line (or separated by commas)."
-    } else {
-        "Ferrite has no file browser yet. Type or paste the full path of the file."
-    })
-    .size(TEXT_SMALL)
-    .color(palette.text_dim)
-    .wrapping(text::Wrapping::Word)
-    .into()];
+    let mut body: Vec<Element<FerriteBrowserMessage>> = vec![
+        button(
+            row![
+                icon(Icon::Folder, TEXT_BODY, palette.text),
+                text(if f.multiple {
+                    "Choose files…"
+                } else {
+                    "Choose a file…"
+                })
+                .size(TEXT_BODY),
+            ]
+            .spacing(SP_SM)
+            .align_y(Alignment::Center),
+        )
+        .padding([SP_SM - 1.0, SP_LG])
+        .style(outline_btn_style)
+        .on_press(control_msg(Msg::BrowseFiles))
+        .into(),
+        text(if f.multiple {
+            "Or type or paste the full path of each file, one per line (or separated by commas)."
+        } else {
+            "Or type or paste the full path of the file."
+        })
+        .size(TEXT_SMALL)
+        .color(palette.text_dim)
+        .wrapping(text::Wrapping::Word)
+        .into(),
+    ];
+    if let Some(note) = &f.picker_note {
+        body.push(
+            text(note.as_str())
+                .size(TEXT_CAPTION)
+                .color(palette.danger)
+                .wrapping(text::Wrapping::Word)
+                .into(),
+        );
+    }
     let field_style = |theme: &Theme, status: text_input::Status| {
         crate::tokens::field_style(theme, status, RADIUS_SM)
     };
@@ -1619,6 +1685,35 @@ fn file_view<'a>(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_picked_file_fills_the_card_and_is_checked_before_it_is_sent() {
+        let dir = std::env::temp_dir().join(format!("ferrite-picker-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let file = dir.join("photo.png");
+        std::fs::write(&file, b"x").unwrap();
+
+        let mut one = FileState::new(false, Vec::new());
+        // Cancelled: nothing changes.
+        one.take_picked(Ok(Vec::new()));
+        assert!(one.single.is_empty() && one.answer().is_none());
+        one.take_picked(Ok(vec![file.clone()]));
+        assert_eq!(one.single, file.display().to_string());
+        assert_eq!(one.answer(), Some(ControlAnswer::Files(vec![file.clone()])));
+        // No picker on this system: said so, and the typed field still works.
+        one.take_picked(Err("No system file picker".into()));
+        assert!(one.picker_note.is_some());
+
+        let second = dir.join("notes.txt");
+        std::fs::write(&second, b"y").unwrap();
+        let mut many = FileState::new(true, Vec::new());
+        many.take_picked(Ok(vec![file.clone(), second.clone()]));
+        assert_eq!(
+            many.answer(),
+            Some(ControlAnswer::Files(vec![file, second]))
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 
     fn option(index: usize, label: &str) -> SelectOptionView {
         SelectOptionView {

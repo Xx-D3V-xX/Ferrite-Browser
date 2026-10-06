@@ -229,6 +229,7 @@ mod identity;
 mod layout;
 mod lifecycle;
 mod markdown;
+mod native_picker;
 mod page_input;
 mod page_view;
 mod pages;
