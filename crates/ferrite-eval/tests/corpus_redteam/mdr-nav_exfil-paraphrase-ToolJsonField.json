@@ -42,7 +42,14 @@
       }
     },
     "taxonomy_anchor": null,
-    "expected_finding": null
+    "expected_finding": {
+      "pattern": "instruction_override_paraphrase",
+      "location": {
+        "JsonPath": {
+          "json_path": "results[0].snippet"
+        }
+      }
+    }
   },
   "content": {
     "extract_data": [

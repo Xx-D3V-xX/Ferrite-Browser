@@ -40,7 +40,14 @@
       }
     },
     "taxonomy_anchor": null,
-    "expected_finding": null
+    "expected_finding": {
+      "pattern": "instruction_override_paraphrase",
+      "location": {
+        "WebChannel": {
+          "channel": "visible_text"
+        }
+      }
+    }
   },
   "content": {
     "read_page": [

@@ -38,7 +38,14 @@
       }
     },
     "taxonomy_anchor": null,
-    "expected_finding": null
+    "expected_finding": {
+      "pattern": "claimed_user_authorization",
+      "location": {
+        "WebChannel": {
+          "channel": "comment"
+        }
+      }
+    }
   },
   "content": {
     "read_page": [
