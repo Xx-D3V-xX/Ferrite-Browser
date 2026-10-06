@@ -65,7 +65,8 @@ def find_servo_plugin_lists() -> Path:
         return Path(override)
     out = subprocess.run(
         ["cargo", "metadata", "--format-version", "1", "--locked", "--all-features"],
-        cwd=REPO, check=True, capture_output=True, text=True,
+        # UTF-8, not the machine's default (Windows': cp1252 chokes on package metadata).
+        cwd=REPO, check=True, capture_output=True, encoding="utf-8", errors="replace",
     ).stdout
     for package in json.loads(out)["packages"]:
         if package["name"] == "servo":
@@ -142,7 +143,7 @@ def resolve_dependency(dep: str, search: list[Path], loader_dir: Path) -> Path |
 
 
 def run(cmd: list[str], **kw) -> str:
-    result = subprocess.run(cmd, check=True, capture_output=True, text=True, **kw)
+    result = subprocess.run(cmd, check=True, capture_output=True, encoding="utf-8", errors="replace", **kw)
     return result.stdout
 
 
