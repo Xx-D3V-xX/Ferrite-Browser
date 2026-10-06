@@ -4,14 +4,9 @@
 # `@compat=<setting>` loads it with FERRITE_COMPAT=<setting> (`none`, `-web`, ...).
 google | https://www.google.com/
 google-search | https://www.google.com/search?q=rust+programming+language
-# Bisecting "Could not load raw safevalues" (CI run 37545369862) against the scripts.
-google-search-again@compat= | https://www.google.com/search?q=rust+programming+language
+# A control: the same page with no compatibility scripts, to tell a regression of
+# theirs from the page changing (T-334).
 google-search-nocompat@compat=none | https://www.google.com/search?q=rust+programming+language
-google-search-noweb@compat=-web | https://www.google.com/search?q=rust+programming+language
-google-search-nosw@compat=-sw | https://www.google.com/search?q=rust+programming+language
-google-search-nostorage@compat=-storage | https://www.google.com/search?q=rust+programming+language
-google-search-nocq@compat=-cq | https://www.google.com/search?q=rust+programming+language
-google-search-nosvg@compat=-svg | https://www.google.com/search?q=rust+programming+language
 google-signin | https://accounts.google.com/
 youtube | https://www.youtube.com/
 youtube-watch | https://www.youtube.com/watch?v=aqz-KE-bpKQ | (function(){var v=document.querySelector('video');var p=document.getElementById('movie_player');var o={video:!!v};if(v){o.t=+v.currentTime.toFixed(1);o.paused=v.paused;o.ready=v.readyState;o.network=v.networkState;o.size=v.videoWidth+'x'+v.videoHeight;o.src=String(v.currentSrc||v.src).slice(0,40);o.error=v.error&&(v.error.code+' '+v.error.message)}try{o.player=p&&p.getPlayerState?p.getPlayerState():'none'}catch(e){o.player='threw '+e}o.mse=typeof MediaSource;try{o.h264=MediaSource.isTypeSupported('video/mp4; codecs="avc1.4d401f"');o.vp9=MediaSource.isTypeSupported('video/webm; codecs="vp9"');o.av1=MediaSource.isTypeSupported('video/mp4; codecs="av01.0.05M.08"');o.opus=MediaSource.isTypeSupported('audio/webm; codecs="opus"')}catch(e){o.mseErr=String(e)}try{var r=(p&&p.getPlayerResponse&&p.getPlayerResponse())||window.ytInitialPlayerResponse;var ps=r&&r.playabilityStatus;if(ps)o.playable=(ps.status+' '+(ps.reason||'')).slice(0,80);var sd=r&&r.streamingData;if(sd)o.formats=(sd.adaptiveFormats||[]).length+' adaptive, sabr '+!!sd.serverAbrStreamingUrl}catch(e){o.playable='threw '+e}var err=document.querySelector('.ytp-error-content-wrap-reason');if(err)o.ytError=err.textContent.trim().slice(0,80);return JSON.stringify(o)})()
