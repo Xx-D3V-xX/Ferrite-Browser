@@ -94,6 +94,19 @@ def parse_otool(output: str, own_name: str) -> list[str]:
     return deps
 
 
+def parse_rpaths(otool_l: str) -> list[str]:
+    """The LC_RPATH entries an `otool -l` listing shows."""
+    found, want = [], False
+    for line in otool_l.splitlines():
+        text = line.strip()
+        if text == "cmd LC_RPATH":
+            want = True
+        elif want and text.startswith("path "):
+            found.append(text[len("path "):].split(" (offset")[0])
+            want = False
+    return found
+
+
 def rpath_name(path: str) -> str:
     return "@rpath/" + os.path.basename(path)
 
@@ -197,6 +210,12 @@ def bundle_macos(app: Path, prefix: Path, main_name: str = "ferrite") -> None:
     for target, pairs in changes.items():
         for old, new in pairs:
             run(["install_name_tool", "-change", old, new, str(target)])
+    # Take out the search paths the file was built with. They are searched before ours, so
+    # on a machine that has Homebrew's GStreamer they would load Homebrew's copy of every
+    # library next to ours (two GLibs in one process: spurious failures and silent exits).
+    for target in rpaths:
+        for old in parse_rpaths(run(["otool", "-l", str(target)])):
+            run(["install_name_tool", "-delete_rpath", old, str(target)])
     for target, rpath in rpaths.items():
         try:
             run(["install_name_tool", "-add_rpath", rpath, str(target)])
@@ -287,6 +306,20 @@ def self_test() -> int:
         (plug / "libgstnice.dylib").symlink_to(d / "nowhere.dylib")
         listed = [f.name for f in plug.glob("*.dylib") if f.exists()]
         assert listed == ["libgstcoreelements.dylib"], listed
+    sample = """Load command 12
+          cmd LC_RPATH
+      cmdsize 48
+         path /opt/homebrew/lib (offset 12)
+Load command 13
+          cmd LC_LOAD_DYLIB
+         name /usr/lib/libSystem.B.dylib (offset 24)
+Load command 14
+          cmd LC_RPATH
+      cmdsize 64
+         path /opt/homebrew/Cellar/gstreamer/1.26.0/lib (offset 12)
+"""
+    assert parse_rpaths(sample) == ["/opt/homebrew/lib", "/opt/homebrew/Cellar/gstreamer/1.26.0/lib"], parse_rpaths(sample)
+    assert parse_rpaths("") == []
     print("self-test ok")
     return 0
 
