@@ -9,7 +9,7 @@ publish = false
 # Enable Servo engine integration:
 #   cargo build -p ferrite-servo --features servo
 #   cargo build -p ferrite-shell --features ferrite-servo/servo
-servo = ["dep:servo", "dep:euclid", "dep:stylo_static_prefs"]
+servo = ["dep:servo", "dep:euclid", "dep:stylo_static_prefs", "dep:surfman", "dep:gleam", "dep:glow"]
 # Audio and video playback (and WebRTC) through GStreamer. Needs the GStreamer
 # development files to build and its runtime and plugins next to the app, so it is off
 # by default; see docs/COMMANDS.md.
@@ -34,6 +34,11 @@ serde_json = { workspace = true }
 servo = { workspace = true, optional = true }
 # The unit-typed `Scale` the engine's HiDPI API takes (same version the engine uses).
 euclid = { version = "0.22", optional = true }
+# The opt-in GPU rendering context (`src/gpu_context.rs`, FERRITE_RENDERER=gpu) talks to
+# the same GL stack the engine does; versions match the engine's (see Cargo.lock).
+surfman = { version = "0.13", features = ["chains"], optional = true }
+gleam = { version = "0.15", optional = true }
+glow = { version = "0.17", optional = true }
 # The style engine's own preference table (`set_pref!`): `:has()` and other CSS
 # features are switched on there, and the engine's `Preferences` does not expose
 # them. Same version the engine uses (already in the lockfile).
@@ -43,7 +48,7 @@ stylo_static_prefs = { version = "=0.21.0", optional = true }
 # enabled (it does static analysis without --with-metadata by default) —
 # false-positive "unused dependency" without this.
 [package.metadata.cargo-machete]
-ignored = ["servo", "euclid", "stylo_static_prefs"]
+ignored = ["servo", "euclid", "stylo_static_prefs", "surfman", "gleam", "glow"]
 
 [dev-dependencies]
 # `examples/page_shot.rs` writes a PNG of what the engine rendered. Already in

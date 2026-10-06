@@ -154,7 +154,13 @@ def brew_dirs(prefix: Path) -> tuple[list[Path], list[Path]]:
     return plugin_dirs, lib_dirs
 
 
-def bundle_macos(app: Path, prefix: Path, main_name: str = "ferrite", lists_dir: Path | None = None) -> None:
+def bundle_macos(
+    app: Path,
+    prefix: Path,
+    main_name: str = "ferrite",
+    lists_dir: Path | None = None,
+    extras: tuple[str, ...] = (),
+) -> None:
     frameworks = app / "Contents" / "Frameworks"
     plugins_out = app / "Contents" / "MacOS" / "lib"  # where Servo looks
     frameworks.mkdir(parents=True, exist_ok=True)
@@ -175,13 +181,16 @@ def bundle_macos(app: Path, prefix: Path, main_name: str = "ferrite", lists_dir:
         sys.exit(f"Servo loads these GStreamer plugins and they are not under {prefix}: {missing}")
 
     main = app / "Contents" / "MacOS" / main_name
+    # Other programs placed beside the app (the CI end-to-end test runs the engine's probes
+    # from the bundle this way): fixed up exactly like the app itself.
+    executables = [main] + [app / "Contents" / "MacOS" / name for name in extras]
     todo: list[tuple[Path, Path, str]] = []  # (source, destination, rpath to add)
     for name in needed:
         # Contents/MacOS/lib/<plugin>: the libraries are two folders up, in Frameworks.
         todo.append((found[name], plugins_out / name, "@loader_path/../../Frameworks"))
 
     copied: dict[str, Path] = {}  # basename -> destination in Frameworks
-    queue: list[Path] = [main] + [d for _, d, _ in todo]
+    queue: list[Path] = executables + [d for _, d, _ in todo]
     for src, dst, _ in todo:
         shutil.copy2(src, dst)
         os.chmod(dst, 0o755)
@@ -207,7 +216,7 @@ def bundle_macos(app: Path, prefix: Path, main_name: str = "ferrite", lists_dir:
             changes.setdefault(current, []).append((dep, rpath_name(str(real))))
     # Rewrite the names, then give every file somewhere to look and a signature again (a
     # changed Mach-O file without one does not start on Apple silicon).
-    rpaths = {main: "@executable_path/../Frameworks"}
+    rpaths = {exe: "@executable_path/../Frameworks" for exe in executables}
     rpaths.update({d: r for _, d, r in todo})
     for name, dest in copied.items():
         rpaths[dest] = "@loader_path"
@@ -371,6 +380,7 @@ def main() -> int:
     ap.add_argument("command", choices=["macos", "windows", "list", "self-test"])
     ap.add_argument("target", nargs="?", help="Ferrite.app (macos), the stage directory (windows) or the platform (list)")
     ap.add_argument("--main", default="ferrite", help="name of the executable in Contents/MacOS (the smoke test uses another)")
+    ap.add_argument("--extra", action="append", default=[], help="another executable in Contents/MacOS to fix up the same way (repeatable)")
     ap.add_argument("--prefix", default=os.environ.get("HOMEBREW_PREFIX", "/opt/homebrew"))
     ap.add_argument("--root", default=os.environ.get("GSTREAMER_1_0_ROOT_MSVC_X86_64", r"C:\Program Files\gstreamer\1.0\msvc_x86_64"))
     args = ap.parse_args()
@@ -383,7 +393,7 @@ def main() -> int:
             ap.error("list takes macos or windows")
         print("\n".join(plugin_files(args.target)))
     elif args.command == "macos":
-        bundle_macos(Path(args.target), Path(args.prefix), args.main)
+        bundle_macos(Path(args.target), Path(args.prefix), args.main, extras=tuple(args.extra))
     else:
         bundle_windows(Path(args.target), Path(args.root))
     return 0

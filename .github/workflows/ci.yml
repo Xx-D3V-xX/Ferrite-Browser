@@ -376,6 +376,39 @@ jobs:
           if-no-files-found: error
           retention-days: 90
 
+      # The real engine, from a real bundle, on a Mac: the media and MSE probes (video,
+      # audio, a WebRTC data channel, Media Source Extensions) are bundled the way the app
+      # is and run twice, with Homebrew installed (as on a developer's Mac) and moved away.
+      # A second GLib in the process ("implemented in both"), a panic or a failed check
+      # fails the step. This is what the smoke test (GStreamer's own tool) cannot see.
+      - name: Run the engine's media probes from a bundle (macOS)
+        if: matrix.platform == 'macos'
+        run: |
+          cargo build --release -p ferrite-servo --features servo,media --example media_probe --example mse_probe
+          app="$RUNNER_TEMP/e2e/Ferrite.app"
+          rm -rf "$RUNNER_TEMP/e2e"; mkdir -p "$app/Contents/MacOS" "$app/Contents/Resources"
+          cp target/release/examples/media_probe target/release/examples/mse_probe "$app/Contents/MacOS/"
+          python3 scripts/bundle-gstreamer.py macos "$app" --main media_probe --extra mse_probe
+          bad=""
+          run_probe() {   # $1 = label, $2 = probe
+            set +e
+            "$app/Contents/MacOS/$2" > "$RUNNER_TEMP/$2.log" 2>&1
+            local code=$?
+            set -e
+            grep -E "^(PASS|FAIL)|passed, |panicked|PANIC|GStreamer bundle|implemented in both" "$RUNNER_TEMP/$2.log" | tail -60
+            if grep -q "implemented in both" "$RUNNER_TEMP/$2.log"; then echo "$1: TWO COPIES OF A LIBRARY IN ONE PROCESS"; bad=1; fi
+            if grep -qE "panicked|PANIC" "$RUNNER_TEMP/$2.log"; then echo "$1: A PANIC"; bad=1; fi
+            if [ "$code" -ne 0 ]; then echo "$1: $2 exited with $code"; tail -20 "$RUNNER_TEMP/$2.log"; bad=1; fi
+            echo "=== $1: $2 exit $code"
+          }
+          run_probe "Homebrew present" media_probe
+          run_probe "Homebrew present" mse_probe
+          sudo mv /opt/homebrew /opt/homebrew.hidden
+          run_probe "Homebrew hidden" media_probe
+          run_probe "Homebrew hidden" mse_probe
+          sudo mv /opt/homebrew.hidden /opt/homebrew
+          [ -z "$bad" ]
+
   # Tests scripts/bundle-gstreamer.py without building Servo (which takes an hour). It
   # bundles GStreamer's own gst-inspect-1.0 the way a release bundles the app, then does
   # what Servo does at start-up (`media_platform::init`): loads EVERY plugin on Servo's list,

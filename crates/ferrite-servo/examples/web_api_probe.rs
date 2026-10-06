@@ -83,6 +83,17 @@ const REQUIRED: &[(&str, &str)] = &[
 /// Present in current Chrome, Firefox and Safari and used by real sites, but
 /// not needed to run a page: a gap is reported as `INFO`, never as a failure.
 const OPTIONAL: &[(&str, &str)] = &[
+    // Where Google's scripts got `SecurityError: The operation is insecure` (T-267/T-270):
+    // the APIs a page commonly touches through a blank iframe or its own history. Every
+    // other browser allows each of these on a same-origin page.
+    ("about:blank iframe has the parent's origin", "(function(){var f=document.createElement('iframe');document.body.appendChild(f);var o=f.contentWindow.origin;f.remove();if(o!==window.origin)throw new Error(o);return true})()"),
+    ("about:blank iframe localStorage", "(function(){var f=document.createElement('iframe');document.body.appendChild(f);var s=f.contentWindow.localStorage;s.setItem('fx','1');var ok=s.getItem('fx')==='1';s.removeItem('fx');f.remove();return ok})()"),
+    ("about:blank iframe sessionStorage", "(function(){var f=document.createElement('iframe');document.body.appendChild(f);var s=f.contentWindow.sessionStorage;s.setItem('fx','1');var ok=s.getItem('fx')==='1';f.remove();return ok})()"),
+    ("about:blank iframe document.cookie", "(function(){var f=document.createElement('iframe');document.body.appendChild(f);f.contentDocument.cookie='fxi=1';var ok=typeof f.contentDocument.cookie==='string';f.remove();return ok})()"),
+    ("about:blank iframe indexedDB", "(function(){var f=document.createElement('iframe');document.body.appendChild(f);var r=f.contentWindow.indexedDB.open('fx-probe');f.remove();return !!r})()"),
+    ("document.domain = document.domain", "(function(){document.domain=document.domain;return true})()"),
+    ("history.pushState / replaceState (same origin)", "(function(){var p=location.pathname;history.pushState({a:1},'',p+'?fx=1');history.replaceState(null,'',p);return location.search===''})()"),
+    ("document.cookie read/write", "(function(){document.cookie='fxt=1';return document.cookie.indexOf('fxt=1')>=0})()"),
     // Off by default since the macOS fix (docs/TO-DO.md T-305); `FERRITE_WEBGL=on` turns it on.
     (
         "WebGL2 context",

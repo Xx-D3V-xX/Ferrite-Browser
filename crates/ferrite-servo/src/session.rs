@@ -311,6 +311,29 @@ pub enum WebGlMode {
     V2,
 }
 
+/// Whether the GPU renderer was asked for: `FERRITE_RENDERER=gpu` (or `hardware`).
+/// Anything else, or nothing, keeps the CPU renderer, which is the default (T-318).
+#[must_use]
+pub fn gpu_requested(setting: Option<&str>) -> bool {
+    matches!(
+        setting.map(|s| s.trim().to_ascii_lowercase()).as_deref(),
+        Some("gpu" | "hardware")
+    )
+}
+
+#[cfg(test)]
+mod gpu_requested_tests {
+    #[test]
+    fn only_an_explicit_request_turns_the_gpu_on() {
+        assert!(!super::gpu_requested(None));
+        assert!(!super::gpu_requested(Some("")));
+        assert!(!super::gpu_requested(Some("auto")));
+        assert!(!super::gpu_requested(Some("cpu")));
+        assert!(super::gpu_requested(Some(" GPU ")));
+        assert!(super::gpu_requested(Some("hardware")));
+    }
+}
+
 /// Which WebGL pages get, and the reason, from `FERRITE_WEBGL=off|webgl1|on|auto`
 /// (default auto, which is WebGL 1 only). WebGL 2 is off by default because the
 /// engine's WebGL 2 `drawBuffers`/`readBuffer` on the default framebuffer leave a
@@ -769,20 +792,35 @@ mod inner {
         SERVO_ENGINE.with(|cell| drop(cell.borrow_mut().take()));
     }
 
-    /// Makes the rendering context for one tab: always the CPU (software)
-    /// renderer. A GPU renderer was tried and removed: on an Apple M1 with it,
-    /// Google never finished loading and could not be scrolled or clicked, while
-    /// the CPU renderer worked (`docs/DECISIONS.md` ADR-021, `docs/TO-DO.md`
-    /// T-281 and T-305). Says once, in the log, what it uses.
+    /// Makes the rendering context for one tab. The CPU (software) renderer by default;
+    /// the GPU only when asked for with `FERRITE_RENDERER=gpu`, and only if it passes its
+    /// self-test (it falls back to the CPU and says why). The GPU path was the default once
+    /// and was taken out: on an Apple M1 with it, Google never finished loading and the
+    /// WebGL thread panicked (`docs/TO-DO.md` T-305). WebGL 2 is off and a dead WebGL
+    /// thread no longer freezes a page since then, so it is back to be tried, not trusted
+    /// (T-318). Says once, in the log, what it uses.
     fn make_rendering_context(size: PhysicalSize<u32>) -> Result<Rc<dyn RenderingContext>, String> {
         static REPORTED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
-        if !REPORTED.swap(true, std::sync::atomic::Ordering::Relaxed) {
-            eprintln!("[ferrite-render] CPU rendering (software); there is no GPU renderer");
-            if std::env::var_os("FERRITE_RENDERER").is_some() {
-                eprintln!(
-                    "[ferrite-render] FERRITE_RENDERER is ignored: there is only the CPU renderer"
-                );
+        let report = |line: String| {
+            if !REPORTED.swap(true, std::sync::atomic::Ordering::Relaxed) {
+                eprintln!("[ferrite-render] {line}");
             }
+        };
+        if super::gpu_requested(std::env::var("FERRITE_RENDERER").ok().as_deref()) {
+            match crate::gpu_context::HardwareRenderingContext::new(size) {
+                Ok(gpu) => {
+                    report(format!(
+                        "GPU rendering ({}), asked for with FERRITE_RENDERER=gpu",
+                        gpu.renderer()
+                    ));
+                    return Ok(Rc::new(gpu));
+                }
+                Err(e) => report(format!(
+                    "FERRITE_RENDERER=gpu, but the GPU did not pass its self-test ({e:?}); CPU rendering"
+                )),
+            }
+        } else {
+            report("CPU rendering (software); FERRITE_RENDERER=gpu tries the GPU".to_string());
         }
         SoftwareRenderingContext::new(size)
             .map(|cpu| Rc::new(cpu) as Rc<dyn RenderingContext>)
