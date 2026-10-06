@@ -190,6 +190,10 @@ def bundle_macos(app: Path, prefix: Path, main_name: str = "ferrite") -> None:
     for name, dest in copied.items():
         rpaths[dest] = "@loader_path"
         run(["install_name_tool", "-id", rpath_name(name), str(dest)])
+    # A plugin's own name should not point at the machine that built the bundle either.
+    for _, dest, _ in todo:
+        if dest.parent == plugins_out:
+            run(["install_name_tool", "-id", rpath_name(dest.name), str(dest)])
     for target, pairs in changes.items():
         for old, new in pairs:
             run(["install_name_tool", "-change", old, new, str(target)])

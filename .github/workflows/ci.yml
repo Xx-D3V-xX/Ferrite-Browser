@@ -403,7 +403,8 @@ jobs:
                    "$app"/Contents/Resources/gstreamer/plugins/*.dylib \
                    "$app/Contents/Resources/gstreamer/gst-plugin-scanner"; do
             [ -f "$f" ] || continue
-            if otool -L "$f" | tail -n +2 | grep -E "/opt/homebrew|/usr/local|/Users/"; then echo "LEAK in $f"; leak=1; fi
+            # (a library's first line is its own name, which is not a dependency)
+            if otool -L "$f" | tail -n +2 | grep -v "$(basename "$f")" | grep -E "/opt/homebrew|/usr/local|/Users/"; then echo "LEAK in $f"; leak=1; fi
           done
           [ -z "$leak" ] || exit 1
           echo "--- size"; du -sh "$app"
@@ -447,14 +448,20 @@ jobs:
           if ($LASTEXITCODE -ne 0) { throw "pkg-config cannot find GLib" }
           pkg-config --libs gstreamer-1.0
 
-      - name: Install Rust stable
-        uses: dtolnay/rust-toolchain@stable
-
-      - name: Build the GStreamer binding crates (finds pkg-config problems in minutes)
-        run: >
-          cargo check --release -p glib-sys -p gobject-sys -p gio-sys -p gstreamer-sys
-          -p gstreamer-app-sys -p gstreamer-audio-sys -p gstreamer-base-sys -p gstreamer-play-sys
-          -p gstreamer-sdp-sys -p gstreamer-video-sys -p gstreamer-webrtc-sys
+      - name: pkg-config finds every library the binding crates look for
+        shell: pwsh
+        run: |
+          $root = $env:GSTREAMER_1_0_ROOT_MSVC_X86_64
+          $bad = $false
+          foreach ($lib in 'glib-2.0','gobject-2.0','gio-2.0','gstreamer-1.0','gstreamer-app-1.0','gstreamer-audio-1.0','gstreamer-base-1.0','gstreamer-play-1.0','gstreamer-sdp-1.0','gstreamer-video-1.0','gstreamer-webrtc-1.0') {
+            $out = pkg-config --libs $lib 2>&1 | Out-String
+            if ($LASTEXITCODE -ne 0) { "MISSING $lib : $out"; $bad = $true; continue }
+            # The .pc files must point into the install, not at the machine that built it.
+            $dirs = [regex]::Matches($out, '-L(\S+)') | ForEach-Object { $_.Groups[1].Value }
+            $outside = $dirs | Where-Object { ($_ -replace '/','\') -notlike "$root*" }
+            if ($outside) { "OUTSIDE $lib : $($outside -join ' ')"; $bad = $true } else { "ok      $lib" }
+          }
+          if ($bad) { throw "pkg-config output is wrong" }
 
       - name: Bundle, take the installed GStreamer away, run the bundled copy
         shell: pwsh
