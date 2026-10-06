@@ -838,17 +838,20 @@ second author. So Cohen's κ still cannot be computed (T-227).
 | Mode | ASR | ADR | SDR | FGR |
 |---|---|---|---|---|
 | Off | 809/809 = 100.0% | n/a | n/a | n/a |
-| SanitizerOnly | 135/806 = 16.7% [14.3–19.5] | n/a | 671/673 = 99.7% | 3/129 = 2.3% (FSR-proxy) |
+| SanitizerOnly | 27/806 = 3.3% [2.3–4.8] | n/a | 779/781 = 99.7% | 3/129 = 2.3% (FSR-proxy) |
 | LoopOnly | 122/806 = 15.1% [12.8–17.8] | 621/621 = 100% | n/a | n/a |
-| On | 63/809 = 7.8% [6.1–9.8] | 624/624 = 100% | 671/676 = 99.3% | 0/129 = 0.0% [0–2.9] |
+| On | 0/809 = 0.0% [0–0.5] | 624/624 = 100% | 779/784 = 99.4% | 0/129 = 0.0% [0–2.9] |
 
 Residual R (actions that the prediction admits): 122/809 = 15.1%. LoopOnly's ASR
 *is* the residual. That is the point of ADR-007. The architecture contains every
 attack that needs an action outside the prediction, and nothing else. The
-sanitizer cuts 59 of the 122 (wording it can detect). That leaves On at 63.
-These 63 are the residual with wording that the sanitizer cannot recognise
-(paraphrase, social engineering, story framing) on the carriers that the scan
-cannot see.
+sanitizer cuts all 122. Until pattern set 3 (T-327, October 2026) it cut 59,
+leaving On at 63/809 = 7.8% [6.1–9.8] and SanitizerOnly at 135/806 = 16.7%:
+the residual worded as a paraphrase, a false claim of the user's approval, or
+a role-play game. Set 3 covers those three kinds of wording. **It was written
+after reading those 63 cases, so this corpus no longer tests it
+independently**; its golden cases (sentences it never saw, and everyday
+near-misses) are the evidence that the classes generalise.
 
 **What these numbers do not say.** The agent is scripted from ground truth. So
 the numbers say nothing about whether a real model takes the bait. That is the

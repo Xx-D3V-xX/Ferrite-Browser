@@ -822,6 +822,8 @@ const PROGRESS_PER_SECOND: f32 = 1.2;
 /// the 150-250ms range typical for this kind of UI entrance transition.
 const CONSENT_ANIM_STEP: f32 = 16.0 / 200.0;
 
+/// Advance per `TabAnimTick`: a new tab grows to its width in ~160 ms.
+const TAB_ANIM_STEP: f32 = 16.0 / 160.0;
 /// Advance per `MenuAnimTick`: the menu settles in ~140 ms.
 const MENU_ANIM_STEP: f32 = 16.0 / 140.0;
 
@@ -1623,6 +1625,10 @@ pub struct FerriteBrowser {
     /// Slide-in progress of the overflow menu, `0.0` (just opened) to `1.0`;
     /// advanced by `MenuAnimTick` while it is below `1.0`. Decoration only.
     pub menu_anim: f32,
+    /// The tab that is opening and how far it has grown, `0.0` to `1.0`;
+    /// advanced by `TabAnimTick` and cleared when it is done or a tab closes.
+    /// Decoration only.
+    pub tab_open_anim: Option<(usize, f32)>,
     /// When the tab strip's empty area was last pressed (double-click =
     /// maximize).
     last_titlebar_press: Option<std::time::Instant>,
@@ -1886,6 +1892,7 @@ impl Default for FerriteBrowser {
             hovered_tab: None,
             show_menu: false,
             menu_anim: 1.0,
+            tab_open_anim: None,
             last_titlebar_press: None,
             scroll_queue: scroll::ScrollQueue::default(),
             pointer_moved: false,
@@ -2123,6 +2130,8 @@ pub enum FerriteBrowserMessage {
     CloseMenu,
     /// One animation tick of the overflow menu's slide-in.
     MenuAnimTick,
+    /// Advances `tab_open_anim`.
+    TabAnimTick,
     /// A row of the overflow menu was picked: close the menu, then do it.
     Menu(chrome::MenuCommand),
     /// Open the library drawer on a given tab (from the overflow menu).
@@ -3142,6 +3151,12 @@ pub fn update(
         }
         FerriteBrowserMessage::MenuAnimTick => {
             state.menu_anim = (state.menu_anim + MENU_ANIM_STEP).min(1.0);
+        }
+        FerriteBrowserMessage::TabAnimTick => {
+            state.tab_open_anim = state
+                .tab_open_anim
+                .map(|(tab, t)| (tab, t + TAB_ANIM_STEP))
+                .filter(|(_, t)| *t < 1.0);
         }
         FerriteBrowserMessage::CloseMenu => {
             state.show_menu = false;
@@ -4217,6 +4232,7 @@ fn push_tab_state(state: &mut FerriteBrowser) -> usize {
     state.tab_diag.push(tab_diag::TabDiag::default());
     let new_idx = state.tabs.len() - 1;
     state.active_tab = new_idx;
+    state.tab_open_anim = Some((new_idx, 0.0));
     state.address_bar_input = String::new();
     state.is_loading = false;
     state.can_go_back = false;
@@ -4312,6 +4328,8 @@ fn select_tab_at(state: &mut FerriteBrowser, i: usize) -> bool {
 /// one and keeping the *same tab* active when an earlier one closes. The last
 /// remaining tab is never closed. Returns whether a tab was removed.
 fn close_tab_at(state: &mut FerriteBrowser, i: usize) -> bool {
+    // Indices shift when a tab closes: an opening animation just ends.
+    state.tab_open_anim = None;
     // Every later tab's index shifts by one — a stale hovered index would
     // otherwise show the close-on-hover button on the wrong tab until the
     // next real hover event.
@@ -6607,6 +6625,14 @@ pub fn subscription(state: &FerriteBrowser) -> Subscription<FerriteBrowserMessag
         Subscription::none()
     };
 
+    // A new tab's grow-in, only while it is growing.
+    let tab_anim_tick = if state.tab_open_anim.is_some() {
+        time::every(std::time::Duration::from_millis(16))
+            .map(|_| FerriteBrowserMessage::TabAnimTick)
+    } else {
+        Subscription::none()
+    };
+
     // The overflow menu's slide-in, only while it is opening.
     let menu_anim_tick = if state.show_menu && state.menu_anim < 1.0 {
         time::every(std::time::Duration::from_millis(16))
@@ -6671,6 +6697,7 @@ pub fn subscription(state: &FerriteBrowser) -> Subscription<FerriteBrowserMessag
         agent_event_sub,
         consent_anim_tick,
         menu_anim_tick,
+        tab_anim_tick,
         thread_anim_tick,
     ])
 }
@@ -7984,6 +8011,25 @@ mod tests {
     }
 
     // ── ease_out_cubic: the consent panel's entrance-transition curve ────
+
+    #[test]
+    fn a_new_tab_grows_in_and_the_animation_ends() {
+        let mut state = FerriteBrowser::default();
+        let tab = push_tab_state(&mut state);
+        assert_eq!(state.tab_open_anim, Some((tab, 0.0)));
+        let mut ticks = 0;
+        while state.tab_open_anim.is_some() {
+            let _ = update(&mut state, FerriteBrowserMessage::TabAnimTick);
+            ticks += 1;
+            assert!(ticks < 50, "the animation must end");
+        }
+        // About 160 ms at 16 ms a tick.
+        assert!((9..=11).contains(&ticks), "{ticks} ticks");
+        // Closing a tab ends one that is still growing.
+        push_tab_state(&mut state);
+        close_tab_at(&mut state, 0);
+        assert_eq!(state.tab_open_anim, None);
+    }
 
     #[test]
     fn ease_out_cubic_starts_at_zero_and_ends_at_one() {

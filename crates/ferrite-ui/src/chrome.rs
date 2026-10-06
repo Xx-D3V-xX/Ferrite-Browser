@@ -322,6 +322,11 @@ fn tab_row(state: &FerriteBrowser, width: f32) -> Element<'_, Msg> {
             } else {
                 other_w
             };
+            // A tab that just opened grows to its width.
+            let w = match state.tab_open_anim {
+                Some((tab, t)) if tab == i => (w * crate::ease_out_cubic(t)).max(24.0),
+                _ => w,
+            };
             tab_view(state, i, w, can_close)
         })
         .collect();

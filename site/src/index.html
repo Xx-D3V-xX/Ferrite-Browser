@@ -150,7 +150,7 @@ description: Ferrite is a browser for AI agents. It limits a hijacked agent by d
     <h3 style="margin-bottom:18px">Scripted test: what the guard guarantees when the attack does happen</h3>
     <div class="metrics">
       <div class="metric"><div class="num">938</div><div class="lab">cases, 3,488 runs</div><div class="sub">809 attacks and 129 benign controls across 13 tasks, 12 attacker goals and 11 carrier vectors. A benign control is a normal task with no attack. A carrier vector is the place where the hidden text sits.</div></div>
-      <div class="metric"><div class="num"><span class="grad">7.8%</span></div><div class="lab">attack success, full stack</div><div class="sub">Down from 100% with no defense: 809/809 to 63/809 [6.1–9.8]. A scripted agent always does the attack.</div></div>
+      <div class="metric"><div class="num"><span class="grad">0 / 809</span></div><div class="lab">attacks succeeding, full stack</div><div class="sub">Was 63/809 (7.8%) before the sanitizer's third rule set. Those rules were written after reading the 63 cases, so this corpus no longer tests them on its own; new sentences in their tests do. A scripted agent always does the attack.</div></div>
       <div class="metric"><div class="num">15.1%</div><div class="lab">architecture alone</div><div class="sub">Sanitizer off. What is left is the residual. These are attacks that need nothing outside the prediction. They look exactly like the normal task.</div></div>
       <div class="metric"><div class="num">0 / 129</div><div class="lab">benign tasks gated</div><div class="sub">A well-behaved scripted agent, with a rules-only prediction. See the caveat below.</div></div>
     </div>
@@ -159,11 +159,11 @@ description: Ferrite is a browser for AI agents. It limits a hijacked agent by d
       <div>
         <h3 style="margin-bottom:6px">Attack success rate by defense mode</h3>
         <p class="tiny" style="margin-bottom:22px">809 attacks (806 scored in the two isolated modes). Lines mark Wilson 95% ranges. Lower is better.</p>
-        <div class="bars" role="img" aria-label="Attack success rate: Off 100 percent, SanitizerOnly 16.7, LoopOnly 15.1, full stack 7.8">
+        <div class="bars" role="img" aria-label="Attack success rate: Off 100 percent, SanitizerOnly 3.3, LoopOnly 15.1, full stack 0">
           <div class="bar"><div class="name">Off<small>no defense</small></div><div class="track"><div class="fill ember" style="--w:100%"></div></div><div class="val">100%</div></div>
-          <div class="bar"><div class="name">Sanitizer only<small>text filter alone</small></div><div class="track"><div class="fill" style="--w:16.7%"></div><div class="ci" style="--lo:14.3%;--hi:19.5%"></div></div><div class="val">16.7%</div></div>
+          <div class="bar"><div class="name">Sanitizer only<small>text filter alone</small></div><div class="track"><div class="fill" style="--w:3.3%"></div><div class="ci" style="--lo:2.3%;--hi:4.8%"></div></div><div class="val">3.3%</div></div>
           <div class="bar"><div class="name">Architecture only<small>predict · compare · gate</small></div><div class="track"><div class="fill" style="--w:15.1%"></div><div class="ci" style="--lo:12.8%;--hi:17.8%"></div></div><div class="val">15.1%</div></div>
-          <div class="bar"><div class="name">Full stack<small>both layers</small></div><div class="track"><div class="fill good" style="--w:7.8%"></div><div class="ci" style="--lo:6.1%;--hi:9.8%"></div></div><div class="val">7.8%</div></div>
+          <div class="bar"><div class="name">Full stack<small>both layers</small></div><div class="track"><div class="fill good" style="--w:0%"></div><div class="ci" style="--lo:0%;--hi:0.5%"></div></div><div class="val">0%</div></div>
         </div>
       </div>
       <div>
@@ -188,7 +188,8 @@ description: Ferrite is a browser for AI agents. It limits a hijacked agent by d
         <li><strong>In the scripted test, the agent is a script, not a real model.</strong> The corpus runner makes the agent do each case's attack. So these numbers say nothing about whether a real model would take the bait. The live test below looks at that, for one model.</li>
         <li><strong>The headline assumes you reject what is flagged.</strong> The reported rate is the upper bound on human care. In the original 29-case run, a user who approves everything left 45.5% of attacks succeeding.</li>
         <li><strong>Ferrite's own authors wrote the corpus, and it is made from templates.</strong> The ranges treat cases as independent draws. A matrix is not independent. So the ranges understate the uncertainty. There is no second author yet, so there is no κ agreement score.</li>
-        <li><strong>The residual is real, and it exists by design.</strong> An attack that uses the same capability at the task's own site looks exactly like the task.</li>
+        <li><strong>The residual is real, and it exists by design.</strong> An attack that uses the same capability at the task's own site looks exactly like the task. Only the text filter can catch it, by its wording.</li>
+        <li><strong>The 0 / 809 is not an independent result.</strong> The filter's third rule set (claimed user approval, role-play framing, "set aside what you were told") was written after reading the 63 attacks that still got through. Before it, the full stack let 63/809 (7.8%) through. Sentences the rules never saw are caught in their tests, and everyday sentences are not; a real attacker with new wording is the open question.</li>
       </ul>
       <p style="margin:14px 0 0"><a href="{{ROOT}}docs/evaluation.html">Full methods and results</a> · <a href="{{ROOT}}docs/limits.html">Every known limit</a> · <a href="{{ROOT}}docs/reproduce.html">Reproduce it yourself</a></p>
     </div>

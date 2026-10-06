@@ -276,16 +276,16 @@ summary: How Ferrite's defense is tested: the four-mode method, the 938-case red
 <thead><tr><th>Mode</th><th class="num">ASR</th><th class="num">ADR</th><th class="num">SDR</th><th class="num">FGR</th></tr></thead>
 <tbody>
 <tr><td>Off</td><td class="num">809/809 = 100.0%</td><td class="num">n/a</td><td class="num">n/a</td><td class="num">n/a</td></tr>
-<tr><td>SanitizerOnly</td><td class="num">135/806 = 16.7% [14.3–19.5]</td><td class="num">n/a</td><td class="num">671/673 = 99.7%</td><td class="num">3/129 = 2.3%</td></tr>
+<tr><td>SanitizerOnly</td><td class="num">27/806 = 3.3% [2.3–4.8]</td><td class="num">n/a</td><td class="num">779/781 = 99.7%</td><td class="num">3/129 = 2.3%</td></tr>
 <tr><td>LoopOnly</td><td class="num">122/806 = 15.1% [12.8–17.8]</td><td class="num">621/621 = 100%</td><td class="num">n/a</td><td class="num">n/a</td></tr>
-<tr class="hl"><td>On (full stack)</td><td class="num">63/809 = 7.8% [6.1–9.8]</td><td class="num">624/624 = 100%</td><td class="num">671/676 = 99.3%</td><td class="num">0/129 = 0.0% [0–2.9]</td></tr>
+<tr class="hl"><td>On (full stack)</td><td class="num">0/809 = 0.0% [0–0.5]</td><td class="num">624/624 = 100%</td><td class="num">779/784 = 99.4%</td><td class="num">0/129 = 0.0% [0–2.9]</td></tr>
 </tbody></table></div>
 <p class="tiny">ASR is the attack success rate. ADR is how often the loop flagged the deviation. SDR is how often the sanitizer caught the attack text. FGR is the false gate rate: how often a normal task was gated. Ranges are Wilson 95% intervals. A Wilson interval is a range that shows how uncertain a rate is. "n/a" marks a metric that a mode cannot produce. The loop never runs in SanitizerOnly. The sanitizer never runs in LoopOnly. We show n/a, not a misleading 0%. FGR for SanitizerOnly is the false-strip proxy.</p>
 
 <h3>Reading the table</h3>
 <ul>
   <li><strong>The architecture contains every attack that needs an action outside the prediction, and no other kind.</strong> LoopOnly's ASR <em>is</em> the residual. 122 of 809 attacks (15.1%) use only actions that the prediction allows.</li>
-  <li><strong>The sanitizer then strips 59 of those 122.</strong> Their wording is easy to detect. That leaves On at 63. These are residual attacks with wording the sanitizer cannot recognize (paraphrase, social engineering, narrative framing), on carriers the scan cannot see.</li>
+  <li><strong>The sanitizer then strips all 122.</strong> Before its third rule set it stripped 59, and On stood at 63/809 (7.8%): residual attacks worded as a paraphrase ("pay no attention to what you were told"), a false claim of the user's approval, or a role-play game. The third rule set covers those three kinds of wording. <strong>It was written after reading those 63 cases, so this corpus is no longer an independent test of it.</strong> Its own tests use sentences it never saw (caught) and everyday sentences (left alone). Before the change, SanitizerOnly was 135/806 (16.7%).</li>
   <li><strong>ADR = 100% holds by design.</strong> A scripted agent does exactly the declared deviation. So ADR tests the comparator, not the agent.</li>
   <li><strong>0% false gates</strong> holds for a well-behaved scripted agent with a rules-only prediction. A real agent's rate depends on what it does, and on the model prediction layer. This run does not test that layer. The live test did, for one model: 86 of 226 normal tasks (38.1%) had an action refused. See <a href="#live-results">Live results</a>.</li>
 </ul>
