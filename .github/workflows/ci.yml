@@ -376,9 +376,13 @@ jobs:
           if-no-files-found: error
           retention-days: 90
 
-  # Tests scripts/bundle-gstreamer.py without building Servo (which takes an hour): it
-  # bundles GStreamer's own gst-inspect-1.0 the way a release bundles the app, takes the
-  # installed GStreamer out of reach, and runs the bundled copy.
+  # Tests scripts/bundle-gstreamer.py without building Servo (which takes an hour). It
+  # bundles GStreamer's own gst-inspect-1.0 the way a release bundles the app, then does
+  # what Servo does at start-up (`media_platform::init`): loads EVERY plugin on Servo's list,
+  # by file path, from the bundle's directory, with nothing scanned. If one will not load
+  # Servo ends the app with exit(1) and says nothing, which is how the first -media macOS
+  # build failed. It does this twice: with Homebrew still installed (as on a developer's
+  # Mac: nothing may load from it) and with Homebrew moved away.
   bundle-smoke-macos:
     name: GStreamer bundle smoke test (macOS)
     runs-on: macos-latest
@@ -394,51 +398,64 @@ jobs:
           brew install gstreamer
           brew install libnice-gstreamer || echo "no libnice-gstreamer formula"
 
-      - name: Bundle, hide Homebrew, run the bundled copy
+      - name: Install Rust stable
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Bundle, load Servo's plugins from it, with and without Homebrew
         run: |
           python3 scripts/bundle-gstreamer.py self-test
           app="$PWD/smoke/Ferrite.app"
           mkdir -p "$app/Contents/MacOS" "$app/Contents/Resources"
           cp "$(brew --prefix)/bin/gst-inspect-1.0" "$app/Contents/MacOS/gst-inspect"
           python3 scripts/bundle-gstreamer.py macos "$app" --main gst-inspect
-          echo "--- anything still pointing outside the bundle?"
+          libdir="$app/Contents/MacOS/lib"
+          python3 scripts/bundle-gstreamer.py list macos > "$RUNNER_TEMP/plugins.txt"
+          echo "--- size"; du -sh "$app"
+          echo "--- Servo lists $(wc -l < "$RUNNER_TEMP/plugins.txt") plugins; $(ls "$libdir" | wc -l) files are in the bundle's lib folder"
+
+          echo "--- a library's first line is its own name, which is not a dependency"
           leak=""
-          for f in "$app/Contents/MacOS/gst-inspect" "$app"/Contents/Frameworks/*.dylib \
-                   "$app"/Contents/Resources/gstreamer/plugins/*.dylib \
-                   "$app/Contents/Resources/gstreamer/gst-plugin-scanner"; do
+          for f in "$app/Contents/MacOS/gst-inspect" "$app"/Contents/Frameworks/*.dylib "$app"/Contents/MacOS/lib/*.dylib; do
             [ -f "$f" ] || continue
-            # (a library's first line is its own name, which is not a dependency)
             if otool -L "$f" | tail -n +2 | grep -v "$(basename "$f")" | grep -E "/opt/homebrew|/usr/local|/Users/"; then echo "LEAK in $f"; leak=1; fi
+            # (an old search path is searched first, so it makes the app load the machine's own copy)
+            if otool -l "$f" | awk '/cmd LC_RPATH/{r=1} r&&/ path /{print $2; r=0}' | grep -v '^@'; then echo "OUTSIDE RPATH in $f"; leak=1; fi
           done
           [ -z "$leak" ] || exit 1
-          echo "--- size"; du -sh "$app"
-          echo "--- no library search path may point outside the bundle"
-          bad=""
-          for f in "$app/Contents/MacOS/gst-inspect" "$app"/Contents/Frameworks/*.dylib \
-                   "$app"/Contents/Resources/gstreamer/plugins/*.dylib \
-                   "$app/Contents/Resources/gstreamer/gst-plugin-scanner"; do
-            [ -f "$f" ] || continue
-            # (an old search path is searched first, so it makes the app load the machine's own copy)
-            if otool -l "$f" | awk '/cmd LC_RPATH/{r=1} r&&/ path /{print $2; r=0}' | grep -v '^@'; then echo "OUTSIDE RPATH in $f"; bad=1; fi
-          done
-          [ -z "$bad" ] || exit 1
-          root="$app/Contents/Resources/gstreamer"
-          export GST_PLUGIN_SYSTEM_PATH_1_0="$root/plugins" GST_PLUGIN_PATH_1_0="$root/plugins"
+
+          # What Ferrite's bundle.rs sets: scan nothing (a path that does not exist), private registry.
+          export GST_PLUGIN_SYSTEM_PATH_1_0="$libdir/no-plugin-scan" GST_PLUGIN_PATH_1_0="$libdir/no-plugin-scan"
           export GST_REGISTRY_1_0="$RUNNER_TEMP/gst-registry.bin"
-          [ -f "$root/gst-plugin-scanner" ] && export GST_PLUGIN_SCANNER_1_0="$root/gst-plugin-scanner"
-          echo "--- with Homebrew still here (as on a developer's Mac), nothing may load from it"
-          rm -f "$GST_REGISTRY_1_0"
-          DYLD_PRINT_LIBRARIES=1 "$app/Contents/MacOS/gst-inspect" qtdemux >/dev/null 2>"$RUNNER_TEMP/dyld.txt" || true
-          echo "loaded images: $(grep -c . "$RUNNER_TEMP/dyld.txt")"
-          # (not `grep | head` in an `if`: head always succeeds, so that is true whatever grep found)
+          load_all() {   # $1 = label; loads each listed plugin the way Servo does, by path
+            local bad="" n=0
+            : > "$RUNNER_TEMP/dyld.txt"
+            while read -r f; do
+              n=$((n+1))
+              if DYLD_PRINT_LIBRARIES=1 "$app/Contents/MacOS/gst-inspect" "$libdir/$f" >"$RUNNER_TEMP/one.txt" 2>&1; then
+                cat "$RUNNER_TEMP/one.txt" >> "$RUNNER_TEMP/dyld.txt"
+              else
+                echo "WILL NOT LOAD: $f"; head -5 "$RUNNER_TEMP/one.txt"; bad=1
+              fi
+            done < "$RUNNER_TEMP/plugins.txt"
+            [ -z "$bad" ] || { echo "$1: Servo would call exit(1)"; return 1; }
+            echo "$1: all $n plugins load by path"
+          }
+
+          echo "--- with Homebrew installed (as on a developer's Mac), nothing may load from it"
+          load_all "Homebrew present" || exit 1
           from_brew="$(grep -E "/opt/homebrew|/usr/local/(Cellar|opt|lib)" "$RUNNER_TEMP/dyld.txt" || true)"
-          if [ -n "$from_brew" ]; then echo "$from_brew" | head -20; echo "LOADED FROM HOMEBREW"; exit 1; fi
+          if [ -n "$from_brew" ]; then echo "$from_brew" | sort -u | head -20; echo "LOADED FROM HOMEBREW"; exit 1; fi
           echo "nothing loaded from Homebrew"
-          rm -f "$GST_REGISTRY_1_0"
-          echo "--- hide Homebrew"
+
+          echo "--- Homebrew moved away"
           sudo mv /opt/homebrew /opt/homebrew.hidden
+          load_all "Homebrew hidden" || exit 1
+
+          echo "--- elements an app needs (this scans the bundle's folder, which the app itself does not)"
+          export GST_PLUGIN_SYSTEM_PATH_1_0="$libdir"; rm -f "$GST_REGISTRY_1_0"
+          missing=""
           for el in qtdemux matroskademux playbin3 appsrc avdec_h264 opusdec vp9dec webrtcbin; do
-            if "$app/Contents/MacOS/gst-inspect" "$el" >/dev/null 2>&1; then echo "ok   $el"; else echo "MISSING $el"; [ "$el" = webrtcbin ] || missing=1; fi
+            if "$app/Contents/MacOS/gst-inspect" "$el" >/dev/null 2>&1; then echo "ok   $el"; else echo "MISSING $el"; missing=1; fi
           done
           [ -z "$missing" ]
 
@@ -487,7 +504,10 @@ jobs:
           }
           if ($bad) { throw "pkg-config output is wrong" }
 
-      - name: Bundle, take the installed GStreamer away, run the bundled copy
+      - name: Install Rust stable
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Bundle, load Servo's plugins from it, with the installed GStreamer gone
         shell: pwsh
         run: |
           $root = $env:GSTREAMER_1_0_ROOT_MSVC_X86_64
@@ -497,19 +517,32 @@ jobs:
           python scripts/bundle-gstreamer.py self-test
           python scripts/bundle-gstreamer.py windows $stage --root $root
           if ($LASTEXITCODE -ne 0) { throw "bundling failed" }
+          $plugins = python scripts/bundle-gstreamer.py list windows
+          "Servo lists $($plugins.Count) plugins"
           "size: {0:N0} MB" -f ((Get-ChildItem $stage -Recurse -File | Measure-Object Length -Sum).Sum / 1MB)
           # Take the installed copy out of reach.
           Rename-Item (Split-Path (Split-Path $root)) 'gstreamer.hidden'
           $env:PATH = ($env:PATH -split ';' | Where-Object { $_ -notlike '*gstreamer*' }) -join ';'
           Remove-Item Env:GSTREAMER_1_0_ROOT_MSVC_X86_64, Env:PKG_CONFIG_PATH -ErrorAction SilentlyContinue
-          $plugins = "$stage\gstreamer\plugins"
-          $env:GST_PLUGIN_SYSTEM_PATH_1_0 = $plugins
-          $env:GST_PLUGIN_PATH_1_0 = $plugins
-          if (Test-Path "$stage\gstreamer\gst-plugin-scanner.exe") { $env:GST_PLUGIN_SCANNER_1_0 = "$stage\gstreamer\gst-plugin-scanner.exe" }
+          # What Ferrite's bundle.rs sets: scan nothing (a path that does not exist), private registry.
+          $env:GST_PLUGIN_SYSTEM_PATH_1_0 = "$stage\no-plugin-scan"
+          $env:GST_PLUGIN_PATH_1_0 = "$stage\no-plugin-scan"
           $env:GST_REGISTRY_1_0 = "$env:RUNNER_TEMP\gst-registry.bin"
+          # Servo loads each listed plugin by file path from the folder of the exe. If one will
+          # not load it calls exit(1) and says nothing.
+          $bad = $false
+          foreach ($f in $plugins) {
+            & "$stage\gst-inspect.exe" "$stage\$f" *> "$env:RUNNER_TEMP\one.txt"
+            if ($LASTEXITCODE -ne 0) { "WILL NOT LOAD: $f"; Get-Content "$env:RUNNER_TEMP\one.txt" -TotalCount 5; $bad = $true }
+          }
+          if ($bad) { throw "Servo would call exit(1)" }
+          "all $($plugins.Count) plugins load by path"
+          # Elements an app needs (this scans the folder, which the app itself does not).
+          $env:GST_PLUGIN_SYSTEM_PATH_1_0 = $stage
+          Remove-Item $env:GST_REGISTRY_1_0 -ErrorAction SilentlyContinue
           $missing = $false
           foreach ($el in 'qtdemux','matroskademux','playbin3','appsrc','avdec_h264','opusdec','vp9dec','webrtcbin') {
             & "$stage\gst-inspect.exe" $el *> $null
-            if ($LASTEXITCODE -eq 0) { "ok      $el" } else { "MISSING $el"; if ($el -ne 'webrtcbin') { $missing = $true } }
+            if ($LASTEXITCODE -eq 0) { "ok      $el" } else { "MISSING $el"; $missing = $true }
           }
           if ($missing) { throw "the bundle is missing elements" }

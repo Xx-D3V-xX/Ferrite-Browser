@@ -3,28 +3,36 @@
 
     scripts/bundle-gstreamer.py macos   Ferrite.app [--prefix /opt/homebrew]
     scripts/bundle-gstreamer.py windows STAGE_DIR   [--root "C:\\Program Files\\gstreamer\\1.0\\msvc_x86_64"]
+    scripts/bundle-gstreamer.py list    macos|windows     (the plugin files Servo loads, one a line)
+    scripts/bundle-gstreamer.py self-test
 
-The layout is the one `crates/ferrite-servo/src/bundle.rs` looks for:
+The layout is the one the engine insists on. On macOS and Windows Servo (`servo.rs`,
+`media_platform::init`) loads a fixed list of plugin files, by path, from one directory,
+and if any one of them will not load it logs the error and calls `exit(1)`: the app ends
+at start-up and says nothing. The list is `gstreamer_plugin_lists/` in the `servo` crate,
+and this script reads it from there (through `cargo metadata`) so it cannot drift from
+the engine in use.
 
-    macOS    Contents/Frameworks/*.dylib            libraries, with @rpath names
-             Contents/Resources/gstreamer/plugins   the plugins
-             Contents/Resources/gstreamer/gst-plugin-scanner
-    Windows  STAGE_DIR/*.dll                        libraries, next to ferrite.exe
-             STAGE_DIR/gstreamer/plugins            the plugins
-             STAGE_DIR/gstreamer/gst-plugin-scanner.exe
+    macOS    Contents/MacOS/lib/lib<name>.dylib     the plugins (Servo's directory)
+             Contents/Frameworks/*.dylib            the libraries they need, @rpath names
+    Windows  STAGE_DIR/<name>.dll                   the plugins (next to ferrite.exe)
+             STAGE_DIR/*.dll                        the libraries they need
 
-Only the plugins in PLUGINS are copied (a playbin3 pipeline, the codecs and containers a
-page's media uses, WebRTC, capture), and the libraries those need. A plugin that is not
-installed is reported and left out; the build fails only if the core ones are missing.
+`crates/ferrite-servo/src/bundle.rs` finds this layout at start-up and keeps GStreamer from
+scanning anywhere else (a scan of the same directory would register each plugin twice,
+which Servo counts as a failure; a scan of the machine's own GStreamer would mix two).
 
-It has not been run on a Mac or on Windows by its author (nothing there to run it on);
-`--self-test` checks the parts that do not need one. The release workflow builds these
-packages in a job that cannot hold a release up, so a failure here costs the media
-package, not the release.
+On macOS every file also has the library search paths it was built with removed: they are
+searched before the bundle's, and on a machine that has Homebrew's GStreamer they made the
+app load Homebrew's libraries next to its own.
+
+`self-test` checks the parts that need no Mac or Windows. The CI jobs `bundle-smoke-macos`
+and `bundle-smoke-windows` run the real thing against the real engine's plugin list.
 """
 from __future__ import annotations
 
 import argparse
+import json
 import os
 import re
 import shutil
@@ -32,49 +40,53 @@ import subprocess
 import sys
 from pathlib import Path
 
-# Plugin names (the file without `lib` and the extension). `CORE` must be there.
-CORE = ["gstcoreelements", "gstapp", "gstplayback", "gsttypefindfunctions"]
-PLUGINS = CORE + [
-    # Conversion and plumbing.
-    "gstvideoconvertscale", "gstvideoscale", "gstvideoconvert", "gstvideorate", "gstaudioconvert",
-    "gstaudioresample", "gstaudiorate", "gstvolume", "gstautodetect", "gstvideofilter",
-    "gstaudiotestsrc", "gstvideotestsrc", "gsttcp", "gstmultifile", "gstqueue2",
-    # Containers and parsers (MSE feeds elementary streams; files and capture need the rest).
-    "gstisomp4", "gstmatroska", "gstogg", "gstwavparse", "gstid3demux", "gstaudioparsers",
-    "gstvideoparsersbad", "gstmpegtsdemux", "gstmpegpsdemux", "gstadaptivedemux2", "gstapetag",
-    "gsticydemux", "gstflac", "gstlame", "gstmpg123", "gstaiff", "gstavi", "gstflv",
-    # Decoders and encoders.
-    "gstlibav", "gstopenh264", "gstvpx", "gstopus", "gstvorbis", "gsttheora", "gstdav1d",
-    "gstaom", "gstx264", "gstopusparse", "gstdvdsub", "gstsubparse", "gstvideoparsersbad",
-    # WebRTC.
-    "gstwebrtc", "gstdtls", "gstsrtp", "gstnice", "gstrtp", "gstrtpmanager", "gstsctp", "gstrtsp",
-    "gstsdpelem", "gstudp", "gstvideo4linux2",
-    # macOS.
-    "gstapplemedia", "gstosxaudio", "gstosxvideo", "gstvideotoolbox",
-    # Windows.
-    "gstwasapi", "gstwasapi2", "gstd3d11", "gstmediafoundation", "gstwinscreencap",
-    "gstdirectsound", "gstdirectshow", "gstd3d12", "gstwinks",
-    # OpenGL (the video sink the engine uses when it can).
-    "gstopengl", "gstgl", "gstglimagesink", "gstgtk",
-]
+REPO = Path(__file__).resolve().parent.parent
 
 
-def plugin_name(path: str) -> str:
-    """`libgstisomp4.dylib` / `gstisomp4.dll` / `libgstisomp4.so` -> `gstisomp4`."""
-    name = os.path.basename(path)
-    name = re.sub(r"\.(dylib|so|dll)$", "", name)
-    return name[3:] if name.startswith("lib") else name
+# ----------------------------------------------------- the plugins Servo insists on
 
 
-def wanted_plugins(paths: list[str]) -> list[str]:
-    """The files among `paths` that are plugins this bundle carries, in a stable order."""
-    allow = set(PLUGINS)
-    return sorted(p for p in paths if plugin_name(p) in allow)
+def read_plugin_list(path: Path) -> list[str]:
+    """The names in one of Servo's `*.rs.in` lists (a Rust array of strings with `//`
+    comment lines)."""
+    names: list[str] = []
+    for line in path.read_text().splitlines():
+        text = line.strip()
+        if text.startswith("//"):
+            continue
+        names += re.findall(r'"([^"]+)"', text)
+    return names
 
 
-def missing_core(paths: list[str]) -> list[str]:
-    have = {plugin_name(p) for p in paths}
-    return [c for c in CORE if c not in have]
+def find_servo_plugin_lists() -> Path:
+    """The `gstreamer_plugin_lists` directory of the `servo` crate this workspace builds."""
+    override = os.environ.get("FERRITE_SERVO_PLUGIN_LISTS")
+    if override:
+        return Path(override)
+    out = subprocess.run(
+        ["cargo", "metadata", "--format-version", "1", "--locked", "--all-features"],
+        cwd=REPO, check=True, capture_output=True, text=True,
+    ).stdout
+    for package in json.loads(out)["packages"]:
+        if package["name"] == "servo":
+            lists = Path(package["manifest_path"]).parent / "gstreamer_plugin_lists"
+            if lists.is_dir():
+                return lists
+    sys.exit("could not find the servo crate's gstreamer_plugin_lists (set FERRITE_SERVO_PLUGIN_LISTS)")
+
+
+def plugin_files(platform: str, lists_dir: Path | None = None) -> list[str]:
+    """The plugin files Servo loads on `platform` ("macos" or "windows"), by file name."""
+    lists = lists_dir or find_servo_plugin_lists()
+    names = read_plugin_list(lists / "common.rs.in") + read_plugin_list(lists / f"{platform}.rs.in")
+    if platform == "macos":
+        return [f"lib{n}.dylib" for n in names]
+    if platform == "windows":
+        return [f"{n}.dll" for n in names]
+    raise ValueError(platform)
+
+
+# -------------------------------------------------------------- reading Mach-O files
 
 
 def parse_otool(output: str, own_name: str) -> list[str]:
@@ -141,10 +153,9 @@ def brew_dirs(prefix: Path) -> tuple[list[Path], list[Path]]:
     return plugin_dirs, lib_dirs
 
 
-def bundle_macos(app: Path, prefix: Path, main_name: str = "ferrite") -> None:
+def bundle_macos(app: Path, prefix: Path, main_name: str = "ferrite", lists_dir: Path | None = None) -> None:
     frameworks = app / "Contents" / "Frameworks"
-    gst = app / "Contents" / "Resources" / "gstreamer"
-    plugins_out = gst / "plugins"
+    plugins_out = app / "Contents" / "MacOS" / "lib"  # where Servo looks
     frameworks.mkdir(parents=True, exist_ok=True)
     plugins_out.mkdir(parents=True, exist_ok=True)
     plugin_dirs, lib_dirs = brew_dirs(prefix)
@@ -157,19 +168,16 @@ def bundle_macos(app: Path, prefix: Path, main_name: str = "ferrite") -> None:
                 print(f"warning: {f} points at nothing, left out", file=sys.stderr)
                 continue
             found.setdefault(f.name, f)
-    chosen = wanted_plugins([str(p) for p in found.values()])
-    gone = missing_core([str(p) for p in found.values()])
-    if gone:
-        sys.exit(f"missing core GStreamer plugins under {prefix}: {gone}")
-    scanner = next(iter(prefix.glob("opt/gstreamer/libexec/gstreamer-1.0/gst-plugin-scanner")), None) or \
-        next(iter(prefix.glob("libexec/gstreamer-1.0/gst-plugin-scanner")), None)
+    needed = plugin_files("macos", lists_dir)
+    missing = [n for n in needed if n not in found]
+    if missing:
+        sys.exit(f"Servo loads these GStreamer plugins and they are not under {prefix}: {missing}")
 
     main = app / "Contents" / "MacOS" / main_name
     todo: list[tuple[Path, Path, str]] = []  # (source, destination, rpath to add)
-    for p in chosen:
-        todo.append((Path(p), plugins_out / Path(p).name, "@loader_path/../../../Frameworks"))
-    if scanner:
-        todo.append((scanner, gst / "gst-plugin-scanner", "@loader_path/../../Frameworks"))
+    for name in needed:
+        # Contents/MacOS/lib/<plugin>: the libraries are two folders up, in Frameworks.
+        todo.append((found[name], plugins_out / name, "@loader_path/../../Frameworks"))
 
     copied: dict[str, Path] = {}  # basename -> destination in Frameworks
     queue: list[Path] = [main] + [d for _, d, _ in todo]
@@ -205,8 +213,7 @@ def bundle_macos(app: Path, prefix: Path, main_name: str = "ferrite") -> None:
         run(["install_name_tool", "-id", rpath_name(name), str(dest)])
     # A plugin's own name should not point at the machine that built the bundle either.
     for _, dest, _ in todo:
-        if dest.parent == plugins_out:
-            run(["install_name_tool", "-id", rpath_name(dest.name), str(dest)])
+        run(["install_name_tool", "-id", rpath_name(dest.name), str(dest)])
     for target, pairs in changes.items():
         for old, new in pairs:
             run(["install_name_tool", "-change", old, new, str(target)])
@@ -223,31 +230,28 @@ def bundle_macos(app: Path, prefix: Path, main_name: str = "ferrite") -> None:
             pass  # already there
     for target in list(rpaths):
         run(["codesign", "--force", "--sign", "-", str(target)])
-    print(f"bundled {len(chosen)} plugins and {len(copied)} libraries into {app}")
+    print(f"bundled {len(needed)} plugins and {len(copied)} libraries into {app}")
 
 
 # -------------------------------------------------------------------------- Windows
 
 
-def bundle_windows(stage: Path, root: Path) -> None:
-    gst = stage / "gstreamer"
-    plugins_out = gst / "plugins"
-    plugins_out.mkdir(parents=True, exist_ok=True)
-    plugin_files = [str(p) for p in (root / "lib" / "gstreamer-1.0").glob("*.dll")]
-    gone = missing_core(plugin_files)
-    if gone:
-        sys.exit(f"missing core GStreamer plugins under {root}: {gone}")
-    for p in wanted_plugins(plugin_files):
-        shutil.copy2(p, plugins_out)
-    # Windows resolves a plugin's libraries from the application's directory.
+def bundle_windows(stage: Path, root: Path, lists_dir: Path | None = None) -> None:
+    plugin_dir = root / "lib" / "gstreamer-1.0"
+    needed = plugin_files("windows", lists_dir)
+    missing = [n for n in needed if not (plugin_dir / n).exists()]
+    if missing:
+        sys.exit(f"Servo loads these GStreamer plugins and they are not under {plugin_dir}: {missing}")
+    stage.mkdir(parents=True, exist_ok=True)
+    # Servo loads the plugins from the directory of ferrite.exe, and Windows finds a
+    # plugin's libraries there too.
+    for name in needed:
+        shutil.copy2(plugin_dir / name, stage)
     libs = 0
     for dll in (root / "bin").glob("*.dll"):
         shutil.copy2(dll, stage)
         libs += 1
-    scanner = root / "libexec" / "gstreamer-1.0" / "gst-plugin-scanner.exe"
-    if scanner.exists():
-        shutil.copy2(scanner, gst)
-    print(f"bundled {len(wanted_plugins(plugin_files))} plugins and {libs} libraries into {stage}")
+    print(f"bundled {len(needed)} plugins and {libs} libraries into {stage}")
 
 
 # ----------------------------------------------------------------------------- tests
@@ -260,52 +264,36 @@ SAMPLE_OTOOL = """/opt/homebrew/opt/gstreamer/lib/gstreamer-1.0/libgstisomp4.dyl
 \t/System/Library/Frameworks/CoreFoundation.framework/Versions/A/CoreFoundation (compatibility version 150.0.0, current version 3000.0.0)
 """
 
+SAMPLE_COMMON = """// The list of plugin libraries themselves.
+[
+// gstreamer
+"gstcoreelements","gstnice",
+// gst-plugins-base
+"gstapp",
+"gstplayback",
+]
+"""
+SAMPLE_MACOS = """// The format of this file is intended to be include!()able.
+[
+// gst-plugins-good
+"gstosxaudio",
+]
+"""
+SAMPLE_WINDOWS = """[
+// gst-plugins-bad
+"gstwasapi"
+]
+"""
+
 
 def self_test() -> int:
     import tempfile
 
-    assert plugin_name("/x/lib/gstreamer-1.0/libgstisomp4.dylib") == "gstisomp4"
-    assert plugin_name("gstisomp4.dll") == "gstisomp4"
-    assert plugin_name("libgstlibav.so") == "gstlibav"
-    paths = ["a/libgstisomp4.dylib", "a/libgstsomethingelse.dylib", "a/libgstcoreelements.dylib"]
-    assert wanted_plugins(paths) == ["a/libgstcoreelements.dylib", "a/libgstisomp4.dylib"]
-    assert missing_core(paths) == ["gstapp", "gstplayback", "gsttypefindfunctions"]
-    deps = parse_otool(SAMPLE_OTOOL, "libgstisomp4.dylib")
-    assert deps == [
+    assert parse_otool(SAMPLE_OTOOL, "libgstisomp4.dylib") == [
         "/opt/homebrew/opt/glib/lib/libglib-2.0.0.dylib",
         "@rpath/libgstbase-1.0.0.dylib",
-    ], deps
+    ]
     assert rpath_name("/opt/homebrew/opt/glib/lib/libglib-2.0.0.dylib") == "@rpath/libglib-2.0.0.dylib"
-    with tempfile.TemporaryDirectory() as t:
-        d = Path(t)
-        (d / "libfoo.dylib").write_bytes(b"")
-        assert resolve_dependency("@rpath/libfoo.dylib", [d], d) == d / "libfoo.dylib"
-        assert resolve_dependency("@rpath/libbar.dylib", [d], d) is None
-        assert resolve_dependency("@loader_path/libfoo.dylib", [], d) == d / "libfoo.dylib"
-        assert resolve_dependency(str(d / "libfoo.dylib"), [], d) == d / "libfoo.dylib"
-        # A fake Windows install: bundling copies the wanted plugins and every DLL.
-        root = d / "gst"
-        (root / "lib" / "gstreamer-1.0").mkdir(parents=True)
-        (root / "bin").mkdir()
-        for n in CORE + ["gstisomp4", "gstunrelated"]:
-            (root / "lib" / "gstreamer-1.0" / f"{n}.dll").write_bytes(b"x")
-        (root / "bin" / "gstreamer-1.0-0.dll").write_bytes(b"x")
-        (root / "bin" / "gst-launch-1.0.exe").write_bytes(b"x")
-        stage = d / "stage"
-        stage.mkdir()
-        bundle_windows(stage, root)
-        assert (stage / "gstreamer" / "plugins" / "gstisomp4.dll").exists()
-        assert not (stage / "gstreamer" / "plugins" / "gstunrelated.dll").exists()
-        assert (stage / "gstreamer-1.0-0.dll").exists()
-        assert not (stage / "gst-launch-1.0.exe").exists()
-        # A dangling plugin link (Homebrew leaves one for libnice) is skipped, not copied.
-        brew = d / "brew"
-        plug = brew / "lib" / "gstreamer-1.0"
-        plug.mkdir(parents=True)
-        (plug / "libgstcoreelements.dylib").write_bytes(b"x")
-        (plug / "libgstnice.dylib").symlink_to(d / "nowhere.dylib")
-        listed = [f.name for f in plug.glob("*.dylib") if f.exists()]
-        assert listed == ["libgstcoreelements.dylib"], listed
     sample = """Load command 12
           cmd LC_RPATH
       cmdsize 48
@@ -318,25 +306,82 @@ Load command 14
       cmdsize 64
          path /opt/homebrew/Cellar/gstreamer/1.26.0/lib (offset 12)
 """
-    assert parse_rpaths(sample) == ["/opt/homebrew/lib", "/opt/homebrew/Cellar/gstreamer/1.26.0/lib"], parse_rpaths(sample)
+    assert parse_rpaths(sample) == ["/opt/homebrew/lib", "/opt/homebrew/Cellar/gstreamer/1.26.0/lib"]
     assert parse_rpaths("") == []
+    with tempfile.TemporaryDirectory() as t:
+        d = Path(t)
+        (d / "libfoo.dylib").write_bytes(b"")
+        assert resolve_dependency("@rpath/libfoo.dylib", [d], d) == d / "libfoo.dylib"
+        assert resolve_dependency("@rpath/libbar.dylib", [d], d) is None
+        assert resolve_dependency("@loader_path/libfoo.dylib", [], d) == d / "libfoo.dylib"
+        assert resolve_dependency(str(d / "libfoo.dylib"), [], d) == d / "libfoo.dylib"
+
+        # Servo's lists: comments skipped, names read, file names made per platform.
+        lists = d / "lists"
+        lists.mkdir()
+        (lists / "common.rs.in").write_text(SAMPLE_COMMON)
+        (lists / "macos.rs.in").write_text(SAMPLE_MACOS)
+        (lists / "windows.rs.in").write_text(SAMPLE_WINDOWS)
+        assert read_plugin_list(lists / "common.rs.in") == ["gstcoreelements", "gstnice", "gstapp", "gstplayback"]
+        assert plugin_files("macos", lists) == [
+            "libgstcoreelements.dylib", "libgstnice.dylib", "libgstapp.dylib",
+            "libgstplayback.dylib", "libgstosxaudio.dylib",
+        ]
+        assert plugin_files("windows", lists) == [
+            "gstcoreelements.dll", "gstnice.dll", "gstapp.dll", "gstplayback.dll", "gstwasapi.dll",
+        ]
+
+        # A fake Windows install: exactly the listed plugins and every DLL land beside the exe.
+        root = d / "gst"
+        (root / "lib" / "gstreamer-1.0").mkdir(parents=True)
+        (root / "bin").mkdir()
+        for n in plugin_files("windows", lists) + ["gstunrelated.dll"]:
+            (root / "lib" / "gstreamer-1.0" / n).write_bytes(b"x")
+        (root / "bin" / "gstreamer-1.0-0.dll").write_bytes(b"x")
+        (root / "bin" / "gst-launch-1.0.exe").write_bytes(b"x")
+        stage = d / "stage"
+        bundle_windows(stage, root, lists)
+        assert (stage / "gstwasapi.dll").exists() and (stage / "gstcoreelements.dll").exists()
+        assert not (stage / "gstunrelated.dll").exists()
+        assert (stage / "gstreamer-1.0-0.dll").exists()
+        assert not (stage / "gst-launch-1.0.exe").exists()
+        # A plugin Servo needs that is not installed stops the bundle: Servo would exit(1).
+        (root / "lib" / "gstreamer-1.0" / "gstnice.dll").unlink()
+        try:
+            bundle_windows(d / "stage2", root, lists)
+        except SystemExit as stop:
+            assert "gstnice.dll" in str(stop), stop
+        else:
+            raise AssertionError("a missing plugin was not refused")
+
+        # A dangling plugin link (Homebrew leaves one for libnice) is not a plugin.
+        brew = d / "brew"
+        plug = brew / "lib" / "gstreamer-1.0"
+        plug.mkdir(parents=True)
+        (plug / "libgstcoreelements.dylib").write_bytes(b"x")
+        (plug / "libgstnice.dylib").symlink_to(d / "nowhere.dylib")
+        assert [f.name for f in plug.glob("*.dylib") if f.exists()] == ["libgstcoreelements.dylib"]
     print("self-test ok")
     return 0
 
 
 def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    ap.add_argument("platform", choices=["macos", "windows", "self-test"])
-    ap.add_argument("target", nargs="?", help="Ferrite.app (macos) or the stage directory (windows)")
+    ap.add_argument("command", choices=["macos", "windows", "list", "self-test"])
+    ap.add_argument("target", nargs="?", help="Ferrite.app (macos), the stage directory (windows) or the platform (list)")
     ap.add_argument("--main", default="ferrite", help="name of the executable in Contents/MacOS (the smoke test uses another)")
     ap.add_argument("--prefix", default=os.environ.get("HOMEBREW_PREFIX", "/opt/homebrew"))
     ap.add_argument("--root", default=os.environ.get("GSTREAMER_1_0_ROOT_MSVC_X86_64", r"C:\Program Files\gstreamer\1.0\msvc_x86_64"))
     args = ap.parse_args()
-    if args.platform == "self-test":
+    if args.command == "self-test":
         return self_test()
     if not args.target:
-        ap.error("the target directory is required")
-    if args.platform == "macos":
+        ap.error("the target is required")
+    if args.command == "list":
+        if args.target not in ("macos", "windows"):
+            ap.error("list takes macos or windows")
+        print("\n".join(plugin_files(args.target)))
+    elif args.command == "macos":
         bundle_macos(Path(args.target), Path(args.prefix), args.main)
     else:
         bundle_windows(Path(args.target), Path(args.root))
