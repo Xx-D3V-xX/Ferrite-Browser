@@ -68,6 +68,7 @@ const REQUIRED: &[(&str, &str)] = &[
     ("Shadow DOM", "!!document.createElement('div').attachShadow({mode:'open'})"),
     ("performance.now/mark/measure", "(function(){performance.mark('a');performance.mark('b');performance.measure('m','a','b');return typeof performance.now()==='number'})()"),
     ("requestAnimationFrame", "typeof requestAnimationFrame === 'function'"),
+    ("Animation / KeyframeEffect / element.animate", "typeof Animation === 'function' && typeof KeyframeEffect === 'function' && document.createElement('div').animate([{opacity:0},{opacity:1}],1) instanceof Animation"),
     ("AbortController", "typeof AbortController === 'function' && typeof AbortSignal === 'function'"),
     ("URL / URLSearchParams", "new URL('https://a.b/c?d=1').searchParams.get('d') === '1'"),
     ("fetch / Headers / Request", "typeof fetch === 'function' && typeof Headers === 'function' && typeof Request === 'function'"),
@@ -182,12 +183,27 @@ const ASYNC: &[(&str, &str)] = &[
          if(second!=='40px,41px,10px,10px,50px')return rej(new Error('at 500px: '+second));res();},700);},700)})",
     ),
     (
+        // A frame on the same host and another port: same site (so the same script
+        // thread, as Google's account bar beside www.google.com), another origin. The
+        // engine said only "The operation is insecure." here, which told the owner
+        // nothing about which check Google's scripts tripped (T-321). (Reading the
+        // frame's `document` throws nothing at all on this path: T-322.)
+        "cross-origin SecurityError names the property",
+        "new Promise(function(res,rej){var f=document.createElement('iframe');f.src='http://127.0.0.1:'+window.__otherPort+'/';\
+         var t=setTimeout(function(){rej(new Error('frame never loaded'))},5000);\
+         f.onload=function(){clearTimeout(t);var m;\
+         try{f.contentWindow.location.href;m='no error'}catch(e){m=e.name+': '+e.message}\
+         f.remove();\
+         if(/^SecurityError: .*\"href\".*cross-origin/.test(m))res();else rej(new Error(m))};\
+         document.body.appendChild(f)})",
+    ),
+    (
         "setTimeout/Promise ordering",
         "new Promise(function(res){var o=[];setTimeout(function(){o.push('t');if(o.join('')==='mt')res();else throw new Error(o.join(''))},0);Promise.resolve().then(function(){o.push('m')})})",
     ),
 ];
 
-fn page() -> String {
+fn page(other_port: u16) -> String {
     let mut sync = String::from("var R={};\n");
     for (name, expr) in REQUIRED {
         sync.push_str(&format!(
@@ -220,7 +236,7 @@ fn page() -> String {
          <div id=cqbox style=\"container-type:inline-size;width:300px;height:1px;overflow:hidden\"><i class=cqi id=cqa></i><i class=cqi id=cqb></i><i class=cqi id=cqc></i><i class=cqi id=cqd></i><i class=cqi id=cqu></i></div>\
          <div id=cqside style=\"container:side/inline-size;width:500px;height:1px;overflow:hidden\"><i class=cqi id=cqe></i></div>\
          <svg class=svgprobe viewBox=\"0 0 10 10\"><rect width=10 height=10 /></svg>\
-         <script>{sync}{asyncs}window.__sync=R;window.__optional=O;Promise.all(ps).then(function(){{window.__async=A}});</script>\
+         <script>window.__otherPort={other_port};{sync}{asyncs}window.__sync=R;window.__optional=O;Promise.all(ps).then(function(){{window.__async=A}});</script>\
          </body></html>"
     )
 }
@@ -294,7 +310,17 @@ fn main() {
         }
     };
     let port = listener.local_addr().map(|a| a.port()).unwrap_or(0);
-    let body = page();
+    // A second origin on the same host, for the cross-origin check.
+    let other = match TcpListener::bind("127.0.0.1:0") {
+        Ok(l) => l,
+        Err(e) => {
+            println!("FAIL second loopback server: {e}");
+            std::process::exit(2);
+        }
+    };
+    let other_port = other.local_addr().map(|a| a.port()).unwrap_or(0);
+    std::thread::spawn(move || serve(other, "<!doctype html><title>other origin</title>".into()));
+    let body = page(other_port);
     std::thread::spawn(move || serve(listener, body));
 
     let mut session = match HeadlessServoSession::new(900, 600) {

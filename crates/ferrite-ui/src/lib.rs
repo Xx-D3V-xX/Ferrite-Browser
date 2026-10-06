@@ -232,6 +232,7 @@ mod markdown;
 mod page_input;
 mod page_view;
 mod pages;
+mod perf;
 mod permission;
 mod runtime_guard;
 mod scroll;
@@ -1363,6 +1364,8 @@ pub struct FerriteBrowser {
     /// written once per *new* picture. The image handle is there only when the
     /// page is drawn with iced's image widget (`FERRITE_PAGE_DRAW=image`).
     frame_cache: HashMap<usize, (page_view::PageFrame, Option<ImageHandle>)>,
+    /// `FERRITE_PERF=1`'s counters (see `perf.rs`); `None` when it is off.
+    perf: Option<perf::PerfStats>,
     pub is_loading: bool,
     pub can_go_back: bool,
     pub can_go_forward: bool,
@@ -1812,6 +1815,7 @@ impl Default for FerriteBrowser {
             audit_entries: vec![],
             servo_sessions: HashMap::new(),
             frame_cache: HashMap::new(),
+            perf: perf::PerfStats::from_env(),
             is_loading: false,
             can_go_back: false,
             can_go_forward: false,
@@ -3013,9 +3017,11 @@ pub fn update(
             // have finished reallocating yet. The previous frame stays
             // displayed in the meantime — a few tens of ms of an unchanged
             // image, not a black/corrupted one.
+            let pump_started = std::time::Instant::now();
             if let Some(first) = state.servo_sessions.values().next() {
                 first.pump_engine();
             }
+            let read_started = std::time::Instant::now();
             if state.resize_settle_ticks > 0 {
                 state.resize_settle_ticks -= 1;
             } else {
@@ -3032,11 +3038,29 @@ pub fn update(
             // Console messages, requests, crashes and page controls: emptied
             // from every session into the tabs' logs (and warnings and errors
             // to the log file, where the first clue to a misbehaving site is).
+            let read_done = std::time::Instant::now();
             tasks.push(tab_diag::drain_all(state));
-            if refresh_frame_cache(state) {
+            let new_picture = refresh_frame_cache(state);
+            if new_picture {
                 state.busy_ticks = BUSY_TICKS;
             } else {
                 state.busy_ticks = state.busy_ticks.saturating_sub(1);
+            }
+            if let Some(stats) = state.perf.as_mut() {
+                let size = new_picture
+                    .then(|| state.frame_cache.get(&state.active_tab))
+                    .flatten()
+                    .map(|(frame, _)| (frame.width, frame.height));
+                let done = std::time::Instant::now();
+                if let Some(line) = stats.record(
+                    done,
+                    read_started - pump_started,
+                    read_done - read_started,
+                    done - now,
+                    size,
+                ) {
+                    eprintln!("{line}");
+                }
             }
             let active = state.active_tab;
             if let Some(session) = state.servo_sessions.get(&active) {

@@ -1498,11 +1498,21 @@ impl Drop for WindowProxyHandler {
 // TODO: reuse the infrastructure in `proxyhandler.rs`. For starters, the calls
 //       to this function should be replaced with those to
 //       `report_cross_origin_denial`.
+//
+// The message names the access and, when there is one, the property: a page's
+// author (and a browser's) needs to know which read a cross-origin check refused.
 #[expect(unsafe_code)]
-fn throw_security_error(realm: &mut CurrentRealm) -> bool {
+fn throw_security_error(realm: &mut CurrentRealm, access: &str, id: Option<RawHandleId>) -> bool {
     if !unsafe { JS_IsExceptionPending(realm) } {
+        let property = id.and_then(|id| {
+            script_bindings::conversions::jsid_to_string(realm, unsafe { Handle::from_raw(id) })
+        });
+        let message = match property {
+            Some(name) => format!("Blocked {access} of property \"{name}\" on a cross-origin window"),
+            None => format!("Blocked {access} on a cross-origin window"),
+        };
         let global = GlobalScope::from_current_realm(realm);
-        throw_dom_exception(realm, &global, Error::Security(Some("Blocked access to a property of a cross-origin window".into())));
+        throw_dom_exception(realm, &global, Error::Security(Some(message.into())));
     }
     false
 }
@@ -1528,7 +1538,7 @@ unsafe extern "C" fn cross_origin_has(
         true
     } else {
         let mut realm = CurrentRealm::assert(&mut cx);
-        throw_security_error(&mut realm)
+        throw_security_error(&mut realm, "get", Some(id))
     }
 }
 
@@ -1549,7 +1559,7 @@ unsafe extern "C" fn cross_origin_get(
 unsafe extern "C" fn cross_origin_set(
     cx: *mut RawJSContext,
     _: RawHandleObject,
-    _: RawHandleId,
+    id: RawHandleId,
     _: RawHandleValue,
     _: RawHandleValue,
     _: *mut ObjectOpResult,
@@ -1559,14 +1569,14 @@ unsafe extern "C" fn cross_origin_set(
         JSContext::from_ptr(NonNull::new(cx).expect("JSContext should not be null in SM hook"))
     };
     let mut realm = CurrentRealm::assert(&mut cx);
-    throw_security_error(&mut realm)
+    throw_security_error(&mut realm, "set", Some(id))
 }
 
 #[expect(unsafe_code)]
 unsafe extern "C" fn delete_xorigin(
     cx: *mut RawJSContext,
     _: RawHandleObject,
-    _: RawHandleId,
+    id: RawHandleId,
     _: *mut ObjectOpResult,
 ) -> bool {
     let mut cx = unsafe {
@@ -1574,7 +1584,7 @@ unsafe extern "C" fn delete_xorigin(
         JSContext::from_ptr(NonNull::new(cx).expect("JSContext should not be null in SM hook"))
     };
     let mut realm = CurrentRealm::assert(&mut cx);
-    throw_security_error(&mut realm)
+    throw_security_error(&mut realm, "delete", Some(id))
 }
 
 #[expect(unsafe_code)]
@@ -1594,7 +1604,7 @@ unsafe extern "C" fn cross_origin_get_own_property_descriptor(
 unsafe extern "C" fn cross_origin_define_property(
     cx: *mut RawJSContext,
     _: RawHandleObject,
-    _: RawHandleId,
+    id: RawHandleId,
     _: RawHandle<PropertyDescriptor>,
     _: *mut ObjectOpResult,
 ) -> bool {
@@ -1603,7 +1613,7 @@ unsafe extern "C" fn cross_origin_define_property(
         JSContext::from_ptr(NonNull::new(cx).expect("JSContext should not be null in SM hook"))
     };
     let mut realm = CurrentRealm::assert(&mut cx);
-    throw_security_error(&mut realm)
+    throw_security_error(&mut realm, "define", Some(id))
 }
 
 // TODO: Some of these callbacks need proper support for handling cross-origin

@@ -565,20 +565,20 @@ pub(crate) fn report_cross_origin_denial<D: DomTypes>(
     id: HandleId,
     access: &str,
 ) -> bool {
-    if let Some(id) = id_to_source(cx, id) {
-        debug!(
-            "permission denied to {} property {} on cross-origin object",
-            access,
-            &*id.str(),
-        );
-    } else {
-        debug!("permission denied to {} on cross-origin object", access);
-    }
+    // The message names what was refused: a bare "The operation is insecure."
+    // gives a page's author (and a browser's) nothing to go on.
+    let message = match id_to_source(cx, id) {
+        Some(id) => format!(
+            "Blocked {access} of property {} on a cross-origin object (window or location)",
+            &*id.str()
+        ),
+        None => format!("Blocked {access} on a cross-origin object (window or location)"),
+    };
+    debug!("{message}");
     unsafe {
         if !JS_IsExceptionPending(cx) {
             let global = D::GlobalScope::from_current_realm(cx);
-            // TODO: include `id` and `access` in the exception message
-            <D as DomHelpers<D>>::throw_dom_exception(cx, &global, Error::Security(None));
+            <D as DomHelpers<D>>::throw_dom_exception(cx, &global, Error::Security(Some(message)));
         }
     }
     false

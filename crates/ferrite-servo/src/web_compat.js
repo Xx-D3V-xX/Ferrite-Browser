@@ -19,7 +19,9 @@
  * below runs no animation; it keeps the promise of one. `animate()` returns an
  * object that finishes after the delay and duration (firing `onfinish` and
  * resolving `finished`), and a `fill: forwards` or `both` animation leaves the
- * last keyframe's values on the element. It is skipped when the engine has the
+ * last keyframe's values on the element. `Animation`, `KeyframeEffect` and
+ * `document.timeline` are defined too: YouTube names `Animation` directly and
+ * stopped on "Animation is not defined". It is skipped when the engine has the
  * real one.
  *
  * The same goes for a handful of small interfaces Servo 0.6 lacks that sites call
@@ -109,76 +111,172 @@
     return out;
   }
 
-  function Animation(target, keyframes, options) {
+  function timingOf(options) {
+    return typeof options === 'number' ? { duration: options } : (options || {});
+  }
+
+  // `new KeyframeEffect(target, keyframes, options)`: what an animation runs.
+  function KeyframeEffect(target, keyframes, options) {
+    if (!(this instanceof KeyframeEffect)) throw new TypeError("Constructor KeyframeEffect requires 'new'");
+    if (target instanceof KeyframeEffect) {
+      keyframes = target._keyframes;
+      options = target._timing;
+      target = target.target;
+    }
+    this.target = target || null;
+    this._keyframes = keyframes;
+    this._timing = timingOf(options);
+    this.composite = this._timing.composite || 'replace';
+    this.pseudoElement = this._timing.pseudoElement || null;
+  }
+  KeyframeEffect.prototype.getTiming = function () { return this._timing; };
+  KeyframeEffect.prototype.getComputedTiming = function () { return this._timing; };
+  KeyframeEffect.prototype.updateTiming = function (timing) {
+    for (var k in timing || {}) this._timing[k] = timing[k];
+  };
+  KeyframeEffect.prototype.getKeyframes = function () {
+    var k = this._keyframes;
+    return k && typeof k.length === 'number' ? Array.prototype.slice.call(k) : [];
+  };
+  KeyframeEffect.prototype.setKeyframes = function (keyframes) { this._keyframes = keyframes; };
+
+  // `new Animation(effect, timeline)`: idle until `play()`, as the real one.
+  function Animation(effect, timeline) {
+    if (!(this instanceof Animation)) throw new TypeError("Constructor Animation requires 'new'");
     var self = this;
-    var opts = typeof options === 'number' ? { duration: options } : (options || {});
-    var duration = Number(opts.duration) || 0;
-    var delay = Number(opts.delay) || 0;
-    var iterations = opts.iterations === undefined ? 1 : Number(opts.iterations);
-    var endDelay = Number(opts.endDelay) || 0;
-    var fill = opts.fill || 'none';
-    var values = endValues(keyframes);
     var timer = 0;
+    var listeners = { finish: [], cancel: [], remove: [] };
     var done, fail;
-    this.id = opts.id || '';
-    this.effect = { target: target, getTiming: function () { return opts; }, getComputedTiming: function () { return opts; } };
-    this.timeline = null;
-    this.playState = 'running';
+    this.id = '';
+    this.effect = effect || null;
+    this.timeline = timeline === undefined ? (typeof document !== 'undefined' ? document.timeline || null : null) : timeline;
+    this.playState = 'idle';
     this.pending = false;
     this.playbackRate = 1;
-    this.currentTime = 0;
+    this.currentTime = null;
     this.startTime = null;
     this.onfinish = null;
     this.oncancel = null;
     this.onremove = null;
     this.replaceState = 'active';
     this.ready = Promise.resolve(this);
-    this.finished = new Promise(function (resolve, reject) { done = resolve; fail = reject; });
-    this.finished.catch(function () { /* a cancelled animation is not a page error */ });
+    function newFinished() {
+      self.finished = new Promise(function (resolve, reject) { done = resolve; fail = reject; });
+      self.finished.catch(function () { /* a cancelled animation is not a page error */ });
+    }
+    newFinished();
 
+    function timing() {
+      var t = self.effect && self.effect._timing ? self.effect._timing : {};
+      var iterations = t.iterations === undefined ? 1 : Number(t.iterations);
+      return {
+        delay: Number(t.delay) || 0,
+        duration: Number(t.duration) || 0,
+        endDelay: Number(t.endDelay) || 0,
+        iterations: iterations,
+        fill: t.fill || 'none'
+      };
+    }
+    function applyEnd() {
+      var target = self.effect && self.effect.target;
+      var values = endValues(self.effect && self.effect._keyframes);
+      try { for (var k in values) target.style[k] = values[k]; } catch (e) { /* a detached or odd element */ }
+    }
+    function emit(type) {
+      var event = { type: type, target: self, currentTime: self.currentTime, timelineTime: null };
+      var handler = self['on' + type];
+      var all = (typeof handler === 'function' ? [handler] : []).concat(listeners[type]);
+      for (var i = 0; i < all.length; i++) {
+        try { all[i].call(self, event); } catch (e) { setTimeout(function (err) { return function () { throw err; }; }(e), 0); }
+      }
+    }
     function settle() {
       timer = 0;
       if (self.playState !== 'running') return;
+      var t = timing();
       self.playState = 'finished';
-      self.currentTime = delay + duration * (iterations === Infinity ? 1 : iterations) + endDelay;
-      if (fill === 'forwards' || fill === 'both') {
-        try { for (var k in values) target.style[k] = values[k]; } catch (e) { /* a detached or odd element */ }
-      }
-      var event = { type: 'finish', target: self, currentTime: self.currentTime };
-      try { if (typeof self.onfinish === 'function') self.onfinish(event); } catch (e) { setTimeout(function () { throw e; }, 0); }
+      self.currentTime = t.delay + t.duration * t.iterations + t.endDelay;
+      if (t.fill === 'forwards' || t.fill === 'both') applyEnd();
+      emit('finish');
       done(self);
     }
     function start() {
-      if (iterations === Infinity) return; // never finishes, as the real one
-      var total = delay + duration * iterations + endDelay;
-      timer = setTimeout(settle, Math.max(0, total));
+      var t = timing();
+      self.startTime = typeof performance !== 'undefined' ? performance.now() : 0;
+      self.currentTime = 0;
+      if (t.iterations === Infinity) return; // never finishes, as the real one
+      timer = setTimeout(settle, Math.max(0, t.delay + t.duration * t.iterations + t.endDelay));
     }
-    this.finish = function () { if (timer) clearTimeout(timer); settle(); };
+    this.play = function () {
+      if (self.playState === 'running') return;
+      if (self.playState === 'finished') newFinished();
+      self.playState = 'running';
+      start();
+    };
+    this.finish = function () {
+      if (timer) clearTimeout(timer);
+      if (self.playState === 'idle' || self.playState === 'paused') self.playState = 'running';
+      settle();
+    };
     this.cancel = function () {
       if (timer) clearTimeout(timer);
       timer = 0;
       if (self.playState === 'idle') return;
       self.playState = 'idle';
-      try { if (typeof self.oncancel === 'function') self.oncancel({ type: 'cancel', target: self }); } catch (e) { /* ignore */ }
+      self.currentTime = null;
+      self.startTime = null;
+      emit('cancel');
       fail(new DOMException('The animation was aborted.', 'AbortError'));
+      newFinished();
     };
-    this.pause = function () { if (timer) clearTimeout(timer); timer = 0; if (self.playState === 'running') self.playState = 'paused'; };
-    this.play = function () { if (self.playState === 'paused') { self.playState = 'running'; start(); } };
+    this.pause = function () {
+      if (timer) clearTimeout(timer);
+      timer = 0;
+      if (self.playState === 'running' || self.playState === 'idle') self.playState = 'paused';
+    };
     this.reverse = function () { self.finish(); };
-    this.persist = function () {};
-    this.commitStyles = function () { try { for (var k in values) target.style[k] = values[k]; } catch (e) { /* ignore */ } };
+    this.persist = function () { self.replaceState = 'persisted'; };
+    this.commitStyles = applyEnd;
     this.updatePlaybackRate = function (rate) { self.playbackRate = rate; };
     this.addEventListener = function (type, fn) {
-      if (type === 'finish' && !self.onfinish) self.onfinish = fn;
-      else if (type === 'cancel' && !self.oncancel) self.oncancel = fn;
+      if (listeners[type] && typeof fn === 'function' && listeners[type].indexOf(fn) < 0) listeners[type].push(fn);
     };
-    this.removeEventListener = function () {};
-    start();
+    this.removeEventListener = function (type, fn) {
+      var list = listeners[type];
+      var i = list ? list.indexOf(fn) : -1;
+      if (i >= 0) list.splice(i, 1);
+    };
+    this.dispatchEvent = function (event) { emit(event && event.type); return true; };
+  }
+
+  function expose(name, value) {
+    if (typeof window[name] !== 'undefined') return;
+    try {
+      Object.defineProperty(window, name, { value: value, writable: true, configurable: true, enumerable: false });
+    } catch (e) { /* a frozen global */ }
+  }
+  expose('Animation', Animation);
+  expose('KeyframeEffect', KeyframeEffect);
+  if (typeof document !== 'undefined' && !document.timeline) {
+    try {
+      Object.defineProperty(document, 'timeline', {
+        value: Object.defineProperty({}, 'currentTime', {
+          get: function () { return typeof performance !== 'undefined' ? performance.now() : 0; },
+          enumerable: true
+        }),
+        writable: true, configurable: true, enumerable: false
+      });
+    } catch (e) { /* ignore */ }
   }
 
   try {
     Object.defineProperty(Element.prototype, 'animate', {
-      value: function animate(keyframes, options) { return new Animation(this, keyframes, options); },
+      value: function animate(keyframes, options) {
+        var animation = new Animation(new KeyframeEffect(this, keyframes, options));
+        if (options && typeof options === 'object' && options.id) animation.id = String(options.id);
+        animation.play();
+        return animation;
+      },
       writable: true, configurable: true, enumerable: false
     });
     if (typeof Element.prototype.getAnimations !== 'function') {
