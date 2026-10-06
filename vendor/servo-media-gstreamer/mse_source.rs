@@ -648,10 +648,25 @@ fn feed(feeder: Feeder) {
                 }
             },
             Next::Eos => {
-                gstreamer::info!(CAT, "track {slot}: end of stream");
-                ended = true;
-                let _ = appsrc.end_of_stream();
-                starvation.fed(slot);
+                let _guard = push_lock.lock().unwrap();
+                if handle.stale() {
+                    continue;
+                }
+                match appsrc.end_of_stream() {
+                    Ok(_) | Err(gstreamer::FlowError::Eos) => {
+                        gstreamer::info!(CAT, "track {slot}: end of stream");
+                        ended = true;
+                        starvation.fed(slot);
+                    },
+                    // Not started yet, or taking a seek: dropped, the element would never
+                    // fire `ended`. Tried again like a frame is.
+                    Err(error) => {
+                        gstreamer::debug!(CAT, "track {slot}: end of stream not taken ({error:?}), again");
+                        handle.unget_eos();
+                        drop(_guard);
+                        std::thread::sleep(Duration::from_millis(5));
+                    },
+                }
             },
             Next::Closed => break,
         }

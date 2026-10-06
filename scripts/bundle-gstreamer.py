@@ -81,8 +81,11 @@ def find_servo_plugin_lists() -> Path:
 # Servo's folder would register its plugins twice. `required` ones fail the bundle.
 #   opusparse  Servo's media code counts Opus as playable only with an Opus parser; without
 #              it WebM with VP9+Opus (YouTube's main format) is "not supported".
+#   sctp       sctpenc/sctpdec. webrtcbin returns no channel from `create-data-channel`
+#              without them, so every RTCPeerConnection.createDataChannel() failed.
+#   srtp       srtpenc/srtpdec, which webrtcbin needs to send and receive audio and video.
 #   dav1d      AV1 video, which YouTube serves more and more.
-EXTRA_PLUGINS = [("gstopusparse", True), ("gstdav1d", False)]
+EXTRA_PLUGINS = [("gstopusparse", True), ("gstsctp", True), ("gstsrtp", True), ("gstdav1d", False)]
 EXTRA_DIR = "gst-extra"
 
 
@@ -386,7 +389,7 @@ Load command 14
         root = d / "gst"
         (root / "lib" / "gstreamer-1.0").mkdir(parents=True)
         (root / "bin").mkdir()
-        for n in plugin_files("windows", lists) + ["gstunrelated.dll", "gstopusparse.dll"]:
+        for n in plugin_files("windows", lists) + ["gstunrelated.dll", "gstopusparse.dll", "gstsctp.dll", "gstsrtp.dll"]:
             (root / "lib" / "gstreamer-1.0" / n).write_bytes(b"x")
         (root / "bin" / "gstreamer-1.0-0.dll").write_bytes(b"x")
         (root / "bin" / "gst-launch-1.0.exe").write_bytes(b"x")
@@ -397,7 +400,8 @@ Load command 14
         assert (stage / "gstreamer-1.0-0.dll").exists()
         assert not (stage / "gst-launch-1.0.exe").exists()
         # The extra plugins go in their own folder, the optional one may be missing.
-        assert (stage / EXTRA_DIR / "gstopusparse.dll").exists()
+        for n in ("gstopusparse.dll", "gstsctp.dll", "gstsrtp.dll"):
+            assert (stage / EXTRA_DIR / n).exists(), n
         assert not (stage / "gstopusparse.dll").exists()
         # A plugin Servo needs that is not installed stops the bundle: Servo would exit(1).
         (root / "lib" / "gstreamer-1.0" / "gstnice.dll").unlink()

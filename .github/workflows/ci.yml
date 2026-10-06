@@ -495,7 +495,7 @@ jobs:
           echo "--- elements an app needs (this scans the bundle's folder, which the app itself does not)"
           export GST_PLUGIN_SYSTEM_PATH_1_0="$libdir"; rm -f "$GST_REGISTRY_1_0"
           missing=""
-          for el in qtdemux matroskademux playbin3 appsrc avdec_h264 opusdec opusparse vp9dec webrtcbin; do
+          for el in qtdemux matroskademux playbin3 appsrc avdec_h264 opusdec opusparse vp9dec webrtcbin sctpenc sctpdec srtpenc srtpdec dtlsenc nicesink; do
             if "$app/Contents/MacOS/gst-inspect" "$el" >/dev/null 2>&1; then echo "ok   $el"; else echo "MISSING $el"; missing=1; fi
           done
           [ -z "$missing" ]
@@ -582,7 +582,7 @@ jobs:
           $env:GST_PLUGIN_SYSTEM_PATH_1_0 = $stage
           Remove-Item $env:GST_REGISTRY_1_0 -ErrorAction SilentlyContinue
           $missing = $false
-          foreach ($el in 'qtdemux','matroskademux','playbin3','appsrc','avdec_h264','opusdec','opusparse','vp9dec','webrtcbin') {
+          foreach ($el in 'qtdemux','matroskademux','playbin3','appsrc','avdec_h264','opusdec','opusparse','vp9dec','webrtcbin','sctpenc','sctpdec','srtpenc','srtpdec','dtlsenc','nicesink') {
             & "$stage\gst-inspect.exe" $el *> $null
             if ($LASTEXITCODE -eq 0) { "ok      $el" } else { "MISSING $el"; $missing = $true }
           }

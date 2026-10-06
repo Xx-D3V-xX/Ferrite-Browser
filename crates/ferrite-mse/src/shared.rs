@@ -518,6 +518,12 @@ impl TrackHandle {
     pub fn unget(&mut self, sample: &Sample) {
         self.cursor = Cursor::After(sample.dts - 1);
     }
+
+    /// The end of stream [`TrackHandle::next`] just returned could not be handed over (the
+    /// stream was still starting or taking a seek): the next call reports it again.
+    pub fn unget_eos(&mut self) {
+        self.eos_sent = false;
+    }
 }
 
 #[cfg(test)]
@@ -572,6 +578,10 @@ mod tests {
         shared.set_ended(true);
         assert_eq!(h.next(SHORT), Next::Eos);
         // Once only: the stream stays ended, the feeder has nothing more to do.
+        assert_eq!(h.next(SHORT), Next::Wait);
+        // An end that could not be handed over is reported again.
+        h.unget_eos();
+        assert_eq!(h.next(SHORT), Next::Eos);
         assert_eq!(h.next(SHORT), Next::Wait);
         // More data after an end restarts the stream.
         shared.append(slot, run(160, 1, 1)).unwrap();

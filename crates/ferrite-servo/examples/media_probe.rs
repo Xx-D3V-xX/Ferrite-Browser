@@ -1,7 +1,7 @@
 //! Checks, in a real headless Servo session built with the GStreamer media backend,
 //! that audio and video play and WebRTC works: a WebM video decodes, plays, ends and
 //! paints a frame; an Ogg audio file loads; two peer connections in one page open a
-//! data channel; and no device is listed (capture is `capture_probe`'s).
+//! data channel; and no device is named before a grant (capture is `capture_probe`'s).
 //!
 //! ```text
 //! cargo run -p ferrite-servo --features servo,media --example media_probe

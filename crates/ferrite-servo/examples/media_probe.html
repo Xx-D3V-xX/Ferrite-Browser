@@ -18,7 +18,7 @@ function once(el, type, ms){ return new Promise(function(res){ var t = setTimeou
   var playing = once(v, 'playing', 8000);
   try { await v.play(); } catch (e) { ok('video play()', false, e.name + ': ' + e.message); }
   ok('video is playing', await playing && !v.paused);
-  await wait(1200);
+  for (var t = 0; t < 30 && v.currentTime <= 0.5; t++) await wait(100);
   ok('video time advances', v.currentTime > 0.5, v.currentTime);
   var cv = document.createElement('canvas'); cv.width = 320; cv.height = 240; var cx = cv.getContext('2d');
   var found = false;
@@ -47,7 +47,11 @@ function once(el, type, ms){ return new Promise(function(res){ var t = setTimeou
   });
   ok('WebRTC data channel between two peers', got === 'ping', got);
   // Camera, microphone and screen capture ask a person first: `capture_probe` covers them.
-  ok('no device is listed', (await navigator.mediaDevices.enumerateDevices()).length === 0);
+  // Before a grant a page may learn only that a kind of device exists: at most one entry per
+  // kind, with no id and no name (a machine with a microphone lists one nameless one).
+  var devs = await navigator.mediaDevices.enumerateDevices(), kinds = {};
+  var hidden = devs.every(function(d){ var fresh = !kinds[d.kind]; kinds[d.kind] = true; return fresh && d.deviceId === '' && d.label === '' && d.groupId === ''; });
+  ok('no device is named or told apart before a grant', hidden, devs.map(function(d){ return [d.kind, d.deviceId, d.label]; }));
  } catch (e) { log('EXCEPTION ' + e); }
  document.title = 'DONE';
 })();

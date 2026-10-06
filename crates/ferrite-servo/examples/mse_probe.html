@@ -79,7 +79,8 @@ var WEBM = 'video/webm; codecs="vp9, opus"';
   var playing = once(v, 'playing', 8000);
   try { await v.play(); } catch (e) { ok('play()', false, e.name + ': ' + e.message); }
   ok('playing', await playing && !v.paused);
-  await wait(900);
+  // Poll rather than read once: a busy CI machine can start playback a few hundred ms late.
+  for (var t = 0; t < 30 && v.currentTime <= 0.4; t++) await wait(100);
   ok('time advances', v.currentTime > 0.4, v.currentTime);
   ok('a decoded frame can be drawn', frameDrawn(v));
   ok('the clip ends', v.ended || await once(v, 'ended', 8000), [v.currentTime, v.ended]);
