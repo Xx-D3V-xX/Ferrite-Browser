@@ -13,6 +13,10 @@ on:
         description: "Run only the media packaging jobs (to test them quickly). Never publishes a release."
         type: boolean
         default: false
+      only_smoke:
+        description: "With only_media: run only the two quick bundle smoke tests, not the Servo builds."
+        type: boolean
+        default: false
 
 jobs:
   # ─────────────────────────────────────────────────────────────
@@ -274,7 +278,7 @@ jobs:
     runs-on: ${{ matrix.os }}
     needs: ci
     # `ci` is skipped in a media-only run; a real failure of it still stops this job.
-    if: ${{ !cancelled() && (needs.ci.result == 'success' || needs.ci.result == 'skipped') }}
+    if: ${{ !inputs.only_smoke && !cancelled() && (needs.ci.result == 'success' || needs.ci.result == 'skipped') }}
     continue-on-error: true
 
     strategy:
@@ -457,7 +461,8 @@ jobs:
             $out = pkg-config --libs $lib 2>&1 | Out-String
             if ($LASTEXITCODE -ne 0) { "MISSING $lib : $out"; $bad = $true; continue }
             # The .pc files must point into the install, not at the machine that built it.
-            $dirs = [regex]::Matches($out, '-L(\S+)') | ForEach-Object { $_.Groups[1].Value }
+            # pkg-config writes a space in a path as "\ ", so a path may span several words.
+            $dirs = [regex]::Matches($out, '-L((?:\\ |\S)+)') | ForEach-Object { $_.Groups[1].Value -replace '\\ ', ' ' }
             $outside = $dirs | Where-Object { ($_ -replace '/','\') -notlike "$root*" }
             if ($outside) { "OUTSIDE $lib : $($outside -join ' ')"; $bad = $true } else { "ok      $lib" }
           }
