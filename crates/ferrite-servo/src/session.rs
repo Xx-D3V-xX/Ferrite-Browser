@@ -334,6 +334,51 @@ mod webrtc_enabled_tests {
     }
 }
 
+/// Whether the compatibility script `name` (`svg`, `web`, `storage`, `sw`, `cq`) is given
+/// to pages. All are, unless `FERRITE_COMPAT` leaves some out: `none` leaves out all, and
+/// a list such as `-sw,-cq` leaves out each name written with a leading `-`. A way to find
+/// which script a site objects to, and to get past it while it does (T-319).
+#[must_use]
+pub fn compat_script_on(setting: Option<&str>, name: &str) -> bool {
+    let Some(setting) = setting.map(str::trim).filter(|s| !s.is_empty()) else {
+        return true;
+    };
+    if setting.eq_ignore_ascii_case("none") || setting.eq_ignore_ascii_case("off") {
+        return false;
+    }
+    !setting.split(',').map(str::trim).any(|item| {
+        item.strip_prefix('-')
+            .is_some_and(|n| n.eq_ignore_ascii_case(name))
+    })
+}
+
+#[cfg(test)]
+mod compat_script_tests {
+    use super::compat_script_on;
+
+    #[test]
+    fn all_on_by_default() {
+        for name in ["svg", "web", "storage", "sw", "cq"] {
+            assert!(compat_script_on(None, name));
+            assert!(compat_script_on(Some(""), name));
+        }
+    }
+
+    #[test]
+    fn none_leaves_all_out() {
+        assert!(!compat_script_on(Some("none"), "web"));
+        assert!(!compat_script_on(Some("OFF"), "svg"));
+    }
+
+    #[test]
+    fn a_dash_leaves_one_out() {
+        assert!(!compat_script_on(Some("-sw, -cq"), "sw"));
+        assert!(!compat_script_on(Some("-sw, -cq"), "cq"));
+        assert!(compat_script_on(Some("-sw, -cq"), "web"));
+        assert!(compat_script_on(Some("sw"), "sw"));
+    }
+}
+
 /// Whether the GPU renderer was asked for: `FERRITE_RENDERER=gpu` (or `hardware`).
 /// Anything else, or nothing, keeps the CPU renderer, which is the default (T-318).
 #[must_use]
@@ -850,19 +895,35 @@ mod inner {
             .map_err(|e| format!("SoftwareRenderingContext: {e:?}"))
     }
 
-    /// The page content every tab is given: the SVG compatibility script.
+    /// The page content every tab is given: the compatibility scripts, less any that
+    /// `FERRITE_COMPAT` leaves out.
     fn user_content_manager(servo: &Servo) -> Rc<servo::UserContentManager> {
         USER_CONTENT.with(|cell| {
             cell.borrow_mut()
                 .get_or_insert_with(|| {
                     let manager = servo::UserContentManager::new(servo);
-                    manager.add_script(Rc::new(servo::UserScript::from(super::SVG_COMPAT_JS)));
-                    manager.add_script(Rc::new(servo::UserScript::from(super::WEB_COMPAT_JS)));
-                    manager.add_script(Rc::new(servo::UserScript::from(super::STORAGE_COMPAT_JS)));
-                    manager.add_script(Rc::new(servo::UserScript::from(
-                        super::SW_COMPAT_JS.as_str(),
-                    )));
-                    manager.add_script(Rc::new(servo::UserScript::from(super::CQ_COMPAT_JS)));
+                    let setting = std::env::var("FERRITE_COMPAT").ok();
+                    let scripts: [(&str, &str); 5] = [
+                        ("svg", super::SVG_COMPAT_JS),
+                        ("web", super::WEB_COMPAT_JS),
+                        ("storage", super::STORAGE_COMPAT_JS),
+                        ("sw", super::SW_COMPAT_JS.as_str()),
+                        ("cq", super::CQ_COMPAT_JS),
+                    ];
+                    let mut left_out = Vec::new();
+                    for (name, source) in scripts {
+                        if super::compat_script_on(setting.as_deref(), name) {
+                            manager.add_script(Rc::new(servo::UserScript::from(source)));
+                        } else {
+                            left_out.push(name);
+                        }
+                    }
+                    if !left_out.is_empty() {
+                        eprintln!(
+                            "[ferrite-compat] left out by FERRITE_COMPAT: {}",
+                            left_out.join(", ")
+                        );
+                    }
                     Rc::new(manager)
                 })
                 .clone()
@@ -990,7 +1051,11 @@ mod inner {
                         super::webrtc_enabled(std::env::var("FERRITE_WEBRTC").ok().as_deref());
                     eprintln!(
                         "[ferrite-webrtc] {}",
-                        if webrtc_on { "on" } else { "off (FERRITE_WEBRTC=off)" }
+                        if webrtc_on {
+                            "on"
+                        } else {
+                            "off (FERRITE_WEBRTC=off)"
+                        }
                     );
                     prefs.dom_webrtc_enabled = webrtc_on;
                     prefs.dom_webrtc_transceiver_enabled = webrtc_on;

@@ -21,6 +21,10 @@ use std::time::{Duration, Instant};
 /// Each entry is `(name, expression)`; the expression must evaluate to a truthy
 /// value when the API works. All run synchronously inside one try/catch.
 const REQUIRED: &[(&str, &str)] = &[
+    // A page with no service worker keeps the browser's own fetch: sw_compat.js used to
+    // replace it on every page, and anti-abuse scripts (Google's sign-in) treat a replaced
+    // fetch as tampering (T-319).
+    ("fetch is the browser's own (no service worker)", "/\\[native code\\]/.test(Function.prototype.toString.call(window.fetch))"),
     ("window.crypto", "typeof crypto === 'object' && crypto === window.crypto"),
     (
         "crypto.getRandomValues(Uint8Array)",
@@ -83,6 +87,13 @@ const REQUIRED: &[(&str, &str)] = &[
 /// Present in current Chrome, Firefox and Safari and used by real sites, but
 /// not needed to run a page: a gap is reported as `INFO`, never as a failure.
 const OPTIONAL: &[(&str, &str)] = &[
+    // Which built-ins Ferrite's scripts replace on an ordinary page (`missing` = replaced).
+    ("native: navigator.mediaDevices getter", "(function(){var d=Object.getOwnPropertyDescriptor(Navigator.prototype,'mediaDevices')||Object.getOwnPropertyDescriptor(navigator,'mediaDevices');return !!d&&/\\[native code\\]/.test(Function.prototype.toString.call(d.get))})()"),
+    ("native: navigator.serviceWorker getter", "(function(){var d=Object.getOwnPropertyDescriptor(Navigator.prototype,'serviceWorker');return !!d&&/\\[native code\\]/.test(Function.prototype.toString.call(d.get))})()"),
+    ("native: Element.prototype.animate", "/\\[native code\\]/.test(Function.prototype.toString.call(Element.prototype.animate))"),
+    ("native: history.pushState", "/\\[native code\\]/.test(Function.prototype.toString.call(history.pushState))"),
+    ("native: XMLHttpRequest.prototype.open", "/\\[native code\\]/.test(Function.prototype.toString.call(XMLHttpRequest.prototype.open))"),
+    ("no extra window globals (__ferrite*)", "Object.getOwnPropertyNames(window).filter(function(n){return /^__ferrite/.test(n)}).length===0"),
     // Where Google's scripts got `SecurityError: The operation is insecure` (T-267/T-270):
     // the APIs a page commonly touches through a blank iframe or its own history. Every
     // other browser allows each of these on a same-origin page.

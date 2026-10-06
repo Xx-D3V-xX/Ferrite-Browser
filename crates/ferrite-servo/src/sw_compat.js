@@ -363,6 +363,11 @@
     var next = state && state.active ? state : null;
     if (controllerState === next) return;
     controllerState = next;
+    // Only a page a worker controls has its fetch() routed; every other page keeps the
+    // browser's own fetch untouched (anti-abuse scripts treat a replaced fetch as a sign
+    // of tampering, and Google's sign-in refused the browser while it was replaced on
+    // every page).
+    if (next) routeFetches();
     fire(container, 'controllerchange');
   }
 
@@ -573,8 +578,11 @@
   define(window, 'ServiceWorkerRegistration', ServiceWorkerRegistration);
   define(window, 'ServiceWorkerContainer', ServiceWorkerContainer);
 
-  // ---- fetch events for what the page asks for ----
-  if (originalFetch) {
+  // ---- fetch events for what the page asks for (installed once a worker controls it) ----
+  var fetchRouted = false;
+  function routeFetches() {
+    if (fetchRouted || !originalFetch) return;
+    fetchRouted = true;
     var routed = function fetch(input, init) {
       var state = controllerState;
       if (!state || !state.active || !state.worker) return originalFetch(input, init);
