@@ -230,6 +230,7 @@ mod layout;
 mod lifecycle;
 mod markdown;
 mod page_input;
+mod page_view;
 mod pages;
 mod permission;
 mod runtime_guard;
@@ -785,8 +786,9 @@ const ICON_SIZE_SM: f32 = 12.0;
 
 /// The engine tick while the page is busy (one display frame at 60 Hz)...
 const ACTIVE_TICK: std::time::Duration = std::time::Duration::from_millis(16);
-/// ...and while it is sitting still.
-const IDLE_TICK: std::time::Duration = std::time::Duration::from_millis(50);
+/// ...and, while it is sitting still, the longest wait for a tick when the
+/// engine has not asked for one (see `engine_wakes`).
+const IDLE_TICK: std::time::Duration = std::time::Duration::from_millis(1000);
 /// Ticks without a new picture before the page counts as idle (about half a
 /// second at the active rate).
 const BUSY_TICKS: u8 = 30;
@@ -1356,11 +1358,11 @@ pub struct FerriteBrowser {
     pub show_js_console: bool,
     pub audit_entries: Vec<AuditEntry>,
     pub servo_sessions: HashMap<usize, HeadlessServoSession>,
-    /// The picture each tab last showed, as a ready-to-draw handle, keyed by
-    /// tab and tagged with the engine's frame number. A handle is built once
-    /// per *new* picture; building one per redraw (what this replaced) copied
-    /// and re-uploaded the whole page sixty times a second.
-    frame_cache: HashMap<usize, (u64, ImageHandle)>,
+    /// The picture each tab last showed, keyed by tab, shared with the engine
+    /// (no copy) and tagged with its frame number, so the GPU texture is
+    /// written once per *new* picture. The image handle is there only when the
+    /// page is drawn with iced's image widget (`FERRITE_PAGE_DRAW=image`).
+    frame_cache: HashMap<usize, (page_view::PageFrame, Option<ImageHandle>)>,
     pub is_loading: bool,
     pub can_go_back: bool,
     pub can_go_forward: bool,
@@ -4201,41 +4203,36 @@ fn add_tab(state: &mut FerriteBrowser) -> (usize, Option<String>) {
 /// starts at its creation size, not at the size the previous tab was last
 /// resized to, and treating them as equal left every tab after the first
 /// displayed at the wrong size with pointer input landing in the wrong place.
-/// Keeps `frame_cache` current for the active tab (returns whether it changed): a new handle only when the
-/// engine produced a new picture, and none kept for tabs that are gone.
+/// Keeps `frame_cache` current for the active tab (returns whether it changed):
+/// a new entry only when the engine produced a new picture, and none kept for
+/// tabs that are gone.
 fn refresh_frame_cache(state: &mut FerriteBrowser) -> bool {
     state
         .frame_cache
         .retain(|index, _| state.servo_sessions.contains_key(index));
     let active = state.active_tab;
-    let Some((seq, width, height, pixels)) = state
+    let Some(frame) = state
         .servo_sessions
         .get(&active)
         .and_then(HeadlessServoSession::frame_shared)
     else {
         return false;
     };
-    if state.frame_cache.get(&active).map(|(s, _)| *s) == Some(seq) {
+    if state.frame_cache.get(&active).map(|(f, _)| f.seq) == Some(frame.seq) {
         return false;
     }
-    // The pixels are shared with the session, not copied into the handle.
-    let handle = ImageHandle::from_rgba(
-        width,
-        height,
-        iced_widget::core::image::Bytes::from_owner(SharedPixels(pixels)),
-    );
-    state.frame_cache.insert(active, (seq, handle));
+    // The image widget wants rows top first and its own bytes: a copy per
+    // picture, paid only on the fallback path.
+    let handle = page_view::use_image_widget().then(|| {
+        let pixels = if frame.bottom_up {
+            ferrite_servo::session::flip_rows(&frame.pixels, frame.width, frame.height)
+        } else {
+            frame.pixels.as_ref().clone()
+        };
+        ImageHandle::from_rgba(frame.width, frame.height, pixels)
+    });
+    state.frame_cache.insert(active, (frame, handle));
     true
-}
-
-/// A shared RGBA buffer as `Bytes`, so the image handle borrows the engine's
-/// frame instead of owning a copy of it.
-struct SharedPixels(std::sync::Arc<Vec<u8>>);
-
-impl AsRef<[u8]> for SharedPixels {
-    fn as_ref(&self) -> &[u8] {
-        self.0.as_slice()
-    }
 }
 
 fn sync_active_webview(state: &mut FerriteBrowser) {
@@ -6099,17 +6096,24 @@ pub fn view(state: &FerriteBrowser) -> Element<'_, FerriteBrowserMessage> {
             // Home / new-tab page — always shown for about:blank, even if Servo
             // has produced a blank white frame for that URL.
             new_tab_page(state)
-        } else if let Some((_, handle)) = state.frame_cache.get(&active) {
-            // Live Servo frame — interactive via mouse_area. The handle is
-            // cached per picture (`refresh_frame_cache`), so a redraw that
-            // changes nothing re-uploads nothing. Pointer moves and wheel
-            // input only record intent here; `ServoFrame` forwards them once
-            // per tick (see `update`).
-            let img = ServoImage::new(handle.clone())
-                .width(Length::Fill)
-                .height(Length::Fill);
+        } else if let Some((frame, handle)) = state.frame_cache.get(&active) {
+            // Live Servo frame — interactive via mouse_area. The picture is
+            // cached per frame (`refresh_frame_cache`), so a redraw that
+            // changes nothing uploads nothing. Pointer moves and wheel input
+            // only record intent here; `ServoFrame` forwards them once per
+            // tick (see `update`).
+            let picture: Element<FerriteBrowserMessage> = match handle {
+                Some(handle) => ServoImage::new(handle.clone())
+                    .width(Length::Fill)
+                    .height(Length::Fill)
+                    .into(),
+                None => iced::widget::shader(page_view::PageView::new(frame.clone()))
+                    .width(Length::Fill)
+                    .height(Length::Fill)
+                    .into(),
+            };
 
-            mouse_area(container(img).width(Length::Fill).height(Length::Fill))
+            mouse_area(container(picture).width(Length::Fill).height(Length::Fill))
                 .interaction(page_interaction(state))
                 .on_move(|pos| FerriteBrowserMessage::ServoMouseMove { x: pos.x, y: pos.y })
                 .on_press(FerriteBrowserMessage::ServoMousePress)
@@ -6492,6 +6496,28 @@ fn favicon_key(width: u32, height: u32, rgba: &[u8]) -> u64 {
     hasher.finish()
 }
 
+/// One `ServoFrame` each time the engine's waker fires, or after `IDLE_TICK`
+/// without one. The wait blocks, so it runs on a blocking thread; it ends when
+/// the subscription does (the page got busy and ticks with the display again).
+fn engine_wakes() -> impl iced::futures::Stream<Item = FerriteBrowserMessage> {
+    use iced::futures::SinkExt;
+    iced::stream::channel(1, |mut output| async move {
+        loop {
+            let _ = tokio::task::spawn_blocking(|| {
+                ferrite_servo::session::wait_for_engine_wake(IDLE_TICK)
+            })
+            .await;
+            if output
+                .send(FerriteBrowserMessage::ServoFrame)
+                .await
+                .is_err()
+            {
+                break;
+            }
+        }
+    })
+}
+
 pub fn subscription(state: &FerriteBrowser) -> Subscription<FerriteBrowserMessage> {
     let keyboard_sub = keyboard::on_key_press(handle_key_press);
     let page_keys = iced::event::listen_with(page_key_from_event);
@@ -6513,7 +6539,11 @@ pub fn subscription(state: &FerriteBrowser) -> Subscription<FerriteBrowserMessag
                 time::every(WATCHDOG_AFTER).map(|_| FerriteBrowserMessage::ServoWatchdog),
             ])
         } else {
-            time::every(cadence).map(|_| FerriteBrowserMessage::ServoFrame)
+            // Nothing is moving: tick only when the engine says it has work
+            // (its event-loop waker), and at the latest every `IDLE_TICK`.
+            // A timer tick redraws the whole window, so polling here drew a
+            // still page twenty times a second.
+            Subscription::run(engine_wakes)
         }
     };
 

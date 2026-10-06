@@ -598,6 +598,93 @@ mod intersection_observer_setting_tests {
     }
 }
 
+#[cfg(test)]
+mod frame_and_wake_tests {
+    use super::{flip_rows, note_engine_wake, wait_for_engine_wake};
+
+    #[test]
+    fn flip_rows_puts_the_last_row_first() {
+        // Two pixels wide, three rows: rows are 8 bytes each.
+        let bottom_up: Vec<u8> = (0..24).collect();
+        let top_down = flip_rows(&bottom_up, 2, 3);
+        assert_eq!(&top_down[0..8], &bottom_up[16..24]);
+        assert_eq!(&top_down[8..16], &bottom_up[8..16]);
+        assert_eq!(&top_down[16..24], &bottom_up[0..8]);
+    }
+
+    #[test]
+    fn an_engine_wake_is_seen_once() {
+        note_engine_wake();
+        assert!(wait_for_engine_wake(std::time::Duration::from_millis(10)));
+        // Taken by the first wait: the next one times out.
+        assert!(!wait_for_engine_wake(std::time::Duration::from_millis(10)));
+        // A wake from another thread ends a wait early.
+        let waker = std::thread::spawn(|| {
+            std::thread::sleep(std::time::Duration::from_millis(20));
+            note_engine_wake();
+        });
+        let started = std::time::Instant::now();
+        assert!(wait_for_engine_wake(std::time::Duration::from_secs(5)));
+        assert!(started.elapsed() < std::time::Duration::from_secs(4));
+        waker.join().unwrap();
+    }
+}
+
+/// The page's current picture without a copy: what `frame_shared` returns.
+#[derive(Debug, Clone)]
+pub struct SharedFrame {
+    /// Changes exactly when the picture does.
+    pub seq: u64,
+    pub width: u32,
+    pub height: u32,
+    /// RGBA, `width * height * 4` bytes.
+    pub pixels: std::sync::Arc<Vec<u8>>,
+    /// The first row in `pixels` is the bottom of the picture (as OpenGL reads
+    /// it back); a caller that draws it flips it on the GPU for nothing.
+    pub bottom_up: bool,
+}
+
+/// Set by the engine's event-loop waker (from any thread) when it has work for
+/// the thread that drives it; cleared by [`wait_for_engine_wake`].
+static ENGINE_WAKE: (std::sync::Mutex<bool>, std::sync::Condvar) =
+    (std::sync::Mutex::new(false), std::sync::Condvar::new());
+
+/// Records that the engine asked to be spun.
+#[cfg(any(feature = "servo", test))]
+fn note_engine_wake() {
+    let (flag, signal) = &ENGINE_WAKE;
+    if let Ok(mut woken) = flag.lock() {
+        *woken = true;
+        signal.notify_all();
+    }
+}
+
+/// Blocks until the engine asks to be spun or `timeout` passes, and says
+/// which. A UI that waits on this instead of polling on a timer draws nothing
+/// while a page is still: the engine's own waker says when there is work.
+pub fn wait_for_engine_wake(timeout: std::time::Duration) -> bool {
+    let (flag, signal) = &ENGINE_WAKE;
+    let Ok(guard) = flag.lock() else {
+        std::thread::sleep(timeout);
+        return false;
+    };
+    let Ok((mut woken, _)) = signal.wait_timeout_while(guard, timeout, |woken| !*woken) else {
+        return false;
+    };
+    std::mem::take(&mut *woken)
+}
+
+/// Copies a bottom-row-first RGBA picture into top-row-first order (for a
+/// screenshot, or a caller that cannot flip it while drawing).
+pub fn flip_rows(pixels: &[u8], width: u32, height: u32) -> Vec<u8> {
+    let stride = width as usize * 4;
+    let mut out = Vec::with_capacity(pixels.len());
+    for row in pixels.chunks_exact(stride).take(height as usize).rev() {
+        out.extend_from_slice(row);
+    }
+    out
+}
+
 /// A process-wide counter for frame numbers, so two tabs never share one.
 #[cfg(feature = "servo")]
 pub(crate) fn next_frame_seq() -> u64 {
@@ -685,6 +772,20 @@ mod inner {
         WebViewBuilder, WebViewDelegate, WebViewPoint, WheelDelta, WheelEvent, WheelMode,
     };
     use winit::dpi::PhysicalSize;
+
+    /// The engine's event-loop waker: tells whoever waits in
+    /// [`super::wait_for_engine_wake`] that the engine has work for its thread.
+    struct EngineWaker;
+
+    impl servo::EventLoopWaker for EngineWaker {
+        fn clone_box(&self) -> Box<dyn servo::EventLoopWaker> {
+            Box::new(EngineWaker)
+        }
+
+        fn wake(&self) {
+            super::note_engine_wake();
+        }
+    }
 
     /// The `Code` (physical key) that best matches a typed character. Pages
     /// mostly read `key`; `code` matters for shortcuts and games, so an
@@ -1067,6 +1168,7 @@ mod inner {
                 let servo = ServoBuilder::default()
                     .opts(opts)
                     .preferences(prefs)
+                    .event_loop_waker(Box::new(EngineWaker))
                     .build();
                 super::apply_style_prefs();
                 *guard = Some(servo);
@@ -1664,8 +1766,16 @@ mod inner {
         rendering_context: Rc<dyn RenderingContext>,
         width: u32,
         height: u32,
-        /// Cached last frame as raw RGBA bytes (width × height × 4).
+        /// Cached last frame as raw RGBA bytes (`frame_size` × 4), bottom row
+        /// first, as OpenGL reads it back.
         last_frame: Option<std::sync::Arc<Vec<u8>>>,
+        /// The size `last_frame` was read at (the session may since have been
+        /// resized).
+        frame_size: (u32, u32),
+        /// The frame before `last_frame`: its buffer is read into next time,
+        /// once whoever was showing it has let it go, instead of allocating
+        /// tens of megabytes per frame.
+        spare_frame: Option<std::sync::Arc<Vec<u8>>>,
         /// Unique (process-wide) number of `last_frame`; changes exactly when
         /// the pixels do, so a caller can tell "same picture" without
         /// comparing or copying them.
@@ -1858,6 +1968,8 @@ mod inner {
                 width,
                 height,
                 last_frame: None,
+                frame_size: (0, 0),
+                spare_frame: None,
                 frame_seq: 0,
                 frame_ready,
                 last_load_status: LoadStatus::Loading,
@@ -2071,22 +2183,51 @@ mod inner {
             if !self.frame_ready.get() && self.last_frame.is_some() {
                 return;
             }
-            // Read back the current frame after paint.
+            // Read back the current frame after paint, straight into a buffer
+            // (Servo's `read_to_image` allocates, clones and flips: three full
+            // copies per frame, at Retina size about 30 MB each). The rows stay
+            // bottom first; the UI flips them on the GPU.
             //
             // `pump_engine()` may have called `make_current()` on another
             // tab's rendering context (GL context is a per-thread global).
             // Re-establish this tab's context as current before the readback so
             // `glReadPixels` reads the correct surface.
-            let _ = self.rendering_context.make_current();
-            let rect = servo::DeviceIntRect::from_origin_and_size(
-                servo::DeviceIntPoint::origin(),
-                servo::DeviceIntSize::new(self.width as i32, self.height as i32),
-            );
-            if let Some(rgba) = self.rendering_context.read_to_image(rect) {
-                self.frame_ready.set(false);
-                self.last_frame = Some(std::sync::Arc::new(rgba.into_raw()));
-                self.frame_seq = super::next_frame_seq();
+            let (width, height) = (self.width, self.height);
+            let len = width as usize * height as usize * 4;
+            if len == 0 {
+                return;
             }
+            let mut buffer = self
+                .spare_frame
+                .take()
+                .and_then(|spare| std::sync::Arc::try_unwrap(spare).ok())
+                .filter(|spare| spare.len() == len)
+                .unwrap_or_else(|| vec![0; len]);
+            let context = &self.rendering_context;
+            let _ = context.make_current();
+            context.prepare_for_rendering();
+            let gl = context.gleam_gl_api();
+            // See servo/servo#18606: some GL drivers need no vertex array bound
+            // for a readback after rendering.
+            gl.bind_vertex_array(0);
+            gl.read_pixels_into_buffer(
+                0,
+                0,
+                width as i32,
+                height as i32,
+                gleam::gl::RGBA,
+                gleam::gl::UNSIGNED_BYTE,
+                &mut buffer,
+            );
+            let error = gl.get_error();
+            if error != gleam::gl::NO_ERROR {
+                log::warn!("GL error 0x{error:x} after reading the page back");
+                return;
+            }
+            self.frame_ready.set(false);
+            self.spare_frame = self.last_frame.replace(std::sync::Arc::new(buffer));
+            self.frame_size = (width, height);
+            self.frame_seq = super::next_frame_seq();
         }
 
         /// Convenience wrapper for the single-tab case: pump + sync + read in one call.
@@ -2099,20 +2240,26 @@ mod inner {
         /// Returns `(width, height, rgba_bytes)` of the most recently rendered
         /// frame, or `None` if no frame has been produced yet.
         pub fn get_frame(&self) -> Option<(u32, u32, Vec<u8>)> {
+            let (width, height) = self.frame_size;
             self.last_frame
                 .as_ref()
-                .map(|b| (self.width, self.height, b.as_ref().clone()))
+                .map(|b| (width, height, super::flip_rows(b, width, height)))
         }
 
-        /// The current frame without copying it: `(sequence, width, height,
-        /// pixels)`. The sequence number changes exactly when the picture
-        /// does, so a caller that already has that number needs nothing
-        /// (this is what keeps scrolling smooth: a handle is built once per
-        /// new picture, not once per redraw).
-        pub fn frame_shared(&self) -> Option<(u64, u32, u32, std::sync::Arc<Vec<u8>>)> {
-            self.last_frame
-                .as_ref()
-                .map(|b| (self.frame_seq, self.width, self.height, b.clone()))
+        /// The current frame without copying it, bottom row first. Its
+        /// sequence number changes exactly when the picture does, so a caller
+        /// that already has that number needs nothing (the UI uploads a
+        /// picture once, not once per redraw). [`Self::get_frame`] is the
+        /// top-row-first copy, for screenshots.
+        pub fn frame_shared(&self) -> Option<super::SharedFrame> {
+            let (width, height) = self.frame_size;
+            self.last_frame.as_ref().map(|pixels| super::SharedFrame {
+                seq: self.frame_seq,
+                width,
+                height,
+                pixels: pixels.clone(),
+                bottom_up: true,
+            })
         }
 
         /// Returns `(width, height, rgba_bytes)` of the page's current favicon, or
@@ -2779,7 +2926,7 @@ impl HeadlessServoSession {
         None
     }
 
-    pub fn frame_shared(&self) -> Option<(u64, u32, u32, std::sync::Arc<Vec<u8>>)> {
+    pub fn frame_shared(&self) -> Option<SharedFrame> {
         None
     }
 
