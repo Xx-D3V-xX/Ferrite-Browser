@@ -198,6 +198,26 @@ const ASYNC: &[(&str, &str)] = &[
          document.body.appendChild(f)})",
     ),
     (
+        // Google's scripts read `location.pathname`/`search`/`href` across their own
+        // frames and got a SecurityError (T-267). Chrome makes setting `document.domain`
+        // a no-op (origin-keyed agent clusters, Chrome 115+), so such frames stay same
+        // origin there.
+        "after document.domain is set, same-origin frames still read each other's location",
+        "new Promise(function(res,rej){document.domain=document.domain;var seen=[];\
+         function read(label,fn){try{fn();}catch(e){seen.push(label+': '+e.name+': '+e.message)}}\
+         read('own location',function(){return location.pathname});\
+         var b=document.createElement('iframe');document.body.appendChild(b);\
+         read('parent reads blank frame',function(){return b.contentWindow.location.pathname});\
+         read('blank frame reads parent',function(){return b.contentWindow.Function('return parent.location.pathname')()});\
+         var f=document.createElement('iframe');f.src='/ping';\
+         var t=setTimeout(function(){rej(new Error('frame never loaded'))},5000);\
+         f.onload=function(){clearTimeout(t);\
+         read('parent reads same-origin frame',function(){return f.contentWindow.location.search});\
+         read('same-origin frame reads parent',function(){return f.contentWindow.Function('return parent.location.href')()});\
+         b.remove();f.remove();if(seen.length)rej(new Error(seen.join(' | ')));else res()};\
+         document.body.appendChild(f)})",
+    ),
+    (
         "setTimeout/Promise ordering",
         "new Promise(function(res){var o=[];setTimeout(function(){o.push('t');if(o.join('')==='mt')res();else throw new Error(o.join(''))},0);Promise.resolve().then(function(){o.push('m')})})",
     ),

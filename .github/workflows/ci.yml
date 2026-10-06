@@ -384,11 +384,11 @@ jobs:
       - name: Run the engine's media probes from a bundle (macOS)
         if: matrix.platform == 'macos'
         run: |
-          cargo build --release -p ferrite-servo --features servo,media --example media_probe --example mse_probe
+          cargo build --release -p ferrite-servo --features servo,media --example media_probe --example mse_probe --example page_shot
           app="$RUNNER_TEMP/e2e/Ferrite.app"
           rm -rf "$RUNNER_TEMP/e2e"; mkdir -p "$app/Contents/MacOS" "$app/Contents/Resources"
-          cp target/release/examples/media_probe target/release/examples/mse_probe "$app/Contents/MacOS/"
-          python3 scripts/bundle-gstreamer.py macos "$app" --main media_probe --extra mse_probe
+          cp target/release/examples/media_probe target/release/examples/mse_probe target/release/examples/page_shot "$app/Contents/MacOS/"
+          python3 scripts/bundle-gstreamer.py macos "$app" --main media_probe --extra mse_probe --extra page_shot
           bad=""
           run_probe() {   # $1 = label, $2 = probe
             set +e
@@ -411,6 +411,11 @@ jobs:
           sed 's#.*/##' "$RUNNER_TEMP/gst-images.txt" | sort | uniq -d
           run_probe "Homebrew present" media_probe
           run_probe "Homebrew present" mse_probe
+          # The page as the app reads it back (BGRA on macOS, T-320): a page red at the
+          # top and blue at the bottom must come out that way, not flipped or swapped.
+          shot="$("$app/Contents/MacOS/page_shot" 'data:text/html,<body style="margin:0"><div style="height:50vh;background:%23f00"></div><div style="height:50vh;background:%2300f"></div>' 3000 "$RUNNER_TEMP/orient.png" 400 300 2>&1 || true)"
+          echo "$shot" | grep -E "^(FRAME|PIXELS)" || true
+          if ! echo "$shot" | grep -q "^PIXELS  top 255,0,0 bottom 0,0,255"; then echo "page readback: colours or orientation wrong"; echo "$shot" | tail -20; bad=1; fi
           sudo mv /opt/homebrew /opt/homebrew.hidden
           run_probe "Homebrew hidden" media_probe
           run_probe "Homebrew hidden" mse_probe

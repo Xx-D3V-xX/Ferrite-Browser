@@ -600,7 +600,34 @@ mod intersection_observer_setting_tests {
 
 #[cfg(test)]
 mod frame_and_wake_tests {
-    use super::{flip_rows, note_engine_wake, wait_for_engine_wake};
+    use super::{flip_rows, note_engine_wake, wait_for_engine_wake, SharedFrame};
+
+    #[test]
+    fn a_bgra_bottom_up_frame_becomes_top_down_rgba() {
+        // One pixel wide, two rows: the bottom row (first) is blue, the top red,
+        // both as B, G, R, A.
+        let frame = SharedFrame {
+            seq: 1,
+            width: 1,
+            height: 2,
+            pixels: std::sync::Arc::new(vec![255, 0, 0, 255, 0, 0, 255, 255]),
+            bottom_up: true,
+            bgra: true,
+        };
+        assert_eq!(
+            frame.to_rgba_top_down(),
+            vec![255, 0, 0, 255, 0, 0, 255, 255]
+        );
+        let rgba = SharedFrame {
+            bgra: false,
+            bottom_up: false,
+            ..frame
+        };
+        assert_eq!(
+            rgba.to_rgba_top_down(),
+            vec![255, 0, 0, 255, 0, 0, 255, 255]
+        );
+    }
 
     #[test]
     fn flip_rows_puts_the_last_row_first() {
@@ -642,6 +669,32 @@ pub struct SharedFrame {
     /// The first row in `pixels` is the bottom of the picture (as OpenGL reads
     /// it back); a caller that draws it flips it on the GPU for nothing.
     pub bottom_up: bool,
+    /// The bytes are B, G, R, A rather than R, G, B, A (macOS: the engine's
+    /// surface is BGRA, and reading it as RGBA converted every pixel on the CPU).
+    pub bgra: bool,
+}
+
+impl SharedFrame {
+    /// The picture as top-row-first RGBA (for a screenshot, or a caller that
+    /// cannot flip or swizzle it while drawing): one copy.
+    pub fn to_rgba_top_down(&self) -> Vec<u8> {
+        let mut out = if self.bottom_up {
+            flip_rows(&self.pixels, self.width, self.height)
+        } else {
+            self.pixels.as_ref().clone()
+        };
+        if self.bgra {
+            swap_red_blue(&mut out);
+        }
+        out
+    }
+}
+
+/// Turns BGRA bytes into RGBA (or back) in place.
+pub fn swap_red_blue(pixels: &mut [u8]) {
+    for pixel in pixels.as_chunks_mut::<4>().0 {
+        pixel.swap(0, 2);
+    }
 }
 
 /// Set by the engine's event-loop waker (from any thread) when it has work for
@@ -674,8 +727,7 @@ pub fn wait_for_engine_wake(timeout: std::time::Duration) -> bool {
     std::mem::take(&mut *woken)
 }
 
-/// Copies a bottom-row-first RGBA picture into top-row-first order (for a
-/// screenshot, or a caller that cannot flip it while drawing).
+/// Copies a bottom-row-first picture into top-row-first order.
 pub fn flip_rows(pixels: &[u8], width: u32, height: u32) -> Vec<u8> {
     let stride = width as usize * 4;
     let mut out = Vec::with_capacity(pixels.len());
@@ -1772,6 +1824,12 @@ mod inner {
         /// The size `last_frame` was read at (the session may since have been
         /// resized).
         frame_size: (u32, u32),
+        /// Read the surface as BGRA (macOS, where it is stored that way; reading
+        /// it as RGBA had the driver convert every pixel, about half of each
+        /// readback). Turned off for good if the driver refuses it.
+        read_bgra: bool,
+        /// Whether `last_frame` is BGRA.
+        frame_bgra: bool,
         /// The frame before `last_frame`: its buffer is read into next time,
         /// once whoever was showing it has let it go, instead of allocating
         /// tens of megabytes per frame.
@@ -1969,6 +2027,8 @@ mod inner {
                 height,
                 last_frame: None,
                 frame_size: (0, 0),
+                read_bgra: cfg!(target_os = "macos"),
+                frame_bgra: false,
                 spare_frame: None,
                 frame_seq: 0,
                 frame_ready,
@@ -2210,16 +2270,23 @@ mod inner {
             // See servo/servo#18606: some GL drivers need no vertex array bound
             // for a readback after rendering.
             gl.bind_vertex_array(0);
-            gl.read_pixels_into_buffer(
-                0,
-                0,
-                width as i32,
-                height as i32,
-                gleam::gl::RGBA,
-                gleam::gl::UNSIGNED_BYTE,
-                &mut buffer,
-            );
-            let error = gl.get_error();
+            let read = |bgra: bool, buffer: &mut [u8]| {
+                let (format, kind) = if bgra {
+                    (gleam::gl::BGRA, gleam::gl::UNSIGNED_INT_8_8_8_8_REV)
+                } else {
+                    (gleam::gl::RGBA, gleam::gl::UNSIGNED_BYTE)
+                };
+                gl.read_pixels_into_buffer(0, 0, width as i32, height as i32, format, kind, buffer);
+                gl.get_error()
+            };
+            let mut error = read(self.read_bgra, &mut buffer);
+            if error != gleam::gl::NO_ERROR && self.read_bgra {
+                log::warn!(
+                    "GL error 0x{error:x} reading the page as BGRA; reading RGBA from now on"
+                );
+                self.read_bgra = false;
+                error = read(false, &mut buffer);
+            }
             if error != gleam::gl::NO_ERROR {
                 log::warn!("GL error 0x{error:x} after reading the page back");
                 return;
@@ -2227,6 +2294,7 @@ mod inner {
             self.frame_ready.set(false);
             self.spare_frame = self.last_frame.replace(std::sync::Arc::new(buffer));
             self.frame_size = (width, height);
+            self.frame_bgra = self.read_bgra;
             self.frame_seq = super::next_frame_seq();
         }
 
@@ -2240,10 +2308,8 @@ mod inner {
         /// Returns `(width, height, rgba_bytes)` of the most recently rendered
         /// frame, or `None` if no frame has been produced yet.
         pub fn get_frame(&self) -> Option<(u32, u32, Vec<u8>)> {
-            let (width, height) = self.frame_size;
-            self.last_frame
-                .as_ref()
-                .map(|b| (width, height, super::flip_rows(b, width, height)))
+            self.frame_shared()
+                .map(|frame| (frame.width, frame.height, frame.to_rgba_top_down()))
         }
 
         /// The current frame without copying it, bottom row first. Its
@@ -2259,6 +2325,7 @@ mod inner {
                 height,
                 pixels: pixels.clone(),
                 bottom_up: true,
+                bgra: self.frame_bgra,
             })
         }
 

@@ -8,7 +8,8 @@
 //! buffer per 2048-pixel tile. For a page that animates, that ran sixty times a
 //! second. This widget writes each new picture into the texture it already has
 //! (`queue.write_texture`, one copy) and draws it pixel for pixel, flipping
-//! OpenGL's bottom-to-top rows in the shader so the engine does not have to.
+//! OpenGL's bottom-to-top rows in the shader so the engine does not have to. On
+//! macOS the engine's bytes are BGRA; a BGRA texture takes them as they are.
 
 use iced::widget::shader::{self, wgpu, Viewport};
 use iced::{mouse, Rectangle};
@@ -58,7 +59,9 @@ struct Pipeline {
     layout: wgpu::BindGroupLayout,
     sampler: wgpu::Sampler,
     uniforms: wgpu::Buffer,
-    texture_format: wgpu::TextureFormat,
+    /// Whether the window's target is sRGB: the page texture matches it, so
+    /// the engine's bytes pass through unchanged.
+    srgb: bool,
     target: Option<Target>,
 }
 
@@ -66,6 +69,7 @@ struct Pipeline {
 struct Target {
     width: u32,
     height: u32,
+    format: wgpu::TextureFormat,
     texture: wgpu::Texture,
     bind_group: wgpu::BindGroup,
     seq: u64,
@@ -194,20 +198,24 @@ impl Pipeline {
             usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
             mapped_at_creation: false,
         });
-        // The engine's bytes are the colours to show; an sRGB texture into an
-        // sRGB target (or a plain one into a plain one) passes them through.
-        let texture_format = if target_format.is_srgb() {
-            wgpu::TextureFormat::Rgba8UnormSrgb
-        } else {
-            wgpu::TextureFormat::Rgba8Unorm
-        };
         Self {
             pipeline,
             layout,
             sampler,
             uniforms,
-            texture_format,
+            srgb: target_format.is_srgb(),
             target: None,
+        }
+    }
+
+    /// The texture format for a frame: the engine's byte order (a BGRA texture
+    /// samples as RGBA, so the GPU does the swizzle), sRGB to match the target.
+    fn format_for(&self, frame: &PageFrame) -> wgpu::TextureFormat {
+        match (frame.bgra, self.srgb) {
+            (true, true) => wgpu::TextureFormat::Bgra8UnormSrgb,
+            (true, false) => wgpu::TextureFormat::Bgra8Unorm,
+            (false, true) => wgpu::TextureFormat::Rgba8UnormSrgb,
+            (false, false) => wgpu::TextureFormat::Rgba8Unorm,
         }
     }
 
@@ -216,10 +224,10 @@ impl Pipeline {
         if frame.width == 0 || frame.height == 0 || frame.pixels.len() < expected {
             return;
         }
-        let reuse = self
-            .target
-            .as_ref()
-            .is_some_and(|t| t.width == frame.width && t.height == frame.height);
+        let format = self.format_for(frame);
+        let reuse = self.target.as_ref().is_some_and(|t| {
+            t.width == frame.width && t.height == frame.height && t.format == format
+        });
         if !reuse {
             let texture = device.create_texture(&wgpu::TextureDescriptor {
                 label: Some("ferrite page"),
@@ -231,7 +239,7 @@ impl Pipeline {
                 mip_level_count: 1,
                 sample_count: 1,
                 dimension: wgpu::TextureDimension::D2,
-                format: self.texture_format,
+                format,
                 usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
                 view_formats: &[],
             });
@@ -257,6 +265,7 @@ impl Pipeline {
             self.target = Some(Target {
                 width: frame.width,
                 height: frame.height,
+                format,
                 texture,
                 bind_group,
                 seq: u64::MAX,

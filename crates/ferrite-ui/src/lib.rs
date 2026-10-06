@@ -4245,16 +4245,10 @@ fn refresh_frame_cache(state: &mut FerriteBrowser) -> bool {
     if state.frame_cache.get(&active).map(|(f, _)| f.seq) == Some(frame.seq) {
         return false;
     }
-    // The image widget wants rows top first and its own bytes: a copy per
+    // The image widget wants top-row-first RGBA in its own bytes: a copy per
     // picture, paid only on the fallback path.
-    let handle = page_view::use_image_widget().then(|| {
-        let pixels = if frame.bottom_up {
-            ferrite_servo::session::flip_rows(&frame.pixels, frame.width, frame.height)
-        } else {
-            frame.pixels.as_ref().clone()
-        };
-        ImageHandle::from_rgba(frame.width, frame.height, pixels)
-    });
+    let handle = page_view::use_image_widget()
+        .then(|| ImageHandle::from_rgba(frame.width, frame.height, frame.to_rgba_top_down()));
     state.frame_cache.insert(active, (frame, handle));
     true
 }

@@ -84,6 +84,19 @@ fn main() {
                 .and_then(|mut writer| writer.write_image_data(&rgba))
                 .expect("write png");
             println!("FRAME   {w}x{h} -> {out}");
+            // The colour a few rows from the top and the bottom, in the middle:
+            // CI loads a page that is red at the top and blue at the bottom and
+            // checks the picture is neither upside down nor red/blue swapped.
+            let at = |y: u32| {
+                let i = ((y * w + w / 2) * 4) as usize;
+                rgba.get(i..i + 3).map_or_else(
+                    || "?".to_string(),
+                    |p| format!("{},{},{}", p[0], p[1], p[2]),
+                )
+            };
+            if h > 10 {
+                println!("PIXELS  top {} bottom {}", at(5), at(h - 5));
+            }
         }
         None => println!("FRAME   none rendered"),
     }

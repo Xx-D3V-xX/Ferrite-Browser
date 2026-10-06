@@ -5513,11 +5513,13 @@ impl DocumentMethods<crate::DomTypeHolder> for Document {
             };
 
         // Step 6. If the surrounding agent's agent cluster's is origin-keyed is true, then return.
-        // TODO
-
-        // Step 7. Set this's origin's domain to the result of parsing the given value.
-        self.origin().set_domain(host);
-
+        //
+        // Every agent cluster here is origin-keyed, as in Chrome since version 115:
+        // setting `document.domain` checks the value (steps 1-5) and changes nothing.
+        // Setting it for real made a page that sets it (Google's) cross-origin with
+        // its own same-origin frames, which had not: reading their `location` threw
+        // a SecurityError, which Chrome never does.
+        let _ = host;
         Ok(())
     }
 
