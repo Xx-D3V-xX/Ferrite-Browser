@@ -29,3 +29,7 @@ engine is upgraded to a release that has these interfaces.
    `codegen/Bindings.conf`: `getDisplayMedia`, `getSupportedConstraints`, the track's
    `label`, `enabled`, `muted`, `readyState`, `stop()`, `getSettings()` and event handlers,
    the stream's `id` and `active`. See `vendor/servo-script/FERRITE-PATCHES.md`, item 8.
+
+7. `webidls/RTCPeerConnection.webidl`: `createDataChannel` is `[Throws]` (as the
+   specification has it), so a channel the backend cannot create is an exception for the
+   page rather than a panic. See `vendor/servo-script/FERRITE-PATCHES.md`, item 9.

@@ -12,11 +12,12 @@
 //!
 //! What it sets, before the engine starts GStreamer:
 //!
-//! * **no plugin scanning.** The engine registers its plugins itself. If GStreamer also
-//!   scanned that directory, each plugin would be registered twice and the engine would
-//!   count the second as a failure; if it scanned its built-in paths on a machine with
-//!   Homebrew's GStreamer, it would load that one too. Both scan variables point at a
-//!   directory that does not exist.
+//! * **no scanning of the engine's plugins.** The engine registers them itself. If
+//!   GStreamer also scanned that directory, each would be registered twice and the engine
+//!   would count the second as a failure; if it scanned its built-in paths on a machine
+//!   with Homebrew's GStreamer, it would load that one too. GStreamer scans only
+//!   `gst-extra` inside the plugin directory: the few plugins Ferrite needs beyond the
+//!   engine's list (the Opus parser, without which WebM with Opus is "not supported").
 //! * **a registry of its own** in the profile directory, not the one every GStreamer
 //!   program on the machine shares.
 //! * **no GIO modules from outside.** GIO loads optional modules at run time from the
@@ -53,7 +54,7 @@ pub fn gstreamer_env(
     let mut env: Vec<(&'static str, OsString)> = vec![
         (
             "GST_PLUGIN_SYSTEM_PATH_1_0",
-            nowhere.clone().into_os_string(),
+            plugins.join("gst-extra").into_os_string(),
         ),
         ("GST_PLUGIN_PATH_1_0", nowhere.clone().into_os_string()),
         ("GIO_MODULE_DIR", nowhere.into_os_string()),
@@ -143,8 +144,12 @@ mod tests {
                 .find(|(n, _)| *n == name)
                 .map(|(_, v)| PathBuf::from(v))
         };
-        let nowhere = get("GST_PLUGIN_SYSTEM_PATH_1_0").unwrap();
-        assert_eq!(get("GST_PLUGIN_PATH_1_0").unwrap(), nowhere);
+        // Only the extra folder is scanned, never the engine's own plugin folder.
+        assert_eq!(
+            get("GST_PLUGIN_SYSTEM_PATH_1_0").unwrap(),
+            plugins.join("gst-extra")
+        );
+        let nowhere = get("GST_PLUGIN_PATH_1_0").unwrap();
         // GIO's modules are not loaded from the machine's GLib either.
         assert_eq!(get("GIO_MODULE_DIR").unwrap(), nowhere);
         // Where it points does not exist, and is not the plugin folder itself: scanning that

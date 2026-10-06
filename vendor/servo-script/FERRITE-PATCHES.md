@@ -106,3 +106,10 @@ directory) when the engine is upgraded to a release that includes the fixes.
    `MediaStreamTrack.label`, `enabled`, `readyState`, `stop()`, `getSettings()`, `onended`;
    `MediaStream.id` and `active`; `enumerateDevices` shows names only after a grant;
    `FERRITE_MOCK_CAPTURE` makes the engine's test sources stand in for devices (probes).
+
+9. `dom/webrtc/rtcdatachannel.rs`, `dom/webrtc/rtcpeerconnection.rs` (with
+   `servo-script-bindings`, item 7): **`createDataChannel` throws instead of panicking.**
+   When the media backend could not create the channel (it happened on macOS), the script
+   thread panicked on `expect("Expected data channel id")` and the page died. Now the page
+   gets an `OperationError`. The id was also read with `unwrap_or(...)`, which evaluates its
+   argument first, so a channel the remote peer had opened made a second, local channel.

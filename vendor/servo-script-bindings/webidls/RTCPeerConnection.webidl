@@ -147,7 +147,7 @@ partial interface RTCPeerConnection {
 // https://www.w3.org/TR/webrtc/#rtcpeerconnection-interface-extensions-0
 partial interface RTCPeerConnection {
   // readonly attribute RTCSctpTransport? sctp;
-  RTCDataChannel createDataChannel(USVString label,
+  [Throws] RTCDataChannel createDataChannel(USVString label,
                                    optional RTCDataChannelInit dataChannelDict = {});
   attribute EventHandler ondatachannel;
 };

@@ -90,20 +90,8 @@ impl RTCDataChannel {
         peer_connection: &RTCPeerConnection,
         label: USVString,
         options: &RTCDataChannelInit,
-        servo_media_id: Option<DataChannelId>,
+        servo_media_id: DataChannelId,
     ) -> RTCDataChannel {
-        let mut init: DataChannelInit = options.convert();
-        init.label = label.0.clone();
-
-        let controller = peer_connection.get_webrtc_controller().borrow();
-        let servo_media_id = servo_media_id.unwrap_or(
-            controller
-                .as_ref()
-                .unwrap()
-                .create_data_channel(init)
-                .expect("Expected data channel id"),
-        );
-
         RTCDataChannel {
             eventtarget: EventTarget::new_inherited(),
             label,
@@ -127,7 +115,24 @@ impl RTCDataChannel {
         label: USVString,
         options: &RTCDataChannelInit,
         servo_media_id: Option<DataChannelId>,
-    ) -> DomRoot<RTCDataChannel> {
+    ) -> Fallible<DomRoot<RTCDataChannel>> {
+        // A channel the remote peer opened already has its id. One the page asks for is
+        // created now, and creating it can fail (the media backend refusing it): that is
+        // the page's createDataChannel throwing, not the script thread panicking, which is
+        // what `expect("Expected data channel id")` did. (It was also `unwrap_or`, which
+        // created a second channel even when an id had been given.)
+        let servo_media_id = match servo_media_id {
+            Some(id) => id,
+            None => {
+                let mut init: DataChannelInit = options.convert();
+                init.label = label.0.clone();
+                let controller = peer_connection.get_webrtc_controller().borrow();
+                controller
+                    .as_ref()
+                    .and_then(|controller| controller.create_data_channel(init))
+                    .ok_or(Error::Operation(None))?
+            },
+        };
         let rtc_data_channel = reflect_dom_object_with_cx(
             Box::new(RTCDataChannel::new_inherited(
                 peer_connection,
@@ -142,7 +147,7 @@ impl RTCDataChannel {
         peer_connection
             .register_data_channel(rtc_data_channel.get_servo_media_id(), &rtc_data_channel);
 
-        rtc_data_channel
+        Ok(rtc_data_channel)
     }
 
     pub(crate) fn get_servo_media_id(&self) -> DataChannelId {

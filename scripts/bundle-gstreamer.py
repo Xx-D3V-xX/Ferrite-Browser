@@ -76,6 +76,22 @@ def find_servo_plugin_lists() -> Path:
     sys.exit("could not find the servo crate's gstreamer_plugin_lists (set FERRITE_SERVO_PLUGIN_LISTS)")
 
 
+# Plugins Ferrite needs beyond Servo's list, in their own folder (`gst-extra` inside the
+# plugin folder) that GStreamer scans at start-up. A separate folder, because a scan of
+# Servo's folder would register its plugins twice. `required` ones fail the bundle.
+#   opusparse  Servo's media code counts Opus as playable only with an Opus parser; without
+#              it WebM with VP9+Opus (YouTube's main format) is "not supported".
+#   dav1d      AV1 video, which YouTube serves more and more.
+EXTRA_PLUGINS = [("gstopusparse", True), ("gstdav1d", False)]
+EXTRA_DIR = "gst-extra"
+
+
+def extra_files(platform: str) -> list[tuple[str, bool]]:
+    if platform == "macos":
+        return [(f"lib{n}.dylib", required) for n, required in EXTRA_PLUGINS]
+    return [(f"{n}.dll", required) for n, required in EXTRA_PLUGINS]
+
+
 def plugin_files(platform: str, lists_dir: Path | None = None) -> list[str]:
     """The plugin files Servo loads on `platform` ("macos" or "windows"), by file name."""
     lists = lists_dir or find_servo_plugin_lists()
@@ -180,6 +196,17 @@ def bundle_macos(
     if missing:
         sys.exit(f"Servo loads these GStreamer plugins and they are not under {prefix}: {missing}")
 
+    extras_out = plugins_out / EXTRA_DIR
+    extras_out.mkdir(parents=True, exist_ok=True)
+    extra_names = []
+    for name, required in extra_files("macos"):
+        if name in found:
+            extra_names.append(name)
+        elif required:
+            sys.exit(f"Ferrite needs the GStreamer plugin {name} and it is not under {prefix}")
+        else:
+            print(f"warning: optional plugin {name} is not installed, left out", file=sys.stderr)
+
     main = app / "Contents" / "MacOS" / main_name
     # Other programs placed beside the app (the CI end-to-end test runs the engine's probes
     # from the bundle this way): fixed up exactly like the app itself.
@@ -188,6 +215,9 @@ def bundle_macos(
     for name in needed:
         # Contents/MacOS/lib/<plugin>: the libraries are two folders up, in Frameworks.
         todo.append((found[name], plugins_out / name, "@loader_path/../../Frameworks"))
+    for name in extra_names:
+        # Contents/MacOS/lib/gst-extra/<plugin>: three folders up.
+        todo.append((found[name], extras_out / name, "@loader_path/../../../Frameworks"))
 
     copied: dict[str, Path] = {}  # basename -> destination in Frameworks
     queue: list[Path] = executables + [d for _, d, _ in todo]
@@ -240,7 +270,7 @@ def bundle_macos(
             pass  # already there
     for target in list(rpaths):
         run(["codesign", "--force", "--sign", "-", str(target)])
-    print(f"bundled {len(needed)} plugins and {len(copied)} libraries into {app}")
+    print(f"bundled {len(needed)} plugins, {len(extra_names)} extra, and {len(copied)} libraries into {app}")
 
 
 # -------------------------------------------------------------------------- Windows
@@ -257,11 +287,22 @@ def bundle_windows(stage: Path, root: Path, lists_dir: Path | None = None) -> No
     # plugin's libraries there too.
     for name in needed:
         shutil.copy2(plugin_dir / name, stage)
+    extras_out = stage / EXTRA_DIR
+    extras_out.mkdir(exist_ok=True)
+    extras = 0
+    for name, required in extra_files("windows"):
+        if (plugin_dir / name).exists():
+            shutil.copy2(plugin_dir / name, extras_out)
+            extras += 1
+        elif required:
+            sys.exit(f"Ferrite needs the GStreamer plugin {name} and it is not under {plugin_dir}")
+        else:
+            print(f"warning: optional plugin {name} is not installed, left out", file=sys.stderr)
     libs = 0
     for dll in (root / "bin").glob("*.dll"):
         shutil.copy2(dll, stage)
         libs += 1
-    print(f"bundled {len(needed)} plugins and {libs} libraries into {stage}")
+    print(f"bundled {len(needed)} plugins, {extras} extra, and {libs} libraries into {stage}")
 
 
 # ----------------------------------------------------------------------------- tests
@@ -345,7 +386,7 @@ Load command 14
         root = d / "gst"
         (root / "lib" / "gstreamer-1.0").mkdir(parents=True)
         (root / "bin").mkdir()
-        for n in plugin_files("windows", lists) + ["gstunrelated.dll"]:
+        for n in plugin_files("windows", lists) + ["gstunrelated.dll", "gstopusparse.dll"]:
             (root / "lib" / "gstreamer-1.0" / n).write_bytes(b"x")
         (root / "bin" / "gstreamer-1.0-0.dll").write_bytes(b"x")
         (root / "bin" / "gst-launch-1.0.exe").write_bytes(b"x")
@@ -355,6 +396,9 @@ Load command 14
         assert not (stage / "gstunrelated.dll").exists()
         assert (stage / "gstreamer-1.0-0.dll").exists()
         assert not (stage / "gst-launch-1.0.exe").exists()
+        # The extra plugins go in their own folder, the optional one may be missing.
+        assert (stage / EXTRA_DIR / "gstopusparse.dll").exists()
+        assert not (stage / "gstopusparse.dll").exists()
         # A plugin Servo needs that is not installed stops the bundle: Servo would exit(1).
         (root / "lib" / "gstreamer-1.0" / "gstnice.dll").unlink()
         try:

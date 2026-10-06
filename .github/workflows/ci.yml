@@ -401,6 +401,14 @@ jobs:
             if [ "$code" -ne 0 ]; then echo "$1: $2 exited with $code"; tail -20 "$RUNNER_TEMP/$2.log"; bad=1; fi
             echo "=== $1: $2 exit $code"
           }
+          # Every library the engine loads, and any loaded twice (two copies of a GObject
+          # library give "expected X, got X" type errors, as WebRTC data channels did).
+          DYLD_PRINT_LIBRARIES=1 "$app/Contents/MacOS/media_probe" > /dev/null 2> "$RUNNER_TEMP/dyld-media.txt" || true
+          grep -oE "/[^ ]+\.dylib" "$RUNNER_TEMP/dyld-media.txt" | grep -iE "gst|glib|gobject|gio|nice|srtp|ssl|crypto" | sort -u > "$RUNNER_TEMP/gst-images.txt"
+          echo "--- GStreamer/GLib images loaded: $(wc -l < "$RUNNER_TEMP/gst-images.txt")"
+          cat "$RUNNER_TEMP/gst-images.txt"
+          echo "--- loaded more than once (same file name, different path):"
+          sed 's#.*/##' "$RUNNER_TEMP/gst-images.txt" | sort | uniq -d
           run_probe "Homebrew present" media_probe
           run_probe "Homebrew present" mse_probe
           sudo mv /opt/homebrew /opt/homebrew.hidden
@@ -487,7 +495,7 @@ jobs:
           echo "--- elements an app needs (this scans the bundle's folder, which the app itself does not)"
           export GST_PLUGIN_SYSTEM_PATH_1_0="$libdir"; rm -f "$GST_REGISTRY_1_0"
           missing=""
-          for el in qtdemux matroskademux playbin3 appsrc avdec_h264 opusdec vp9dec webrtcbin; do
+          for el in qtdemux matroskademux playbin3 appsrc avdec_h264 opusdec opusparse vp9dec webrtcbin; do
             if "$app/Contents/MacOS/gst-inspect" "$el" >/dev/null 2>&1; then echo "ok   $el"; else echo "MISSING $el"; missing=1; fi
           done
           [ -z "$missing" ]
@@ -574,7 +582,7 @@ jobs:
           $env:GST_PLUGIN_SYSTEM_PATH_1_0 = $stage
           Remove-Item $env:GST_REGISTRY_1_0 -ErrorAction SilentlyContinue
           $missing = $false
-          foreach ($el in 'qtdemux','matroskademux','playbin3','appsrc','avdec_h264','opusdec','vp9dec','webrtcbin') {
+          foreach ($el in 'qtdemux','matroskademux','playbin3','appsrc','avdec_h264','opusdec','opusparse','vp9dec','webrtcbin') {
             & "$stage\gst-inspect.exe" $el *> $null
             if ($LASTEXITCODE -eq 0) { "ok      $el" } else { "MISSING $el"; $missing = $true }
           }

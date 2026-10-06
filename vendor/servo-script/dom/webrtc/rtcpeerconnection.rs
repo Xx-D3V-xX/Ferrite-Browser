@@ -291,14 +291,17 @@ impl RTCPeerConnection {
 
         match event {
             DataChannelEvent::NewChannel => {
-                let channel = RTCDataChannel::new(
+                // With an id given, creating the object cannot fail.
+                let Ok(channel) = RTCDataChannel::new(
                     cx,
                     &self.global(),
                     self,
                     USVString::from("".to_owned()),
                     &RTCDataChannelInit::empty(),
                     Some(channel_id),
-                );
+                ) else {
+                    return;
+                };
 
                 let event = RTCDataChannelEvent::new(
                     cx,
@@ -783,7 +786,7 @@ impl RTCPeerConnectionMethods<crate::DomTypeHolder> for RTCPeerConnection {
         cx: &mut JSContext,
         label: USVString,
         init: &RTCDataChannelInit,
-    ) -> DomRoot<RTCDataChannel> {
+    ) -> Fallible<DomRoot<RTCDataChannel>> {
         RTCDataChannel::new(cx, &self.global(), self, label, init, None)
     }
 
