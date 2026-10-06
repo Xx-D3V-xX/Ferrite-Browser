@@ -19,6 +19,11 @@
 //!   directory that does not exist.
 //! * **a registry of its own** in the profile directory, not the one every GStreamer
 //!   program on the machine shares.
+//! * **no GIO modules from outside.** GIO loads optional modules at run time from the
+//!   folder fixed when GLib was built: in a bundle made from Homebrew,
+//!   `/opt/homebrew/lib/gio/modules`. Those link to Homebrew's own GLib, so on a Mac that
+//!   has Homebrew they brought a second GLib (with its own type system) into the process:
+//!   WebRTC then failed with "expected GstWebRTCDataChannel, got GstWebRTCDataChannel".
 //!
 //! A variable the person already set is left alone.
 
@@ -50,7 +55,8 @@ pub fn gstreamer_env(
             "GST_PLUGIN_SYSTEM_PATH_1_0",
             nowhere.clone().into_os_string(),
         ),
-        ("GST_PLUGIN_PATH_1_0", nowhere.into_os_string()),
+        ("GST_PLUGIN_PATH_1_0", nowhere.clone().into_os_string()),
+        ("GIO_MODULE_DIR", nowhere.into_os_string()),
     ];
     if let Some(dir) = registry_dir {
         env.push((
@@ -139,6 +145,8 @@ mod tests {
         };
         let nowhere = get("GST_PLUGIN_SYSTEM_PATH_1_0").unwrap();
         assert_eq!(get("GST_PLUGIN_PATH_1_0").unwrap(), nowhere);
+        // GIO's modules are not loaded from the machine's GLib either.
+        assert_eq!(get("GIO_MODULE_DIR").unwrap(), nowhere);
         // Where it points does not exist, and is not the plugin folder itself: scanning that
         // would register every plugin twice.
         assert!(!nowhere.exists());

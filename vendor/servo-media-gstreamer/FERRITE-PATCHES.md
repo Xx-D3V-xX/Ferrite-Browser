@@ -28,3 +28,9 @@ trait methods are declared) and `vendor/servo-embedder-traits`.
    configuration; and posts `Buffering(0)` when the data ends within 80 ms of the
    playhead and `Buffering(100)` once it is 250 ms ahead again, so a stalled player
    pauses. The crate depends on `crates/ferrite-mse` by path.
+5. `datachannel.rs`: **creating a data channel no longer panics.** It read the value of
+   webrtcbin's `create-data-channel` signal with `emit_by_name::<WebRTCDataChannel>`,
+   which panics if the value is not of the expected type. On a Mac where a second GLib
+   had been loaded (Homebrew's, through GIO modules) that happened, the WebRTC thread died,
+   and the script thread then panicked on its closed channel (`servo-media-webrtc`
+   `thread.rs`). Now the failure is returned and the page's `createDataChannel` fails.

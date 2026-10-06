@@ -47,8 +47,23 @@ impl GStreamerWebRtcDataChannel {
             init_struct.set_value("id", (id as u32).to_send_value());
         }
 
-        let channel = webrtc
-            .emit_by_name::<WebRTCDataChannel>("create-data-channel", &[&label, &init_struct]);
+        // Not `emit_by_name::<WebRTCDataChannel>`: that panics when the value is not the
+        // type this build knows (two copies of GLib in the process give two
+        // `GstWebRTCDataChannel` types), and the panic takes the WebRTC thread down with
+        // it. A failure here is the page's `createDataChannel` failing, nothing more.
+        let channel = match webrtc
+            .emit_by_name_with_values(
+                "create-data-channel",
+                &[label.to_value(), init_struct.to_value()],
+            )
+            .map(|value| value.get::<WebRTCDataChannel>())
+        {
+            Some(Ok(channel)) => channel,
+            Some(Err(error)) => {
+                return Err(format!("create-data-channel returned an unexpected value: {error}"));
+            },
+            None => return Err("create-data-channel returned no channel".to_owned()),
+        };
 
         GStreamerWebRtcDataChannel::from(servo_channel_id, channel, thread)
     }
