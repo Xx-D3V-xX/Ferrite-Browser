@@ -20,16 +20,25 @@ grep -vE '^\s*(#|$)' "$list" | while IFS= read -r line; do
   url="$(echo "$line" | awk -F' \\| ' '{print $2}' | xargs)"
   js="$(echo "$line" | awk -F' \\| ' '{print $3}')"
   wait="$wait_ms"
-  case "$name" in *@slow) name="${name%@slow}"; wait="${SITE_CHECK_SLOW_MS:-40000}" ;; esac
+  compat="${FERRITE_COMPAT:-}"
+  # Suffixes on the name: `@slow` (a bot check that takes a while) and `@compat=<setting>`
+  # (FERRITE_COMPAT for this load only, to bisect a page against the compatibility scripts).
+  while :; do
+    case "$name" in
+      *@slow) name="${name%@slow}"; wait="${SITE_CHECK_SLOW_MS:-40000}" ;;
+      *@compat=*) compat="${name##*@compat=}"; name="${name%@compat=*}" ;;
+      *) break ;;
+    esac
+  done
   if [ "$#" -gt 0 ] && ! printf '%s\n' "$@" | grep -qx "$name"; then continue; fi
   echo "== $name $url"
   log="$out/$name.log"
-  PAGE_SHOT_JS="${js:-document.readyState}" timeout 150 "$bin" "$url" "$wait" "$out/$name.png" 1280 800 > "$log" 2>&1
+  FERRITE_COMPAT="$compat" PAGE_SHOT_JS="${js:-document.readyState}" timeout 150 "$bin" "$url" "$wait" "$out/$name.png" 1280 800 > "$log" 2>&1
   code=$?
   # A crash (a signal, not a failed check): load it again under gdb for a backtrace.
   if [ "$code" -ge 128 ] && [ "$code" -ne 143 ] && command -v gdb > /dev/null; then
     echo "-- exit $code: again under gdb" >> "$log"
-    PAGE_SHOT_JS="${js:-document.readyState}" timeout 300 gdb -batch -q -ex run -ex "bt 40" -ex "info threads" -ex "thread apply all bt 12" \
+    FERRITE_COMPAT="$compat" PAGE_SHOT_JS="${js:-document.readyState}" timeout 300 gdb -batch -q -ex run -ex "bt 40" -ex "info threads" -ex "thread apply all bt 12" \
       --args "$bin" "$url" "$wait" "$out/$name-gdb.png" 1280 800 >> "$log" 2>&1
   fi
   title="$(grep -m1 '^TITLE' "$log" | cut -c9- | tr '|' '/' | cut -c1-60)"

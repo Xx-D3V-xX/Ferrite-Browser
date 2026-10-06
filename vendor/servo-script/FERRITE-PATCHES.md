@@ -113,3 +113,15 @@ directory) when the engine is upgraded to a release that includes the fixes.
    thread panicked on `expect("Expected data channel id")` and the page died. Now the page
    gets an `OperationError`. The id was also read with `unwrap_or(...)`, which evaluates its
    argument first, so a channel the remote peer had opened made a second, local channel.
+10. `dom/webgl/vertexarrayobject.rs`: **a VAO's finalizer no longer touches other objects.**
+   `Drop` called `delete`, which walks the array's attached buffers; when the script thread
+   shuts down, the final GC finalizes every object, so those buffers could already be gone,
+   and the panic inside a finalizer (which cannot unwind) aborted the process. github.com
+   did this on every exit (CI real-site run 37545369862, backtrace in
+   `WebGLVertexArrayObjectOES_Binding::_finalize`). `Drop` now sends only
+   `DeleteVertexArray` for its own id; a still-attached buffer is freed with its context.
+   An explicit `deleteVertexArray()` call still takes the full path. Reproduced before the
+   fix with 200 VAOs whose buffers the page deleted (`assertion failed: self.is_deleted()`
+   at `webglbuffer.rs:85` from the VAO's drop, then exit 139, three runs of three).
+   **Cost:** a buffer the page deleted while a collected VAO still held it is freed when
+   its context goes, not at once, so its GPU memory lives as long as the context.

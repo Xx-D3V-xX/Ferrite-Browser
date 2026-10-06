@@ -87,6 +87,10 @@ const REQUIRED: &[(&str, &str)] = &[
     ("matchMedia", "typeof matchMedia === 'function' && typeof matchMedia('(min-width:1px)').matches === 'boolean'"),
     ("getComputedStyle", "typeof getComputedStyle(document.body).display === 'string'"),
     ("about:blank iframe has the compatibility interfaces (Animation, serviceWorker)", "(function(){var f=document.createElement('iframe');document.body.appendChild(f);var w=f.contentWindow;var ok=typeof w.Animation==='function'&&typeof w.navigator.serviceWorker==='object'&&typeof w.SVGAElement==='function';f.remove();if(!ok)throw new Error(typeof w.Animation+' '+typeof w.navigator.serviceWorker);return true})()"),
+    // github.com aborted the engine on exit: a VAO's finalizer reached into a buffer the
+    // page had deleted (or the same GC had freed). This leaves such VAOs for the final GC;
+    // a regression shows as this probe crashing on exit, not as a FAIL line.
+    ("WebGL VAOs holding deleted buffers are left for the final GC", "(function(){var gl=document.createElement('canvas').getContext('webgl');var x=gl.getExtension('OES_vertex_array_object');for(var i=0;i<60;i++){var b=gl.createBuffer(),e=gl.createBuffer(),v=x.createVertexArrayOES();x.bindVertexArrayOES(v);gl.bindBuffer(gl.ARRAY_BUFFER,b);gl.enableVertexAttribArray(0);gl.vertexAttribPointer(0,2,gl.FLOAT,false,0,0);gl.bindBuffer(gl.ELEMENT_ARRAY_BUFFER,e);if(i%2)gl.deleteBuffer(b);x.bindVertexArrayOES(null);if(!(i%2))gl.deleteBuffer(e)}return true})()"),
 ];
 
 /// Present in current Chrome, Firefox and Safari and used by real sites, but
