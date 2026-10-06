@@ -311,6 +311,29 @@ pub enum WebGlMode {
     V2,
 }
 
+/// Whether pages get WebRTC in the `media` build: on unless `FERRITE_WEBRTC=off`. Sign-in
+/// and anti-abuse scripts open a peer connection and a data channel; when that path was
+/// broken on a Mac (T-318), Google refused the browser, so this is the way to tell whether
+/// WebRTC is what a site objects to, and to get past a site while it is.
+#[must_use]
+pub fn webrtc_enabled(setting: Option<&str>) -> bool {
+    !matches!(
+        setting.map(|s| s.trim().to_ascii_lowercase()).as_deref(),
+        Some("off" | "0" | "false" | "no")
+    )
+}
+
+#[cfg(test)]
+mod webrtc_enabled_tests {
+    #[test]
+    fn on_unless_turned_off() {
+        assert!(super::webrtc_enabled(None));
+        assert!(super::webrtc_enabled(Some("on")));
+        assert!(!super::webrtc_enabled(Some(" OFF ")));
+        assert!(!super::webrtc_enabled(Some("0")));
+    }
+}
+
 /// Whether the GPU renderer was asked for: `FERRITE_RENDERER=gpu` (or `hardware`).
 /// Anything else, or nothing, keeps the CPU renderer, which is the default (T-318).
 #[must_use]
@@ -963,8 +986,14 @@ mod inner {
                 // prompt.
                 #[cfg(feature = "media")]
                 {
-                    prefs.dom_webrtc_enabled = true;
-                    prefs.dom_webrtc_transceiver_enabled = true;
+                    let webrtc_on =
+                        super::webrtc_enabled(std::env::var("FERRITE_WEBRTC").ok().as_deref());
+                    eprintln!(
+                        "[ferrite-webrtc] {}",
+                        if webrtc_on { "on" } else { "off (FERRITE_WEBRTC=off)" }
+                    );
+                    prefs.dom_webrtc_enabled = webrtc_on;
+                    prefs.dom_webrtc_transceiver_enabled = webrtc_on;
                 }
                 // A release that carries its own GStreamer points it at the bundle before
                 // the engine starts GStreamer.

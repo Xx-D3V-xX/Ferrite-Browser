@@ -2614,6 +2614,8 @@ version = "0.1.0"
 dependencies = [
  "euclid",
  "ferrite-audit-log",
+ "gleam",
+ "glow 0.17.0",
  "log",
  "png 0.17.16",
  "raw-window-handle",
@@ -2622,6 +2624,7 @@ dependencies = [
  "serde_json",
  "servo",
  "stylo_static_prefs",
+ "surfman",
  "url",
  "uuid",
  "winit",
