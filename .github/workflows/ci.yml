@@ -412,12 +412,28 @@ jobs:
           done
           [ -z "$leak" ] || exit 1
           echo "--- size"; du -sh "$app"
-          echo "--- hide Homebrew"
-          sudo mv /opt/homebrew /opt/homebrew.hidden
+          echo "--- no library search path may point outside the bundle"
+          bad=""
+          for f in "$app/Contents/MacOS/gst-inspect" "$app"/Contents/Frameworks/*.dylib \
+                   "$app"/Contents/Resources/gstreamer/plugins/*.dylib \
+                   "$app/Contents/Resources/gstreamer/gst-plugin-scanner"; do
+            [ -f "$f" ] || continue
+            # (an old search path is searched first, so it makes the app load the machine's own copy)
+            if otool -l "$f" | awk '/cmd LC_RPATH/{r=1} r&&/ path /{print $2; r=0}' | grep -v '^@'; then echo "OUTSIDE RPATH in $f"; bad=1; fi
+          done
+          [ -z "$bad" ] || exit 1
           root="$app/Contents/Resources/gstreamer"
           export GST_PLUGIN_SYSTEM_PATH_1_0="$root/plugins" GST_PLUGIN_PATH_1_0="$root/plugins"
           export GST_REGISTRY_1_0="$RUNNER_TEMP/gst-registry.bin"
           [ -f "$root/gst-plugin-scanner" ] && export GST_PLUGIN_SCANNER_1_0="$root/gst-plugin-scanner"
+          echo "--- with Homebrew still here (as on a developer's Mac), nothing may load from it"
+          rm -f "$GST_REGISTRY_1_0"
+          DYLD_PRINT_LIBRARIES=1 "$app/Contents/MacOS/gst-inspect" qtdemux >/dev/null 2>"$RUNNER_TEMP/dyld.txt" || true
+          echo "loaded images: $(grep -c . "$RUNNER_TEMP/dyld.txt")"
+          if grep -E "/opt/homebrew|/usr/local/(Cellar|opt|lib)" "$RUNNER_TEMP/dyld.txt" | head -20; then echo "LOADED FROM HOMEBREW"; exit 1; fi
+          rm -f "$GST_REGISTRY_1_0"
+          echo "--- hide Homebrew"
+          sudo mv /opt/homebrew /opt/homebrew.hidden
           for el in qtdemux matroskademux playbin3 appsrc avdec_h264 opusdec vp9dec webrtcbin; do
             if "$app/Contents/MacOS/gst-inspect" "$el" >/dev/null 2>&1; then echo "ok   $el"; else echo "MISSING $el"; [ "$el" = webrtcbin ] || missing=1; fi
           done
