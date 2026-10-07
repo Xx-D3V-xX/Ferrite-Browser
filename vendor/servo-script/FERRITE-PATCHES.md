@@ -164,3 +164,11 @@ directory) when the engine is upgraded to a release that includes the fixes.
    `PlayerEvent::StreamLost` (the error's `flow-return` is `NOT_LINKED`), and the element
    makes a new player where the old one was, as after a seek past the end, at most three
    times per load. Other errors, and a stream that keeps failing, are errors as before.
+16. `dom/media/mediasource.rs`, `SetDuration` (item 8's file): **a duration inside the last
+   frame is raised, not refused.** It threw `InvalidStateError` for any value below the
+   end of the buffered data. The specification's duration change algorithm throws only
+   below the highest presentation timestamp (the start of the latest buffered frame), and
+   otherwise raises a value below the buffered end to that end. YouTube's player sets the
+   stream's nominal length right after appending, a few milliseconds inside the last
+   frame, and stopped on the exception (T-342). The latest frame start comes from
+   `ferrite_mse::Shared::highest_pts`.

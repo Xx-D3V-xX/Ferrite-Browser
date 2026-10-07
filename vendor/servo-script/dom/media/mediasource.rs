@@ -371,15 +371,27 @@ impl MediaSourceMethods<crate::DomTypeHolder> for MediaSource {
         if self.state.get() != State::Open || self.any_updating() {
             return Err(Error::InvalidState(None));
         }
-        // The duration may not cut off what is buffered.
-        let highest = (0..self.shared().slot_count())
-            .filter_map(|slot| self.shared().buffered(slot).last().map(|r| r.1))
-            .max();
-        if highest.is_some_and(|end| ns_to_seconds(end) > value) {
+        // The duration change algorithm: a duration below the start of a buffered frame
+        // is refused; one below only the end of the buffered data (inside the last
+        // frame) is raised to that end, as Chrome and Firefox do. Players set the
+        // stream's nominal length right after appending, which a last frame often
+        // overruns by a few milliseconds.
+        if self
+            .shared()
+            .highest_pts()
+            .is_some_and(|pts| ns_to_seconds(pts) > value)
+        {
             return Err(Error::InvalidState(Some(
-                "The duration is below the end of the buffered data.".to_owned(),
+                "The duration is below the start of a buffered frame.".to_owned(),
             )));
         }
+        let highest_end = (0..self.shared().slot_count())
+            .filter_map(|slot| self.shared().buffered(slot).last().map(|r| r.1))
+            .max();
+        let value = match highest_end {
+            Some(end) if ns_to_seconds(end) > value => ns_to_seconds(end),
+            _ => value,
+        };
         if value != self.duration.get() {
             self.set_duration_value(value);
         }

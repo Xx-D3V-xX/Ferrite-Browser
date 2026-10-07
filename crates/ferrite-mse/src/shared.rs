@@ -274,6 +274,16 @@ impl Shared {
             .unwrap_or_default()
     }
 
+    /// The latest presentation time of any buffered frame across all tracks (a frame's
+    /// start): `MediaSource.duration` may not be set below it.
+    pub fn highest_pts(&self) -> Option<i64> {
+        self.lock()
+            .slots
+            .iter()
+            .filter_map(|s| s.buf.highest_pts())
+            .max()
+    }
+
     /// What a `SourceBuffer` reports as `buffered`, and the media element with every
     /// track: the time all of `slots` have. After the stream ends, a track that stops
     /// short of the longest one counts as reaching it.

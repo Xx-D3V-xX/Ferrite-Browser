@@ -9253,8 +9253,6 @@ dependencies = [
 [[package]]
 name = "servo-pixels"
 version = "0.6.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "e0dc9ee9778deb2b0e1484304f292e8baccd7a170d25cb277a811ab5b19bdfc5"
 dependencies = [
  "euclid",
  "image 0.25.10",

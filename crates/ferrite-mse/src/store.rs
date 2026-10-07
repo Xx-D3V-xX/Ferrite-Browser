@@ -132,6 +132,12 @@ impl TrackBuffer {
         out
     }
 
+    /// The latest presentation time of any frame (its start, not its end): what a new
+    /// duration may not go below.
+    pub fn highest_pts(&self) -> Option<i64> {
+        self.frames.iter().map(|f| f.pts).max()
+    }
+
     /// The frame after the one decoded at `after` (or the first, with `None`).
     pub fn next_after(&self, after: Option<i64>) -> Option<&Sample> {
         match after {
@@ -233,6 +239,15 @@ mod tests {
         assert_eq!(b.buffered(), vec![(0, 400 * MS)]);
         b.append(run(1000, 5, 5));
         assert_eq!(b.buffered(), vec![(0, 400 * MS), (1000 * MS, 1200 * MS)]);
+    }
+
+    #[test]
+    fn highest_pts_is_the_last_frame_start_not_its_end() {
+        let mut b = TrackBuffer::new();
+        assert_eq!(b.highest_pts(), None);
+        b.append(run(0, 10, 5));
+        assert_eq!(b.highest_pts(), Some(360 * MS));
+        assert_eq!(b.buffered().last().map(|r| r.1), Some(400 * MS));
     }
 
     #[test]

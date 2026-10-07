@@ -182,6 +182,15 @@ const ASYNC: &[(&str, &str)] = &[
          if(v!==true)throw new Error('verify returned '+v);})",
     ),
     (
+        // A tracking pixel with no colour table at all (apple.com, T-332): the `gif`
+        // crate refused it, so the `<img>` fired `error` (vendor/servo-pixels).
+        "a GIF with no colour table loads (img onload)",
+        "new Promise(function(res,rej){var i=new Image();var t=setTimeout(function(){rej(new Error('neither load nor error'))},5000);\
+         i.onload=function(){clearTimeout(t);i.naturalWidth===1?res():rej(new Error('naturalWidth '+i.naturalWidth))};\
+         i.onerror=function(){clearTimeout(t);rej(new Error('error event'))};\
+         i.src='data:image/gif;base64,R0lGODlhAQABAAAAACH5BAEAAAAALAAAAAABAAEAAAICRAEAOw=='})",
+    ),
+    (
         "fetch() of a same-origin resource",
         "fetch('/ping').then(function(r){return r.text()}).then(function(t){if(t!=='pong')throw new Error('got '+t);})",
     ),

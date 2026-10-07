@@ -171,7 +171,7 @@ panic = "unwind"
 inherits = "release"
 debug = "line-tables-only"
 
-# The engine's script, script-bindings, WebGL, layout and storage crates with Ferrite's
+# The engine's script, script-bindings, WebGL, layout, storage and image-decoding crates with Ferrite's
 # fixes (vendor/servo-script, vendor/servo-script-bindings, vendor/servo-webgl,
 # vendor/servo-layout, vendor/servo-storage and vendor/servo-storage-traits, each with
 # a FERRITE-PATCHES.md).
@@ -186,3 +186,4 @@ servo-embedder-traits = { path = "vendor/servo-embedder-traits" }
 servo-media-streams = { path = "vendor/servo-media-streams" }
 servo-media-gstreamer = { path = "vendor/servo-media-gstreamer" }
 servo-media-player = { path = "vendor/servo-media-player" }
+servo-pixels = { path = "vendor/servo-pixels" }
