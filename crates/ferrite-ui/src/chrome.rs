@@ -1035,9 +1035,16 @@ fn zoom_row(state: &FerriteBrowser) -> Element<'_, Msg> {
             .on_press(Msg::Menu(command))
     };
     row![
-        // Lines up with the icon column of the rows around it.
-        container(text("")).width(Length::Fixed(14.0)),
-        text("Zoom").size(TEXT_BODY).width(Length::Fill),
+        // Lines up with the rows around it: an empty icon column and the same gap
+        // to the label as `menu_item` (the outer row's narrower gap left "Zoom" 4 px
+        // to the left of every other label).
+        row![
+            container(text("")).width(Length::Fixed(14.0)),
+            text("Zoom").size(TEXT_BODY),
+        ]
+        .spacing(SP_MD)
+        .align_y(Alignment::Center)
+        .width(Length::Fill),
         step(Icon::Minus, MenuCommand::ZoomOut),
         button(
             container(

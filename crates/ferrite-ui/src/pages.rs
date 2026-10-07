@@ -264,8 +264,11 @@ pub(crate) fn new_tab_page(state: &FerriteBrowser) -> Element<'_, Msg> {
             let favicon = state.tile_favicons.get(index).and_then(|f| f.as_ref());
             let glyph = tile_glyph(favicon, &tile_monogram(tile.label), palette.text_dim);
             button(
+                // Fill the tile, or the icon and label sit at its left edge and each
+                // tile's icon lands somewhere else (the label's width moved it).
                 column![glyph, text(tile.label).size(TEXT_SMALL).color(palette.text)]
                     .spacing(SP_SM)
+                    .width(Length::Fill)
                     .align_x(Alignment::Center),
             )
             .width(TILE_WIDTH)
