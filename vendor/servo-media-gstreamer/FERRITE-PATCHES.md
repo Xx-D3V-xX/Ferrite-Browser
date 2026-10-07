@@ -52,3 +52,12 @@ trait methods are declared) and `vendor/servo-embedder-traits`.
    Each pipeline takes the `MediaSource`'s current run (`ferrite_mse::Shared::run`) when
    it builds its streams and reports its seeks with it; `Shared::seek_all` (a new player)
    starts a new run, and a seek from an older one is dropped.
+9. `mse_source.rs` (`make_pad`, `seek_data`): **a source's first `seek-data` restarts its
+   run where the run starts, not at 0.** A base source seeks once when it starts (`doing
+   seek: (NULL)`, to the default segment's 0) and empties its queue; the callback took
+   that for a seek to 0, so a player made to start at a page's seek target (a seek after
+   the end, or a lost stream) had its feeders sent back to the beginning ("flush to 0"
+   just after "timeline starts at 500000000" in GStreamer's log, in every such restart).
+   Mostly harmless, but under load it stalled the new player or left it reporting the old
+   end (T-339). The first call now restarts the feeder at the run's start, which also
+   resends what the emptied queue held.

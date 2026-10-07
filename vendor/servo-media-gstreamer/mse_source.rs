@@ -461,11 +461,19 @@ fn make_pad(
         let push_lock = push_lock.clone();
         // This pipeline's run: once a new player replaces it, its seeks are ignored.
         let run = shared.run();
+        // The first `seek-data` is not a seek anyone asked for: a base source seeks once
+        // when it starts, to 0, and empties its queue. Taken as a seek to 0, it sent a
+        // player made to start at a page's seek target (after the end, or after a lost
+        // stream) back to the beginning, and under load it stalled or reported the old
+        // end (T-339). It still empties the queue, so the feeder resends from where this
+        // run starts.
+        let started = AtomicBool::new(false);
         appsrc.set_callbacks(
             gstreamer_app::AppSrcCallbacks::builder()
                 .seek_data(move |_, offset| {
                     let _guard = push_lock.lock().unwrap();
-                    shared.seek(run, slot, offset as i64);
+                    let to = if started.swap(true, Ordering::Relaxed) { offset as i64 } else { start };
+                    shared.seek(run, slot, to);
                     true
                 })
                 .build(),
