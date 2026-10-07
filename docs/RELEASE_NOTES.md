@@ -1,66 +1,48 @@
 ## What is in this release
 
-Everything below landed since the previous release on `main`. Each item has a row in
+A fix release. Everything below landed since build 52 (`91441a0`). Each item has a row in
 `docs/TO-DO.md` (the `T-` numbers) saying exactly how it was checked.
 
-### The AI agent
+### Downloads that start
 
-- **Replies stream in as they are written.** The agent's answer (or its question to you)
-  appears word by word in the panel. It is only something to watch: the agent acts on a step
-  only once the model has finished it and Ferrite has checked it (T-335).
-- **Two new model providers:** Anthropic Claude, and OpenAI or any server with the same API
-  (OpenRouter, Groq, vLLM, LM Studio, llama.cpp). Both are in Settings and in the live
-  evaluation runner. A server on your own computer needs no key (T-277).
-- Pressing Enter or Space counts as a click for the defense, a rejected site also blocks
-  addresses typed without `https://`, and messages from a stopped run are ignored.
+- **Windows: no more "VCRUNTIME140.dll was not found".** The Windows packages now carry
+  the Visual C++ runtime next to `ferrite.exe` (`MSVCP140.dll`, `VCRUNTIME140.dll`,
+  `VCRUNTIME140_1.dll`...). Every CI machine has it installed, so earlier builds started
+  there and nowhere else. Each package is now checked before it is published: every DLL
+  any file in it loads must be in the package or part of Windows (T-336).
+- **Linux media build: no more "libgstplay-1.0.so.0: cannot open shared object file".**
+  The `-media` package now carries GStreamer and everything it needs in `lib/` beside
+  `ferrite`; you install nothing. Keep the folder together (`./install.sh` copies all of
+  it into `~/.local/lib/ferrite`). CI runs the package, and the video tests, on a clean
+  Ubuntu with no GStreamer before it is published (T-337).
+- macOS packages are checked the same way: nothing in the app may load a library from
+  Homebrew or another place only the build machine has.
 
-### The defense
+### Video
 
-- New sanitizer rules for claimed user approval, role-play framing and reworded "ignore your
-  instructions" orders, with golden test cases (pattern set 3, T-327).
-- The audit log now says exactly which entry breaks its hash chain, and how (T-219).
+- **A video fed by a page (YouTube's way) now ends properly.** At the very end the
+  element sometimes stopped and never said "ended". About one play in six (T-339).
+- **Video no longer stops on a busy computer.** Under load, a stream could start before
+  it was connected, or lose its connection while the sound output was being set up, and
+  the video stopped (once this crashed the media engine). Now the stream waits for its
+  connection, and a player that loses one starts again where it was (T-339).
 
-### Browsing
+### Page errors
 
-- **Fewer page errors on real sites.** Fixed in the browser's compatibility scripts and the
-  engine, and checked on real sites by a CI job that loads 32 of them:
-  - the container-query script no longer throws "text is null" (Reddit, X, Amazon,
-    Cloudflare, React, Next.js, Tailwind, Vercel, Discord) (T-328);
-  - SVG interfaces such as `SVGAElement` (nytimes.com, svelte.dev) (T-329);
-  - `PublicKeyCredential`, saying there is no passkey device (amazon.com) (T-330);
-  - new blank frames get the same compatibility scripts as their page (airbnb.com) (T-331);
-  - the Web Animations API (YouTube) and `shadowRoot.getAnimations` (cloudflare.com).
-- **GitHub no longer crashes the engine when its tab closes** (a WebGL clean-up bug) (T-333).
-- **Google's "The operation is insecure" errors:** setting `document.domain` no longer cuts a
-  page off from its own frames, and every security error names the property involved
-  (T-267, T-321, T-323).
-- **Security fix:** a page could read the document of a frame from another origin on the same
-  site. It can no longer (T-322).
-- **Sign-in for sites that use HTTP authentication:** a Sign in card with a hidden password
-  field. The password never appears in a log, and the agent cannot fill the card (T-294).
-- **File inputs open your system's own file dialog** (T-293).
-- **Video and calls:** WebRTC data channels on macOS and Windows; a seek no longer drops a
-  video track's end; WebM audio with Opus.
-
-### Speed and the window
-
-- The window wakes when the engine has something new instead of polling, and draws the page
-  from one GPU texture; on macOS the page is read in the GPU's own byte order (T-320).
-- Page dialogs and pickers ease in; a new tab grows into the tab strip.
-
-### DevTools and logs
-
-- The Network tab shows each request's **size and time** once it finishes (T-292).
-- An unhandled promise rejection in the Console names the file and line it came from.
-- **Windows now writes `ferrite.log`** (in `%LOCALAPPDATA%\Ferrite\logs`) (T-298).
+- **YouTube's "window.cancelIdleCallback is not a function" is fixed.** A frame that a
+  page sandboxes without scripts never got Ferrite's stand-ins for functions other
+  browsers build in; YouTube calls them on such a frame. The page's own scripts in that
+  frame still do not run (T-340).
+- A rejected promise in the Console now names the script it came from: the browser's own
+  exceptions carry a stack, as in other browsers (T-340).
+- The "No valid entry type provided to observe()" warning (GitHub, Google, Amazon) now
+  says which timings the page asked for (T-340).
 
 ### Still not done (honestly)
 
-- Google sign-in has not been confirmed to work end to end (T-267).
-- YouTube playback cannot be checked on CI: YouTube asks CI's machines to sign in ("confirm
-  you're not a bot"). It needs a real computer.
-- The Anthropic and OpenAI-compatible connections and streaming are tested against stand-in
-  servers; nobody has run a live task through them yet.
-- No status codes in the Network tab, no AVIF images, no input-method (IME) typing, and
-  Cloudflare's "Just a moment…" check does not finish on some sites (T-292, T-332, T-294).
+- **The browser can still feel slow.** Pages are drawn by the processor, not the graphics
+  card (T-296, T-320). Run it with `FERRITE_PERF=1` and send the log, and we can see where
+  the time goes on your machine.
+- Google sign-in has not been confirmed end to end (T-267). YouTube playback cannot be
+  checked on CI, because YouTube asks CI's machines to sign in.
 - The builds are unsigned prototypes.

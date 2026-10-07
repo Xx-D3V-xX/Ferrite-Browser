@@ -250,6 +250,45 @@ const ASYNC: &[(&str, &str)] = &[
          document.body.appendChild(f)})",
     ),
     (
+        // youtube.com's watch page has an iframe with src="about:blank" whose window had
+        // neither idle-callback function, and its scheduler called cancelIdleCallback on
+        // it: "window.cancelIdleCallback is not a function" (T-340).
+        "an iframe navigated to about:blank gets the compatibility interfaces",
+        "new Promise(function(res,rej){var f=document.createElement('iframe');f.src='about:blank';\
+         var t=setTimeout(function(){rej(new Error('frame never loaded'))},5000);\
+         f.onload=function(){clearTimeout(t);var w=f.contentWindow;\
+         var got=typeof w.requestIdleCallback+'/'+typeof w.cancelIdleCallback+'/'+typeof w.Animation;f.remove();\
+         if(got!=='function/function/function')rej(new Error(got));else res()};\
+         document.body.appendChild(f)})",
+    ),
+    (
+        "a sandboxed same-origin about:blank iframe gets them",
+        "new Promise(function(res,rej){var f=document.createElement('iframe');f.setAttribute('sandbox','allow-same-origin');f.src='about:blank';\
+         var t=setTimeout(function(){rej(new Error('frame never loaded'))},5000);\
+         f.onload=function(){clearTimeout(t);var w=f.contentWindow;\
+         var got=typeof w.requestIdleCallback+'/'+typeof w.cancelIdleCallback;f.remove();\
+         if(got!=='function/function')rej(new Error(got));else res()};\
+         document.body.appendChild(f)})",
+    ),
+    (
+        // The compatibility scripts run in a frame sandboxed without allow-scripts; the
+        // page's own scripts in it still must not.
+        "a sandboxed frame's own scripts still do not run",
+        "new Promise(function(res,rej){var f=document.createElement('iframe');f.setAttribute('sandbox','allow-same-origin');\
+         f.srcdoc='<script>parent.__sandboxRan=1<\\/script>';\
+         var t=setTimeout(function(){rej(new Error('frame never loaded'))},5000);\
+         f.onload=function(){clearTimeout(t);var ran=window.__sandboxRan;var rif=typeof f.contentWindow.requestIdleCallback;f.remove();\
+         if(ran)rej(new Error('the sandboxed script ran'));else if(rif!=='function')rej(new Error(rif));else res()};\
+         document.body.appendChild(f)})",
+    ),
+    (
+        "an about:blank iframe the page writes into keeps them",
+        "new Promise(function(res,rej){var f=document.createElement('iframe');document.body.appendChild(f);\
+         var d=f.contentDocument;d.open();d.write('<!doctype html><html><head><title>w</title></head><body>x</body></html>');d.close();\
+         setTimeout(function(){var w=f.contentWindow;var got=typeof w.requestIdleCallback+'/'+typeof w.cancelIdleCallback;f.remove();\
+         if(got!=='function/function')rej(new Error(got));else res()},300)})",
+    ),
+    (
         "passkey checks answer no",
         "Promise.all([PublicKeyCredential.getClientCapabilities(),PublicKeyCredential.isUserVerifyingPlatformAuthenticatorAvailable()])\
          .then(function(r){if(r[0].passkeyPlatformAuthenticator!==false||r[1]!==false)throw new Error(JSON.stringify(r))})",

@@ -22,12 +22,10 @@ pub(crate) fn load_script(head: &HTMLHeadElement) {
         let cx = &mut realm.current_realm();
 
         for user_script in userscripts {
-            _ = global_scope.evaluate_js_on_global(
+            _ = global_scope.evaluate_user_script_on_global(
                 cx,
                 user_script.script().into(),
                 &user_script.source_file().map(|path| path.to_string_lossy().to_string()).unwrap_or_default(),
-                None,
-                None,
             );
         }
     }));

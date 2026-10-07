@@ -350,12 +350,17 @@ jobs:
             gstreamer1.0-pulseaudio gstreamer1.0-pipewire
 
       - name: Install system dependencies (macOS)
+        id: brew
         if: matrix.platform == 'macos'
         run: |
           brew update
           brew install cmake pkg-config openssl gstreamer sqlite
           # The ICE plugin WebRTC needs; not part of the gstreamer formula.
           brew install libnice-gstreamer || echo "no libnice-gstreamer formula: WebRTC will lack ICE"
+          # Part of the cache key: the build scripts of the GLib and GStreamer crates record
+          # Homebrew's versioned library folders, and a cache from before an upgrade links
+          # against a folder that is gone ("ld: library 'gobject-2.0' not found").
+          echo "versions=$(brew list --versions glib gstreamer libnice-gstreamer openssl@3 2>/dev/null | shasum | cut -c1-12)" >> "$GITHUB_OUTPUT"
 
       - name: Install system dependencies (Windows)
         if: matrix.platform == 'windows'
@@ -383,7 +388,7 @@ jobs:
       - name: Cache dependencies
         uses: Swatinem/rust-cache@v2
         with:
-          key: servo-media-${{ matrix.platform }}
+          key: servo-media-${{ matrix.platform }}-${{ steps.brew.outputs.versions }}
 
       - name: Build release binary (with Servo and media)
         run: cargo build --release -p ferrite-shell --features ferrite-servo/servo,ferrite-servo/media

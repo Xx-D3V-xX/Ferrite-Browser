@@ -536,6 +536,10 @@ pub(crate) struct HTMLMediaElement {
     /// Ferrite: the seek (in seconds) the player that was just made began at. It is done
     /// when the player first reports a state.
     media_source_pending_seek: Cell<Option<f64>>,
+    /// Ferrite: how many times this load's `MediaSource` player was rebuilt after it lost
+    /// a stream (`PlayerEvent::StreamLost`). Bounded, so a stream that keeps failing ends
+    /// in an error instead of a loop.
+    media_source_restarts: Cell<u32>,
     /// <https://html.spec.whatwg.org/multipage/#dom-media-currentsrc>
     current_src: DomRefCell<String>,
     /// Incremented whenever tasks associated with this element are cancelled.
@@ -671,6 +675,7 @@ impl HTMLMediaElement {
             media_source: Default::default(),
             media_source_player_ended: Cell::new(false),
             media_source_pending_seek: Cell::new(None),
+            media_source_restarts: Cell::new(0),
             current_src: DomRefCell::new("".to_owned()),
             generation_id: Cell::new(0),
             fired_loadeddata_event: Cell::new(false),
@@ -2452,6 +2457,41 @@ impl HTMLMediaElement {
         }
     }
 
+    /// Ferrite: the player stopped because a stream lost its link downstream, a race in
+    /// GStreamer's playsink rather than bad media. With a `MediaSource` the data is still
+    /// buffered, so a new player starts where this one was, as after a seek past the end;
+    /// `seeked`, `playing` and `ended` then come from it. Anything else, or a stream that
+    /// keeps failing, is an error as before.
+    fn playback_stream_lost(&self, error: &str, cx: &mut JSContext) {
+        const MAX_RESTARTS: u32 = 3;
+        let Some(source) = self.media_source.get() else {
+            self.playback_error(error, cx);
+            return;
+        };
+        if self.in_error_state() || self.media_source_restarts.get() >= MAX_RESTARTS {
+            self.playback_error(error, cx);
+            return;
+        }
+        self.media_source_restarts
+            .set(self.media_source_restarts.get() + 1);
+        let position = if self.seeking.get() && !self.current_seek_position.get().is_nan() {
+            self.current_seek_position.get()
+        } else {
+            self.current_playback_position.get()
+        };
+        let position = if position.is_finite() { position.max(0.) } else { 0. };
+        warn!("The media player lost a stream ({error}); starting a new one at {position}s");
+        self.media_source_player_ended.set(false);
+        source
+            .shared()
+            .seek_all(crate::dom::mediasource::seconds_to_ns(position));
+        self.restart_media_source_player(&source);
+        if self.seeking.get() {
+            self.media_source_pending_seek.set(Some(position));
+        }
+        self.update_media_state();
+    }
+
     fn playback_error(&self, error: &str, cx: &mut JSContext) {
         error!("Player error: {:?}", error);
 
@@ -2960,6 +3000,7 @@ impl HTMLMediaElement {
             return;
         }
         self.media_source.set(Some(source));
+        self.media_source_restarts.set(0);
         if self
             .create_media_player(&Resource::MediaSource(source.registry_id()))
             .is_err()
@@ -4482,6 +4523,7 @@ impl HTMLMediaElementEventHandler {
             PlayerEvent::EndOfStream => element.playback_end(),
             PlayerEvent::EnoughData => element.playback_enough_data(),
             PlayerEvent::Error(ref error) => element.playback_error(error, cx),
+            PlayerEvent::StreamLost(ref error) => element.playback_stream_lost(error, cx),
             PlayerEvent::MetadataUpdated(ref metadata) => {
                 element.playback_metadata_updated(cx, metadata)
             },

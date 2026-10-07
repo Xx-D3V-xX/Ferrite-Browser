@@ -12,6 +12,7 @@ use std::time;
 use byte_slice_cast::AsSliceOf;
 use glib;
 use glib::prelude::*;
+use glib::translate::IntoGlib;
 use gstreamer;
 use gstreamer_app;
 use gstreamer_play;
@@ -672,8 +673,18 @@ impl GStreamerPlayer {
 
         let observer = self.observer.clone();
         // Handle `error` signal
-        signal_adapter.connect_error(move |_self, error, _details| {
-            let _ = notify!(observer, PlayerEvent::Error(error.to_string()));
+        signal_adapter.connect_error(move |_self, error, details| {
+            // Ferrite: a stream that stopped on `not-linked` lost its link to a race in
+            // playsink, not to bad data; the client can recover (`StreamLost`).
+            let not_linked = details
+                .and_then(|details| details.get::<i32>("flow-return").ok())
+                .is_some_and(|flow| flow == gstreamer::FlowReturn::NotLinked.into_glib());
+            let event = if not_linked {
+                PlayerEvent::StreamLost(error.to_string())
+            } else {
+                PlayerEvent::Error(error.to_string())
+            };
+            let _ = notify!(observer, event);
         });
 
         let inner_clone = inner.clone();

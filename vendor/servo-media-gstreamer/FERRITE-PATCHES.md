@@ -34,3 +34,12 @@ trait methods are declared) and `vendor/servo-embedder-traits`.
    had been loaded (Homebrew's, through GIO modules) that happened, the WebRTC thread died,
    and the script thread then panicked on its closed channel (`servo-media-webrtc`
    `thread.rs`). Now the failure is returned and the page's `createDataChannel` fails.
+6. `mse_source.rs` (`make_pad`): **a stream starts only once its pad is linked.** The
+   source bin can be going to PAUSED on another thread while its pads are made; that
+   change started a new `appsrc` as soon as it was added to the bin, before `add_pad` had
+   linked it, so its first push failed with `not-linked` and the player stopped. Under
+   load, `mse_probe` hit it about one run in forty (a lost `seeked`, a lost `ended`, and
+   once a `playbin3` assertion that ended the process). The `appsrc`'s state is locked
+   until its ghost pad is added, then synced with the bin.
+7. `player.rs`: **`not-linked` is reported as `PlayerEvent::StreamLost`**, not as an error
+   (see `vendor/servo-script/FERRITE-PATCHES.md` item 15).

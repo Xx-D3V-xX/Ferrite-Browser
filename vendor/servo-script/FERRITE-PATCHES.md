@@ -147,3 +147,20 @@ directory) when the engine is upgraded to a release that includes the fixes.
    `mse_probe`'s "WebM ends" failed this way about one run in six, here and in CI's macOS
    media job (run 37561043209). Once the source has ended, a position at or past the end
    of the last buffered range keeps `HAVE_ENOUGH_DATA`.
+14. `dom/globalscope/globalscope.rs`, `dom/userscripts.rs`: **the compatibility scripts run in
+   a frame sandboxed without `allow-scripts`.** They stand in for interfaces other browsers
+   build in (`requestIdleCallback`, `Element.animate`...), and a page can call those on a
+   sandboxed frame's window from outside: youtube.com's scheduler did, on its
+   `sandbox="allow-same-origin"` frame, and stopped on "window.cancelIdleCallback is not a
+   function" (a CI site check showed that frame's window with neither function). User
+   scripts now go through `evaluate_user_script_on_global`, which refuses only a document
+   that is not fully active; the page's own scripts in such a frame still do not run
+   (`web_api_probe` checks both).
+15. `dom/html/embedded_content/htmlmediaelement.rs` (with `vendor/servo-media-player` and
+   `vendor/servo-media-gstreamer`): **a `MediaSource` player that loses a stream starts
+   again.** GStreamer's playsink can relink its audio chain while data flows (when the
+   first audio output it tries cannot be opened); a source that pushes in that moment
+   stops with `not-linked` and the player with it. The player now reports that case as
+   `PlayerEvent::StreamLost` (the error's `flow-return` is `NOT_LINKED`), and the element
+   makes a new player where the old one was, as after a seek past the end, at most three
+   times per load. Other errors, and a stream that keeps failing, are errors as before.

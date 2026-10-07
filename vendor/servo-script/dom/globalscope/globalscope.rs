@@ -2970,7 +2970,6 @@ impl GlobalScope {
     }
 
     /// Evaluate JS code on this global scope.
-    #[expect(unsafe_code)]
     pub(crate) fn evaluate_js_on_global(
         &self,
         cx: &mut CurrentRealm,
@@ -2987,7 +2986,40 @@ impl GlobalScope {
         if !self.can_run_script() {
             return Err(JavaScriptEvaluationError::WebViewNotReady);
         }
+        self.evaluate_js_on_global_unchecked(cx, code, filename, introduction_type, rval)
+    }
 
+    /// Ferrite: evaluates one of the embedder's user scripts (the compatibility scripts)
+    /// on this global. Like [`Self::evaluate_js_on_global`], but a document sandboxed
+    /// without `allow-scripts` still gets them: they stand in for interfaces other
+    /// browsers build in (`requestIdleCallback`, `Element.animate`...), which a sandboxed
+    /// frame's window has there, and a page may call them on that window from outside.
+    /// youtube.com's scheduler did, on its `sandbox="allow-same-origin"` frame:
+    /// "window.cancelIdleCallback is not a function". The page's own scripts in such a
+    /// frame still do not run; only a document that is not fully active is refused.
+    pub(crate) fn evaluate_user_script_on_global(
+        &self,
+        cx: &mut CurrentRealm,
+        code: Cow<'_, str>,
+        filename: &str,
+    ) -> Result<(), JavaScriptEvaluationError> {
+        if let Some(window) = self.downcast::<Window>() &&
+            !window.Document().is_fully_active()
+        {
+            return Err(JavaScriptEvaluationError::WebViewNotReady);
+        }
+        self.evaluate_js_on_global_unchecked(cx, code, filename, None, None)
+    }
+
+    #[expect(unsafe_code)]
+    fn evaluate_js_on_global_unchecked(
+        &self,
+        cx: &mut CurrentRealm,
+        code: Cow<'_, str>,
+        filename: &str,
+        introduction_type: Option<&'static CStr>,
+        rval: Option<MutableHandleValue>,
+    ) -> Result<(), JavaScriptEvaluationError> {
         run_a_script::<DomTypeHolder, _, _>(cx, self, |cx| {
             let url = self.api_base_url();
             let fetch_options = ScriptFetchOptions::default_classic_script();

@@ -69,6 +69,12 @@ pub enum PlayerEvent {
     /// The player has enough data. The client should stop pushing data into.
     EnoughData,
     Error(String),
+    /// Ferrite: the player stopped because one of its streams found nothing linked
+    /// downstream (GStreamer's `not-linked`), not because the media is bad. GStreamer's
+    /// playsink can relink its audio chain while data flows (it does when the first audio
+    /// output it tries cannot be opened), and a source that pushes in that moment stops.
+    /// The client may make a new player and carry on from where it was.
+    StreamLost(String),
     VideoFrameUpdated,
     MetadataUpdated(metadata::Metadata),
     // The `None` value means the duration is unknown, in which case this is likely a live stream.

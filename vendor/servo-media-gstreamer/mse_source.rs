@@ -517,6 +517,12 @@ fn make_pad(
         gstreamer::PadProbeReturn::Ok
     });
 
+    // The source's state is locked until its pad is in the bin and linked. The bin can be
+    // going to PAUSED on another thread right now; without the lock that change started
+    // the source as soon as it was added, it pushed before `add_pad` linked it, and the
+    // stream failed with "not-linked" (one run in about forty of `mse_probe` under load;
+    // the player then stopped and `seeked` or `ended` never came).
+    appsrc.set_locked_state(true);
     bin.add(&appsrc)?;
     let ghost = gstreamer::GhostPad::builder_from_template(template)
         .name(format!("{prefix}_{slot}"))
@@ -550,6 +556,7 @@ fn make_pad(
     ghost.set_target(Some(&src_pad))?;
     ghost.set_active(true)?;
     bin.add_pad(&ghost)?;
+    appsrc.set_locked_state(false);
     appsrc.sync_state_with_parent()?;
     bin.imp()
         .remember(stop, appsrc.clone().upcast(), ghost.clone());
