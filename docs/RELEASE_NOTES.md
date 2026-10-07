@@ -17,6 +17,10 @@ A fix release. Everything below landed since build 52 (`91441a0`). Each item has
   Ubuntu with no GStreamer before it is published (T-337).
 - macOS packages are checked the same way: nothing in the app may load a library from
   Homebrew or another place only the build machine has.
+- **Windows: no black console window next to the browser.** `ferrite.exe` is now a
+  Windows app, and what it prints goes to `%LOCALAPPDATA%\Ferrite\logs\ferrite.log`
+  (send that file with a bug report). Before, the window held the messages and no log
+  file was written (T-341).
 
 ### Video
 
@@ -41,8 +45,12 @@ A fix release. Everything below landed since build 52 (`91441a0`). Each item has
 ### Still not done (honestly)
 
 - **The browser can still feel slow.** Pages are drawn by the processor, not the graphics
-  card (T-296, T-320). Run it with `FERRITE_PERF=1` and send the log, and we can see where
-  the time goes on your machine.
+  card (T-296, T-320). To show where the time goes on your machine, start it with
+  `FERRITE_PERF=1`, use it the way that feels slow for a minute, and send the log:
+  - Windows: in Command Prompt, `set FERRITE_PERF=1`, then start `ferrite.exe` from the
+    same window. The lines go to `%LOCALAPPDATA%\Ferrite\logs\ferrite.log`.
+  - Linux and macOS: `FERRITE_PERF=1 ./ferrite` (macOS:
+    `FERRITE_PERF=1 Ferrite.app/Contents/MacOS/ferrite`); the lines appear in the terminal.
 - Google sign-in has not been confirmed end to end (T-267). YouTube playback cannot be
   checked on CI, because YouTube asks CI's machines to sign in.
 - The builds are unsigned prototypes.

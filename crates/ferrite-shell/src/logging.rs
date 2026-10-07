@@ -140,6 +140,72 @@ fn redirect_stderr(_file: &File) -> Option<()> {
     None
 }
 
+/// Windows: the app is a GUI program, so a double-click opens no console window beside
+/// it, and its standard error, which then goes nowhere, is sent to `ferrite.log` by
+/// `init`. A command started from a console (`ferrite.exe smoke`) should still print
+/// there: this attaches to the parent's console and points standard output and error at
+/// it, unless they already lead somewhere (a pipe or a file, as on CI). Call it before
+/// `init`. Returns whether it attached.
+#[cfg(windows)]
+pub fn attach_parent_console() -> bool {
+    use std::ffi::c_void;
+    unsafe extern "system" {
+        fn AttachConsole(process: u32) -> i32;
+        fn GetStdHandle(which: u32) -> *mut c_void;
+        fn SetStdHandle(which: u32, handle: *mut c_void) -> i32;
+        fn CreateFileW(
+            name: *const u16,
+            access: u32,
+            share: u32,
+            security: *mut c_void,
+            disposition: u32,
+            flags: u32,
+            template: *mut c_void,
+        ) -> *mut c_void;
+    }
+    const ATTACH_PARENT_PROCESS: u32 = u32::MAX;
+    const STD_OUTPUT_HANDLE: u32 = -11_i32 as u32;
+    const STD_ERROR_HANDLE: u32 = -12_i32 as u32;
+    const GENERIC_READ: u32 = 0x8000_0000;
+    const GENERIC_WRITE: u32 = 0x4000_0000;
+    const FILE_SHARE_READ_WRITE: u32 = 0x1 | 0x2;
+    const OPEN_EXISTING: u32 = 3;
+    let unset = |which| {
+        // SAFETY: reading this process's own standard handle.
+        let handle = unsafe { GetStdHandle(which) };
+        handle.is_null() || handle as isize == -1
+    };
+    if !unset(STD_OUTPUT_HANDLE) && !unset(STD_ERROR_HANDLE) {
+        return false;
+    }
+    // SAFETY: plain Win32 calls with valid arguments; the console handle is kept open
+    // for the life of the process.
+    unsafe {
+        if AttachConsole(ATTACH_PARENT_PROCESS) == 0 {
+            return false;
+        }
+        let name: Vec<u16> = "CONOUT$\0".encode_utf16().collect();
+        let console = CreateFileW(
+            name.as_ptr(),
+            GENERIC_READ | GENERIC_WRITE,
+            FILE_SHARE_READ_WRITE,
+            std::ptr::null_mut(),
+            OPEN_EXISTING,
+            0,
+            std::ptr::null_mut(),
+        );
+        if console.is_null() || console as isize == -1 {
+            return false;
+        }
+        for which in [STD_OUTPUT_HANDLE, STD_ERROR_HANDLE] {
+            if unset(which) {
+                SetStdHandle(which, console);
+            }
+        }
+    }
+    true
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
