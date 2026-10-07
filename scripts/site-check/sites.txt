@@ -3,7 +3,7 @@
 # A name ending in `@slow` gets SITE_CHECK_SLOW_MS (a bot check that takes a while);
 # `@compat=<setting>` loads it with FERRITE_COMPAT=<setting> (`none`, `-web`, ...).
 google | https://www.google.com/
-google-search | https://www.google.com/search?q=rust+programming+language
+google-search | https://www.google.com/search?q=rust+programming+language | (function(){var c=document.querySelector('#center_col')||document.querySelector('#rcnt')||document.querySelector('#search');if(!c)return 'no results column; width '+innerWidth;var r=c.getBoundingClientRect();return 'results column left '+Math.round(r.left)+' width '+Math.round(r.width)+' of viewport '+innerWidth})()
 # A control: the same page with no compatibility scripts, to tell a regression of
 # theirs from the page changing (T-334).
 google-search-nocompat@compat=none | https://www.google.com/search?q=rust+programming+language
