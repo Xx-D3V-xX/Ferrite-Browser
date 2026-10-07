@@ -3,7 +3,10 @@
 
     scripts/bundle-gstreamer.py macos   Ferrite.app [--prefix /opt/homebrew]
     scripts/bundle-gstreamer.py windows STAGE_DIR   [--root "C:\\Program Files\\gstreamer\\1.0\\msvc_x86_64"]
-    scripts/bundle-gstreamer.py list    macos|windows     (the plugin files Servo loads, one a line)
+    scripts/bundle-gstreamer.py linux   STAGE_DIR   (the machine's GStreamer, found with pkg-config)
+    scripts/bundle-gstreamer.py check-linux STAGE_DIR (nothing in it needs a library from outside it
+                                                     but the ones every desktop has)
+    scripts/bundle-gstreamer.py list    macos|windows|linux   (the plugin files, one a line)
     scripts/bundle-gstreamer.py self-test
 
 The layout is the one the engine insists on. On macOS and Windows Servo (`servo.rs`,
@@ -17,6 +20,12 @@ the engine in use.
              Contents/Frameworks/*.dylib            the libraries they need, @rpath names
     Windows  STAGE_DIR/<name>.dll                   the plugins (next to ferrite.exe)
              STAGE_DIR/*.dll                        the libraries they need
+    Linux    STAGE_DIR/lib/gstreamer-1.0/*.so       the plugins (GStreamer scans this folder)
+             STAGE_DIR/lib/*.so*                    the libraries a desktop may not have
+
+Linux once used the machine's own GStreamer, and a machine without the "bad" plugins'
+libraries could not start the app at all ("libgstplay-1.0.so.0: cannot open shared
+object file"). See `bundle_linux` for what a Linux release still takes from the machine.
 
 `crates/ferrite-servo/src/bundle.rs` finds this layout at start-up and keeps GStreamer from
 scanning anywhere else (a scan of the same directory would register each plugin twice,
@@ -308,6 +317,198 @@ def bundle_windows(stage: Path, root: Path, lists_dir: Path | None = None) -> No
     print(f"bundled {len(needed)} plugins, {extras} extra, and {libs} libraries into {stage}")
 
 
+# ---------------------------------------------------------------------------- Linux
+
+# Plugins the Linux engine uses beyond Servo's list: the sound outputs (`pulsesink` by
+# name, `autoaudiosink` picks PulseAudio or ALSA), the test sources a capture falls back
+# to, and the screen and camera sources. `required` ones fail the bundle.
+LINUX_PLUGINS = [
+    ("gstpulseaudio", True),
+    ("gstalsa", True),
+    ("gstaudiotestsrc", True),
+    ("gstvideotestsrc", True),
+    ("gstximagesrc", True),
+    ("gstvideo4linux2", True),
+    ("gstpipewire", False),
+]
+
+# Libraries a Linux release never carries. Every desktop has them, and each must be the
+# machine's own: the C and C++ runtimes; GLib, which the desktop's own modules (GIO, the
+# file dialog's portal) are built against; the graphics stack, which matches the GPU
+# driver (a second, older libdrm loaded first breaks the driver's OpenGL); the sound and
+# session services, whose libraries talk to the machine's daemons. A library reached only
+# through one of these is left out too: it comes from the machine with the library that
+# needs it. LINUX_SYSTEM_LIBS are whole names (the file name before ".so"),
+# LINUX_SYSTEM_FAMILIES the start of one (libdrm covers the GPU drivers' libdrm_amdgpu too).
+LINUX_SYSTEM_LIBS = (
+    "linux-vdso", "libc", "libm", "libdl", "libpthread", "librt", "libresolv",
+    "libutil", "libanl", "libgcc_s", "libstdc++", "libatomic",
+    "libglib-2.0", "libgobject-2.0", "libgio-2.0", "libgmodule-2.0", "libgthread-2.0",
+    "libGL", "libGLX", "libGLdispatch", "libOpenGL", "libGLESv1_CM", "libGLESv2", "libEGL",
+    "libgbm", "libvulkan", "libxshmfence",
+    "libasound", "libpulse", "libpulse-simple", "libjack", "libdbus-1", "libsystemd", "libudev",
+    "libfontconfig", "libfreetype", "libharfbuzz", "libexpat", "libz", "libselinux",
+    "libmount", "libblkid", "libffi", "libuuid", "libcap", "libgcrypt",
+    "libgpg-error", "liblzma", "libzstd", "liblz4", "libbz2", "libssl", "libcrypto",
+)
+LINUX_SYSTEM_FAMILIES = (
+    "ld-linux-", "libdrm", "libwayland-", "libX", "libxcb", "libxkbcommon", "libpipewire-", "libpcre2-",
+)
+
+
+def linux_system_lib(soname: str) -> bool:
+    stem = soname.split(".so", 1)[0]
+    return stem in LINUX_SYSTEM_LIBS or stem.startswith(LINUX_SYSTEM_FAMILIES)
+
+
+def parse_needed(readelf_d: str) -> list[str]:
+    """The NEEDED entries of a `readelf -d` listing."""
+    return re.findall(r"\(NEEDED\)\s+Shared library: \[([^\]]+)\]", readelf_d)
+
+
+def parse_ldd(output: str) -> dict[str, str | None]:
+    """soname -> path (None for "not found") from an `ldd` listing."""
+    found: dict[str, str | None] = {}
+    for line in output.splitlines():
+        match = re.match(r"\s*(\S+) => (?:(not found)|(\S+))", line)
+        if match:
+            found[match.group(1)] = None if match.group(2) else match.group(3)
+    return found
+
+
+def linux_gst_dirs() -> tuple[Path, Path]:
+    """(plugin directory, directory of gst-plugin-scanner) of the machine's GStreamer."""
+    def variable(name: str, default: str) -> Path:
+        try:
+            value = run(["pkg-config", f"--variable={name}", "gstreamer-1.0"]).strip()
+        except (OSError, subprocess.CalledProcessError):
+            value = ""
+        return Path(value or default)
+    return (
+        variable("pluginsdir", "/usr/lib/x86_64-linux-gnu/gstreamer-1.0"),
+        variable("pluginscannerdir", "/usr/lib/x86_64-linux-gnu/gstreamer1.0/gstreamer-1.0"),
+    )
+
+
+def linux_plugin_files(lists_dir: Path | None = None) -> list[tuple[str, bool]]:
+    """(file name, required) of every plugin a Linux release carries."""
+    lists = lists_dir or find_servo_plugin_lists()
+    names = [(n, True) for n in read_plugin_list(lists / "common.rs.in")] + EXTRA_PLUGINS + LINUX_PLUGINS
+    return [(f"lib{n}.so", required) for n, required in names]
+
+
+def bundle_linux(
+    stage: Path,
+    main_name: str = "ferrite",
+    lists_dir: Path | None = None,
+    extras: tuple[str, ...] = (),
+    plugin_dir: Path | None = None,
+    scanner_dir: Path | None = None,
+) -> None:
+    """Puts GStreamer, and every library it needs that a desktop does not always have,
+    in `stage/lib`, and points the executables at it.
+
+        STAGE/ferrite                       RUNPATH $ORIGIN/lib
+        STAGE/lib/*.so*                     the libraries, RUNPATH $ORIGIN
+        STAGE/lib/gstreamer-1.0/*.so        the plugins, RUNPATH $ORIGIN/..
+        STAGE/lib/gst-plugin-scanner        GStreamer's helper, RUNPATH $ORIGIN
+
+    The engine on Linux does not load a list of plugins: GStreamer scans a folder, and
+    `crates/ferrite-servo/src/bundle.rs` points it at `lib/gstreamer-1.0` (and nowhere
+    else) when it finds this layout.
+    """
+    default_plugins, default_scanner = linux_gst_dirs()
+    plugin_dir = plugin_dir or default_plugins
+    scanner_dir = scanner_dir or default_scanner
+    lib_out = stage / "lib"
+    plugins_out = lib_out / "gstreamer-1.0"
+    plugins_out.mkdir(parents=True, exist_ok=True)
+
+    wanted = linux_plugin_files(lists_dir)
+    missing = [n for n, required in wanted if required and not (plugin_dir / n).exists()]
+    if missing:
+        sys.exit(f"Ferrite needs these GStreamer plugins and they are not under {plugin_dir}: {missing}")
+    plugins = []
+    for name, _ in wanted:
+        if (plugin_dir / name).exists():
+            shutil.copy2(plugin_dir / name, plugins_out / name)
+            plugins.append(plugins_out / name)
+        else:
+            print(f"warning: optional plugin {name} is not installed, left out", file=sys.stderr)
+    scanner = scanner_dir / "gst-plugin-scanner"
+    if not scanner.exists():
+        sys.exit(f"GStreamer's gst-plugin-scanner is not in {scanner_dir}")
+    shutil.copy2(scanner, lib_out / "gst-plugin-scanner")
+
+    executables = [stage / main_name] + [stage / name for name in extras]
+    rpaths: dict[Path, str] = {exe: "$ORIGIN/lib" for exe in executables}
+    rpaths.update({p: "$ORIGIN/.." for p in plugins})
+    rpaths[lib_out / "gst-plugin-scanner"] = "$ORIGIN"
+    # Walk the NEEDED entries, not ldd's flat list, so that what a system library needs
+    # stays the system's (see LINUX_SYSTEM_LIBS).
+    queue = list(rpaths)
+    seen: set[str] = set()
+    copied: dict[str, Path] = {}
+    while queue:
+        current = queue.pop()
+        if str(current) in seen:
+            continue
+        seen.add(str(current))
+        needed = [n for n in parse_needed(run(["readelf", "-d", "--wide", str(current)])) if not linux_system_lib(n)]
+        if not needed:
+            continue
+        where = parse_ldd(run(["ldd", str(current)]))
+        for soname in needed:
+            if soname in copied:
+                continue
+            path = where.get(soname)
+            if path is None:
+                sys.exit(f"{current.name} needs {soname}, which this machine does not have")
+            dest = lib_out / soname
+            # Copy the file the name leads to, under the name the loader asks for.
+            shutil.copy2(os.path.realpath(path), dest)
+            os.chmod(dest, 0o755)
+            copied[soname] = dest
+            rpaths[dest] = "$ORIGIN"
+            queue.append(dest)
+    for target, rpath in rpaths.items():
+        run(["patchelf", "--set-rpath", rpath, str(target)])
+    print(f"bundled {len(plugins)} plugins and {len(copied)} libraries into {stage}")
+
+
+def is_elf(path: Path) -> bool:
+    try:
+        with open(path, "rb") as f:
+            return f.read(4) == b"\x7fELF"
+    except OSError:
+        return False
+
+
+def check_linux(stage: Path) -> int:
+    """Every library each program and library in `stage` names is either one the machine
+    always has (LINUX_SYSTEM_LIBS) or is found inside `stage`. Run on the machine that
+    built the stage, where everything resolves: a name that resolves outside the stage
+    would be missing on a machine without it."""
+    root = stage.resolve()
+    problems = []
+    files = [f for f in sorted(stage.rglob("*")) if f.is_file() and not f.is_symlink() and is_elf(f)]
+    for f in files:
+        needed = [n for n in parse_needed(run(["readelf", "-d", "--wide", str(f)])) if not linux_system_lib(n)]
+        if not needed:
+            continue
+        where = parse_ldd(run(["ldd", str(f)]))
+        for soname in needed:
+            path = where.get(soname)
+            if path is None:
+                problems.append(f"{f.relative_to(stage)}: {soname} not found")
+            elif not Path(os.path.realpath(path)).is_relative_to(root):
+                problems.append(f"{f.relative_to(stage)}: {soname} comes from {path}, outside the package")
+    for line in problems:
+        print(line)
+    print(f"checked {len(files)} files: {'ok' if not problems else f'{len(problems)} problems'}")
+    return 1 if problems else 0
+
+
 # ----------------------------------------------------------------------------- tests
 
 SAMPLE_OTOOL = """/opt/homebrew/opt/gstreamer/lib/gstreamer-1.0/libgstisomp4.dylib:
@@ -419,16 +620,40 @@ Load command 14
         (plug / "libgstcoreelements.dylib").write_bytes(b"x")
         (plug / "libgstnice.dylib").symlink_to(d / "nowhere.dylib")
         assert [f.name for f in plug.glob("*.dylib") if f.exists()] == ["libgstcoreelements.dylib"]
+
+        # Linux: the plugin names, and which libraries are the machine's own.
+        names = [n for n, _ in linux_plugin_files(lists)]
+        assert names[:2] == ["libgstcoreelements.so", "libgstnice.so"], names
+        assert "libgstopusparse.so" in names and "libgstpulseaudio.so" in names
+        assert dict(linux_plugin_files(lists))["libgstpipewire.so"] is False
+    for system in ("libc.so.6", "libstdc++.so.6", "libglib-2.0.so.0", "libdrm.so.2",
+                   "libX11.so.6", "libxcb-shm.so.0", "libwayland-client.so.0", "libpulse.so.0",
+                   "libpcre2-8.so.0", "ld-linux-x86-64.so.2", "libz.so.1", "libEGL.so.1"):
+        assert linux_system_lib(system), system
+    for carried in ("libgstplay-1.0.so.0", "libgstreamer-1.0.so.0", "libavcodec.so.60",
+                    "libnice.so.10", "libzvbi.so.0", "libxml2.so.2", "libgudev-1.0.so.0",
+                    "libmp3lame.so.0", "libxml2.so.2"):
+        assert not linux_system_lib(carried), carried
+    assert linux_system_lib("libdrm_amdgpu.so.1") and linux_system_lib("libXext.so.6")
+    assert parse_needed(""" 0x0000000000000001 (NEEDED)             Shared library: [libgstplay-1.0.so.0]
+ 0x0000000000000001 (NEEDED)             Shared library: [libc.so.6]
+ 0x000000000000001d (RUNPATH)            Library runpath: [$ORIGIN]
+""") == ["libgstplay-1.0.so.0", "libc.so.6"]
+    assert parse_ldd("""	linux-vdso.so.1 (0x00007ffd)
+	libgstplay-1.0.so.0 => /usr/lib/x86_64-linux-gnu/libgstplay-1.0.so.0 (0x00007f)
+	libmissing.so.1 => not found
+	/lib64/ld-linux-x86-64.so.2 (0x00007f)
+""") == {"libgstplay-1.0.so.0": "/usr/lib/x86_64-linux-gnu/libgstplay-1.0.so.0", "libmissing.so.1": None}
     print("self-test ok")
     return 0
 
 
 def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    ap.add_argument("command", choices=["macos", "windows", "list", "self-test"])
-    ap.add_argument("target", nargs="?", help="Ferrite.app (macos), the stage directory (windows) or the platform (list)")
-    ap.add_argument("--main", default="ferrite", help="name of the executable in Contents/MacOS (the smoke test uses another)")
-    ap.add_argument("--extra", action="append", default=[], help="another executable in Contents/MacOS to fix up the same way (repeatable)")
+    ap.add_argument("command", choices=["macos", "windows", "linux", "check-linux", "list", "self-test"])
+    ap.add_argument("target", nargs="?", help="Ferrite.app (macos), the stage directory (windows, linux) or the platform (list)")
+    ap.add_argument("--main", default="ferrite", help="name of the executable in Contents/MacOS or the Linux stage (the smoke test uses another)")
+    ap.add_argument("--extra", action="append", default=[], help="another executable beside it to fix up the same way (repeatable)")
     ap.add_argument("--prefix", default=os.environ.get("HOMEBREW_PREFIX", "/opt/homebrew"))
     ap.add_argument("--root", default=os.environ.get("GSTREAMER_1_0_ROOT_MSVC_X86_64", r"C:\Program Files\gstreamer\1.0\msvc_x86_64"))
     args = ap.parse_args()
@@ -437,11 +662,18 @@ def main() -> int:
     if not args.target:
         ap.error("the target is required")
     if args.command == "list":
-        if args.target not in ("macos", "windows"):
-            ap.error("list takes macos or windows")
-        print("\n".join(plugin_files(args.target)))
+        if args.target not in ("macos", "windows", "linux"):
+            ap.error("list takes macos, windows or linux")
+        if args.target == "linux":
+            print("\n".join(name for name, _ in linux_plugin_files()))
+        else:
+            print("\n".join(plugin_files(args.target)))
     elif args.command == "macos":
         bundle_macos(Path(args.target), Path(args.prefix), args.main, extras=tuple(args.extra))
+    elif args.command == "linux":
+        bundle_linux(Path(args.target), args.main, extras=tuple(args.extra))
+    elif args.command == "check-linux":
+        return check_linux(Path(args.target))
     else:
         bundle_windows(Path(args.target), Path(args.root))
     return 0

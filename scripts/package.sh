@@ -3,9 +3,12 @@
 #
 #   scripts/package.sh <macos|windows|linux> <label> <path-to-binary> [out-dir] [media]
 #
-# With `media` the binary is the `media` build (it links GStreamer): macOS and Windows
-# packages carry a GStreamer (scripts/bundle-gstreamer.py) and are named
-# ferrite-<label>-<platform>-media.*; the Linux one uses the system's.
+# With `media` the binary is the `media` build (it links GStreamer): the package carries a
+# GStreamer (scripts/bundle-gstreamer.py) and is named ferrite-<label>-<platform>-media.*.
+# Every package is checked before it is made: on Windows that each DLL the program loads
+# is in it or part of Windows (scripts/windows-runtime.py), on Linux that each library is
+# in it or one every desktop has (bundle-gstreamer.py check-linux), on macOS that nothing
+# is loaded from Homebrew or another place only the build machine has.
 #
 #   macos    Ferrite.app (icon + Info.plist, ad-hoc signed when codesign exists)
 #            -> ferrite-<label>-macos-arm64.zip
@@ -48,6 +51,18 @@ case "$platform" in
     if [ -n "$suffix" ]; then
       "$py" "$root/scripts/bundle-gstreamer.py" macos "$app"
     fi
+    # Nothing in the app may load a library from where the build machine kept it (Homebrew,
+    # a home folder): a Mac without that would not start the app.
+    if command -v otool >/dev/null 2>&1; then
+      leak=""
+      while IFS= read -r f; do
+        file "$f" | grep -q 'Mach-O' || continue
+        if otool -L "$f" | tail -n +2 | grep -E "/opt/homebrew|/usr/local|/Users/"; then
+          echo "$f needs a library from outside the app"; leak=1
+        fi
+      done < <(find "$app/Contents" -type f)
+      [ -z "$leak" ] || { echo "the app needs libraries that are not in it" >&2; exit 1; }
+    fi
     # Ad-hoc signature: not a Developer ID, but it lets the bundle run after the
     # one-time "open anyway" approval instead of being reported as damaged.
     if command -v codesign >/dev/null 2>&1; then
@@ -68,6 +83,10 @@ case "$platform" in
     if [ -n "$suffix" ]; then
       "$py" "$root/scripts/bundle-gstreamer.py" windows "$stage"
     fi
+    # The Visual C++ runtime (MSVCP140.dll, VCRUNTIME140.dll...): not part of Windows, and
+    # without it the app does not start ("VCRUNTIME140.dll was not found").
+    "$py" "$root/scripts/windows-runtime.py" bundle "$stage"
+    "$py" "$root/scripts/windows-runtime.py" check "$stage"
     zip_name="ferrite-$label-windows-x64$suffix.zip"
     if command -v 7z >/dev/null 2>&1; then
       (cd "$work" && 7z a -tzip -bso0 "$out/$zip_name" "ferrite-$label-windows-x64")
@@ -87,8 +106,10 @@ case "$platform" in
     cp "$root/packaging/linux/ferrite.desktop" "$root/packaging/linux/README.txt" "$stage/"
     install -m 755 "$root/packaging/linux/install.sh" "$stage/install.sh"
     if [ -n "$suffix" ]; then
-      printf '\nThis is the media build: it needs GStreamer from your system (on Debian or Ubuntu:\nsudo apt install gstreamer1.0-plugins-base gstreamer1.0-plugins-good gstreamer1.0-plugins-bad\ngstreamer1.0-libav gstreamer1.0-nice).\n' >> "$stage/README.txt"
+      "$py" "$root/scripts/bundle-gstreamer.py" linux "$stage"
+      printf '\nThis is the media build (video, audio, calls). It carries its own GStreamer in\nlib/: keep that folder next to the ferrite program (install.sh copies both).\n' >> "$stage/README.txt"
     fi
+    "$py" "$root/scripts/bundle-gstreamer.py" check-linux "$stage"
     tar_name="ferrite-$label-linux-x64$suffix.tar.gz"
     tar -C "$work" -czf "$out/$tar_name" "ferrite-$label-linux-x64"
     echo "$out/$tar_name"
