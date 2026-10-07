@@ -482,6 +482,26 @@ fn main() {
         println!("FAIL async checks never finished");
         failed += 1;
     }
+    // The Network tab's sizes and times: the page's Resource Timing entries
+    // reach the session, and the marked lines never show as console messages.
+    let timings = session.take_net_timings();
+    let ping = timings.iter().find(|t| t.url.ends_with("/ping"));
+    let leaked = session
+        .take_console_entries()
+        .iter()
+        .any(|e| e.message.contains(ferrite_servo::diag::NET_TIMING_MARK));
+    if ping.is_some_and(|t| t.duration_ms >= 0.0) && !leaked {
+        println!(
+            "PASS request timings reach the Network tab ({} entries)",
+            timings.len()
+        );
+    } else {
+        println!(
+            "FAIL request timings: {} entries, /ping {ping:?}, leaked to the console: {leaked}",
+            timings.len()
+        );
+        failed += 1;
+    }
     println!(
         "{}",
         if failed == 0 {

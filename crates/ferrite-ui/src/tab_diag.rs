@@ -73,6 +73,10 @@ pub(crate) fn drain_all(state: &mut FerriteBrowser) -> Task<FerriteBrowserMessag
                 new_console_on_active = true;
             }
         }
+        let timings = session.take_net_timings();
+        if !timings.is_empty() {
+            diag.log.apply_timings(timings);
+        }
 
         if let Some(note) = session.take_crash() {
             eprintln!(

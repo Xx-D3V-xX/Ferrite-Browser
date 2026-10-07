@@ -93,7 +93,7 @@ summary: Every known limit of Ferrite's defense, its evaluation (including the o
 
 <h3>The browser</h3>
 <ul>
-  <li><strong>The DevTools Network tab has no status, size or timing.</strong> A request is listed when it starts, with its method, type and URL. The engine's response callback is not wired up. So there is no status code, no duration and no waterfall. <code>fetch()</code> and XHR are listed as <em>Other</em>.</li>
+  <li><strong>The DevTools Network tab has no status code.</strong> A request is listed when it starts, with its method, type and URL. Its size and time are added when it finishes, from the page's own Resource Timing. The engine does not tell the browser the response itself, so there is no status code and no waterfall. A request from another site that does not allow timing shows no size. <code>fetch()</code> and XHR are listed as <em>Other</em>.</li>
   <li><strong>The system file picker is untested on a real Mac or Windows machine.</strong> The file card opens it with the system's own tool. Only the command each system gets and what happens to the picked path are tested. Nobody has tried it with a real upload.</li>
   <li><strong>Input-method (IME) composition is not handled.</strong> Composed text is not passed on. Chinese, Japanese and Korean input are examples. Nobody has tested non-US keyboard layouts, dead keys or key repeat.</li>
   <li><strong><kbd>F12</kbd> opens the Audit panel, not DevTools.</strong> DevTools is <kbd>Cmd</kbd>+<kbd>Opt</kbd>+<kbd>I</kbd> or <kbd>Ctrl</kbd>+<kbd>Shift</kbd>+<kbd>I</kbd>, or <kbd>Cmd/Ctrl</kbd>+<kbd>J</kbd>. Whether <kbd>F12</kbd> should change is an open decision.</li>
@@ -123,7 +123,7 @@ summary: Every known limit of Ferrite's defense, its evaluation (including the o
 
 <h3>Logs and builds</h3>
 <ul>
-  <li><strong>No log file on Windows.</strong> In the current code, sending standard error to a file works on Unix only. A Windows run prints to its terminal or nowhere. <code>collect-logs</code> is a bash script. It works on macOS and Linux only. The stack sample works on macOS only. The script is bundled in the macOS app only.</li>
+  <li><strong><code>collect-logs</code> is a bash script.</strong> Windows now writes <code>ferrite.log</code> too (in <code>%LOCALAPPDATA%\Ferrite\logs</code>), but the script that gathers it is bash. It works on macOS and Linux only. The stack sample works on macOS only. The script is bundled in the macOS app only.</li>
   <li><strong>Unsigned builds.</strong> Each platform asks you to confirm the first launch. On macOS, the app has an ad-hoc signature but is not notarized.</li>
   <li><strong>Builds are older than the source.</strong> A manual CI run makes the builds. The release page names the commit that a build came from.</li>
   <li><strong>The macOS app has crashed for the owner.</strong> It was reported to crash again and again, to need a force-quit, and to fail on some pages. Ferrite added a log file, a quit watchdog, crash reporting and the DevTools Engine tab so that this can be diagnosed. None of them has run on that Mac yet. The project has not checked how the packaged Windows and Linux builds behave on real machines.</li>

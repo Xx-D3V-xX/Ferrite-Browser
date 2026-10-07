@@ -747,7 +747,32 @@ pub(crate) fn next_frame_seq() -> u64 {
 /// Defines web interfaces Servo lacks that real sites test for; see the
 /// script's own header.
 #[cfg(feature = "servo")]
-const WEB_COMPAT_JS: &str = include_str!("web_compat.js");
+static WEB_COMPAT_JS: std::sync::LazyLock<String> = std::sync::LazyLock::new(|| {
+    include_str!("web_compat.js").replace("__FERRITE_NET_TOKEN__", net_timing_token())
+});
+
+/// This process's secret for `web_compat.js`'s request-timing reports (see
+/// [`crate::diag::parse_net_timings`]). Random per run and never shown to a
+/// page, so a page cannot forge a report the Network tab would believe.
+#[cfg(feature = "servo")]
+fn net_timing_token() -> &'static str {
+    use std::hash::{BuildHasher, Hasher};
+    static TOKEN: std::sync::LazyLock<String> = std::sync::LazyLock::new(|| {
+        let mut token = String::new();
+        for i in 0..2u8 {
+            let mut hasher = std::collections::hash_map::RandomState::new().build_hasher();
+            hasher.write_u8(i);
+            hasher.write_u128(
+                std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .map_or(0, |d| d.as_nanos()),
+            );
+            token.push_str(&format!("{:016x}", hasher.finish()));
+        }
+        token
+    });
+    &TOKEN
+}
 
 /// CSS features the style engine ships off and that work once switched on:
 /// `:has()`, `:nth-child(n of S)` and `@scope`, each checked in the real engine by
@@ -1058,7 +1083,7 @@ mod inner {
                     let setting = std::env::var("FERRITE_COMPAT").ok();
                     let scripts: [(&str, &str); 5] = [
                         ("svg", super::SVG_COMPAT_JS),
-                        ("web", super::WEB_COMPAT_JS),
+                        ("web", super::WEB_COMPAT_JS.as_str()),
                         ("storage", super::STORAGE_COMPAT_JS),
                         ("sw", super::SW_COMPAT_JS.as_str()),
                         ("cq", super::CQ_COMPAT_JS),
@@ -1484,6 +1509,8 @@ mod inner {
         console_log: Rc<std::cell::RefCell<std::collections::VecDeque<crate::diag::ConsoleEntry>>>,
         /// Every request the engine announced for this tab.
         net_log: Rc<std::cell::RefCell<std::collections::VecDeque<crate::diag::NetEvent>>>,
+        /// Request timings `web_compat.js` reported (see `show_console_message`).
+        net_timings: Rc<std::cell::RefCell<std::collections::VecDeque<crate::diag::NetTiming>>>,
         /// The one thing the page is waiting on a person for.
         control: SharedControl,
         /// The pointer the page asked for.
@@ -1757,6 +1784,17 @@ mod inner {
             message: String,
         ) {
             use crate::diag::{push_bounded, ConsoleEntry, ConsoleLevel};
+            // `web_compat.js`'s request timings come this way; with the right
+            // token they feed the Network tab and are not console messages.
+            if let Some(timings) =
+                crate::diag::parse_net_timings(&message, super::net_timing_token())
+            {
+                let mut log = self.net_timings.borrow_mut();
+                for timing in timings {
+                    push_bounded(&mut log, timing);
+                }
+                return;
+            }
             let mapped = match level {
                 servo::ConsoleLogLevel::Debug | servo::ConsoleLogLevel::Trace => {
                     ConsoleLevel::Debug
@@ -1897,6 +1935,9 @@ mod inner {
             Rc<std::cell::RefCell<std::collections::VecDeque<crate::diag::ConsoleEntry>>>,
         /// Requests made, drained by `take_net_events`.
         shared_net_log: Rc<std::cell::RefCell<std::collections::VecDeque<crate::diag::NetEvent>>>,
+        /// Request timings, drained by `take_net_timings`.
+        shared_net_timings:
+            Rc<std::cell::RefCell<std::collections::VecDeque<crate::diag::NetTiming>>>,
         /// Most recently synced favicon (updated in `sync_and_read()`).
         last_favicon: Option<(u32, u32, Vec<u8>)>,
         /// Whether the page's script thread still answers (see [`super::ScriptWatch`]).
@@ -2005,6 +2046,9 @@ mod inner {
             let shared_net_log: Rc<
                 std::cell::RefCell<std::collections::VecDeque<crate::diag::NetEvent>>,
             > = Rc::default();
+            let shared_net_timings: Rc<
+                std::cell::RefCell<std::collections::VecDeque<crate::diag::NetTiming>>,
+            > = Rc::default();
             let shared_permission: SharedPermission = Rc::default();
             let shared_agent_active: Rc<std::cell::Cell<bool>> = Rc::default();
 
@@ -2034,6 +2078,7 @@ mod inner {
                 crash: shared_crash.clone(),
                 console_log: shared_console_log.clone(),
                 net_log: shared_net_log.clone(),
+                net_timings: shared_net_timings.clone(),
                 frame_ready: frame_ready.clone(),
                 throttle: throttle_sent.clone(),
                 permission: shared_permission.clone(),
@@ -2073,6 +2118,7 @@ mod inner {
                 shared_crash,
                 shared_console_log,
                 shared_net_log,
+                shared_net_timings,
                 last_favicon: None,
                 script_watch: super::ScriptWatch::default(),
                 probe_answered: Rc::default(),
@@ -2668,6 +2714,11 @@ mod inner {
             self.shared_net_log.borrow_mut().drain(..).collect()
         }
 
+        /// Every request timing reported since the last call, oldest first.
+        pub fn take_net_timings(&mut self) -> Vec<crate::diag::NetTiming> {
+            self.shared_net_timings.borrow_mut().drain(..).collect()
+        }
+
         /// Navigate to `url`, drive the event loop for up to `timeout_secs`, and
         /// return a [`JSCompatResult`] summarising what happened.
         ///
@@ -3080,6 +3131,10 @@ impl HeadlessServoSession {
         Vec::new()
     }
 
+    pub fn take_net_timings(&mut self) -> Vec<crate::diag::NetTiming> {
+        Vec::new()
+    }
+
     pub fn apply_display_scale(&self) {}
 
     pub fn page_control(&self) -> Option<crate::diag::PageControl> {
@@ -3265,7 +3320,7 @@ mod svg_compat_tests {
     fn the_compat_scripts_parse_under_node() {
         for (name, source) in [
             ("svg_compat.js", SVG_COMPAT_JS),
-            ("web_compat.js", WEB_COMPAT_JS),
+            ("web_compat.js", WEB_COMPAT_JS.as_str()),
             ("storage_compat.js", STORAGE_COMPAT_JS),
             ("sw_compat.js", SW_COMPAT_JS.as_str()),
             ("cq_compat.js", CQ_COMPAT_JS),

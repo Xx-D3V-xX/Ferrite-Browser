@@ -39,7 +39,7 @@ summary: Find out why a page misbehaves: the DevTools Console, Network and Engin
 <p>The tab lists each request that the page made, <em>when it starts</em>. A row shows the relative time, method, type and URL. There is a filter box and there are type chips (Doc, JS, CSS, Img, Font, Media, Other). <code>fetch()</code> and XHR requests fall under <em>Other</em>.</p>
 <div class="callout warn">
   <h4>What the Network tab cannot tell you</h4>
-  <p>There is <strong>no status code, size or duration</strong>. So there is no waterfall. The engine's response callback is not wired up yet, and the panel says so. A request that fails or returns 404 is listed like any other. For a failed load, look in the Console. That is where the page reports it.</p>
+  <p>When a request finishes, its <strong>size</strong> and <strong>time</strong> are filled in from the page's own Resource Timing. A size marked <em>cache</em> came from the cache. A dash means the request has not finished, or it came from another site that does not allow timing. There is <strong>no status code</strong> and no waterfall: the engine does not tell the browser the response itself, and the panel says so. A request that fails or returns 404 is listed like any other. For a failed load, look in the Console. That is where the page reports it.</p>
 </div>
 
 <h3>Engine</h3>

@@ -60,6 +60,56 @@ pub struct NetEvent {
     pub is_main_frame: bool,
 }
 
+/// How long a request took and how big it was, from the page's own Resource
+/// Timing entries (the engine does not report responses to the embedder).
+/// Matched to a [`NetEvent`] by its URL.
+#[derive(Debug, Clone, PartialEq)]
+pub struct NetTiming {
+    pub url: String,
+    /// From the request's start to its last byte, in milliseconds.
+    pub duration_ms: f64,
+    /// Bytes on the wire, headers included; 0 for a response served from the
+    /// cache (or one the page may not measure, from another origin without
+    /// `Timing-Allow-Origin`).
+    pub transfer_size: u64,
+    /// The body's size as sent (before decompression).
+    pub body_size: u64,
+}
+
+/// The marker `web_compat.js` puts before a batch of timings it reports on
+/// the console, followed by this process's token, a colon, and the JSON.
+pub const NET_TIMING_MARK: &str = "\u{1}ferrite-net:";
+
+/// The timings in a console message, if it is one `web_compat.js` sent with
+/// this process's `token`. Anything else (a page imitating the marker
+/// without the token included) is `None` and stays an ordinary message.
+#[must_use]
+pub fn parse_net_timings(message: &str, token: &str) -> Option<Vec<NetTiming>> {
+    let at = message.find(NET_TIMING_MARK)?;
+    let rest = &message[at + NET_TIMING_MARK.len()..];
+    let json = rest.strip_prefix(token)?.strip_prefix(':')?;
+    let items: Vec<serde_json::Value> = serde_json::from_str(json.trim()).ok()?;
+    Some(
+        items
+            .iter()
+            .take(MAX_ENTRIES)
+            .filter_map(|item| {
+                let url = item.get("u")?.as_str()?;
+                if url.is_empty() || url.len() > 8_192 {
+                    return None;
+                }
+                let number = |key: &str| item.get(key).and_then(serde_json::Value::as_f64);
+                Some(NetTiming {
+                    url: url.to_string(),
+                    duration_ms: number("d").filter(|d| d.is_finite() && *d >= 0.0)?,
+                    transfer_size: number("t").map_or(0, |v| v.max(0.0) as u64),
+                    body_size: number("b").map_or(0, |v| v.max(0.0) as u64),
+                })
+            })
+            .collect(),
+    )
+}
+
 /// Milliseconds since the Unix epoch.
 #[must_use]
 pub fn now_ms() -> u64 {
@@ -308,6 +358,27 @@ mod tests {
         }
         assert_eq!(q.len(), MAX_ENTRIES);
         assert_eq!(q.front(), Some(&3));
+    }
+
+    #[test]
+    fn timings_need_this_process_token_and_bad_items_are_dropped() {
+        let message = format!(
+            "{NET_TIMING_MARK}tok123:[{{\"u\":\"https://a.example/x.js\",\"d\":12.5,\"t\":340,\"b\":300}},\
+             {{\"u\":\"\",\"d\":1}},{{\"u\":\"https://a.example/y\",\"d\":-4}},{{\"u\":\"https://a.example/z\",\"d\":3}}]"
+        );
+        let timings = parse_net_timings(&message, "tok123").expect("ours");
+        assert_eq!(timings.len(), 2);
+        assert_eq!(timings[0].url, "https://a.example/x.js");
+        assert_eq!(timings[0].duration_ms, 12.5);
+        assert_eq!(timings[0].transfer_size, 340);
+        assert_eq!(timings[1].transfer_size, 0, "a missing size is zero");
+        // A page that copies the marker but not the token is an ordinary message.
+        assert_eq!(parse_net_timings(&message, "other"), None);
+        assert_eq!(parse_net_timings("just a log line", "tok123"), None);
+        assert_eq!(
+            parse_net_timings(&format!("{NET_TIMING_MARK}tok123:not json"), "tok123"),
+            None
+        );
     }
 
     #[test]

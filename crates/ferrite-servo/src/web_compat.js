@@ -778,3 +778,31 @@
   };
   Object.defineProperty(window, '__ferriteCapture', { value: Object.freeze(api), writable: false, configurable: false, enumerable: false });
 })();
+
+/* Request timings for the DevTools Network tab. The engine tells the browser
+ * that a request started but nothing about its response, so each finished
+ * request's Resource Timing entry (duration, size) is reported on the console
+ * with a marker and this run's secret token; the browser takes those lines out
+ * of the console and matches them to the requests it saw start. The built-ins
+ * used are captured now, before the page's scripts run, so a page that later
+ * replaces them neither intercepts the reports nor learns the token. */
+(function () {
+  'use strict';
+  if (typeof PerformanceObserver !== 'function' || typeof console === 'undefined') return;
+  var token = '__FERRITE_NET_TOKEN__';
+  var debug = console.debug;
+  var apply = Reflect.apply;
+  var stringify = JSON.stringify;
+  var Observer = PerformanceObserver;
+  function report(entries) {
+    var batch = [];
+    for (var i = 0; i < entries.length && batch.length < 200; i++) {
+      var e = entries[i];
+      batch.push({ u: String(e.name), d: +e.duration || 0, t: +e.transferSize || 0, b: +e.encodedBodySize || 0 });
+    }
+    if (batch.length) apply(debug, console, ['\u0001ferrite-net:' + token + ':' + stringify(batch)]);
+  }
+  try {
+    new Observer(function (list) { report(list.getEntries()); }).observe({ entryTypes: ['resource'] });
+  } catch (e) { /* no resource timing in this engine */ }
+})();
