@@ -827,6 +827,10 @@ const CONSENT_ANIM_STEP: f32 = 16.0 / 200.0;
 const TAB_ANIM_STEP: f32 = 16.0 / 160.0;
 /// Advance per `MenuAnimTick`: the menu settles in ~140 ms.
 const MENU_ANIM_STEP: f32 = 16.0 / 140.0;
+/// Advance per `PanelAnimTick`: a side drawer or bottom panel settles in ~200 ms.
+const PANEL_ANIM_STEP: f32 = 16.0 / 200.0;
+/// How far a panel's contents travel as it eases in, in logical pixels.
+const PANEL_SLIDE: f32 = 18.0;
 
 /// Advance per `ThreadAnimTick` for each entering thread item's progress —
 /// ticks fire every 16ms, so an entrance takes ~220ms.
@@ -1634,6 +1638,13 @@ pub struct FerriteBrowser {
     /// advanced by `TabAnimTick` and cleared when it is done or a tab closes.
     /// Decoration only.
     pub tab_open_anim: Option<(usize, f32)>,
+    /// Which side drawer and bottom panel were showing after the last message, so
+    /// one that has just appeared can ease in (`note_panel_changes`).
+    pub panels_shown: (Option<PanelKind>, Option<PanelKind>),
+    /// Entrance progress of the side drawer and of the bottom panel, `0.0` (just
+    /// opened) to `1.0`; advanced by `PanelAnimTick`. Decoration only.
+    pub drawer_anim: f32,
+    pub bottom_anim: f32,
     /// When the tab strip's empty area was last pressed (double-click =
     /// maximize).
     last_titlebar_press: Option<std::time::Instant>,
@@ -1898,6 +1909,9 @@ impl Default for FerriteBrowser {
             hovered_tab: None,
             show_menu: false,
             menu_anim: 1.0,
+            panels_shown: (None, None),
+            drawer_anim: 1.0,
+            bottom_anim: 1.0,
             tab_open_anim: None,
             last_titlebar_press: None,
             scroll_queue: scroll::ScrollQueue::default(),
@@ -2141,6 +2155,8 @@ pub enum FerriteBrowserMessage {
     CloseMenu,
     /// One animation tick of the overflow menu's slide-in.
     MenuAnimTick,
+    /// A side drawer or bottom panel easing in.
+    PanelAnimTick,
     /// Advances `tab_open_anim`.
     TabAnimTick,
     /// Advances the active tab's page-control overlay entrance.
@@ -3180,6 +3196,10 @@ pub fn update(
         }
         FerriteBrowserMessage::MenuAnimTick => {
             state.menu_anim = (state.menu_anim + MENU_ANIM_STEP).min(1.0);
+        }
+        FerriteBrowserMessage::PanelAnimTick => {
+            state.drawer_anim = (state.drawer_anim + PANEL_ANIM_STEP).min(1.0);
+            state.bottom_anim = (state.bottom_anim + PANEL_ANIM_STEP).min(1.0);
         }
         FerriteBrowserMessage::ControlAnimTick => controls::advance_entrance(state),
         FerriteBrowserMessage::TabAnimTick => {
@@ -4713,6 +4733,121 @@ fn dry_run_evidence_lines(record: &DryRunRecord) -> Vec<String> {
 /// transition. Used by `view_agent_sidebar`'s consent panel to turn
 /// `FerriteBrowser::consent_panel_anim`'s linear tick-driven progress into
 /// the panel's actual background-alpha/slide-offset animation.
+/// The side drawers and bottom panels, for knowing when one has just appeared.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PanelKind {
+    Library,
+    Settings,
+    Agent,
+    Audit,
+    DevTools,
+}
+
+/// The drawer the view shows (same precedence as `view`) and the bottom panel.
+fn panels_showing(state: &FerriteBrowser) -> (Option<PanelKind>, Option<PanelKind>) {
+    let drawer = if state.show_library_panel {
+        Some(PanelKind::Library)
+    } else if state.show_settings_panel {
+        Some(PanelKind::Settings)
+    } else if state.show_agent_sidebar {
+        Some(PanelKind::Agent)
+    } else {
+        None
+    };
+    let bottom = if state.show_audit_panel {
+        Some(PanelKind::Audit)
+    } else if state.show_js_console {
+        Some(PanelKind::DevTools)
+    } else {
+        None
+    };
+    (drawer, bottom)
+}
+
+/// After each message: a drawer or bottom panel that has just appeared (or been
+/// swapped for another) starts its entrance. Panels open from buttons, shortcuts,
+/// menu items and the agent, so this looks at the outcome, not at each message.
+fn note_panel_changes(state: &mut FerriteBrowser) {
+    let now = panels_showing(state);
+    if now.0.is_some() && now.0 != state.panels_shown.0 {
+        state.drawer_anim = 0.0;
+    }
+    if now.1.is_some() && now.1 != state.panels_shown.1 {
+        state.bottom_anim = 0.0;
+    }
+    state.panels_shown = now;
+}
+
+/// The application's update: `update`, then the panel entrance check.
+fn update_app(
+    state: &mut FerriteBrowser,
+    message: FerriteBrowserMessage,
+) -> Task<FerriteBrowserMessage> {
+    let task = update(state, message);
+    note_panel_changes(state);
+    task
+}
+
+/// A panel easing in: its contents slide `PANEL_SLIDE` px into place (from the
+/// right for a drawer, from below for a bottom panel) under a veil of the panel's
+/// own colour that clears. The panel keeps its exact size throughout, so the page
+/// beside it is not re-laid out each frame, and the veil takes no input, so the
+/// panel works from the first frame.
+fn panel_entrance<'a>(
+    panel: Element<'a, FerriteBrowserMessage>,
+    t: f32,
+    from_side: bool,
+    size: f32,
+    veil: Color,
+) -> Element<'a, FerriteBrowserMessage> {
+    if t >= 1.0 {
+        return panel;
+    }
+    let eased = ease_out_cubic(t);
+    let offset = (1.0 - eased) * PANEL_SLIDE;
+    let moved = if from_side {
+        container(panel)
+            .width(Length::Fixed(size))
+            .height(Length::Fill)
+            .padding(Padding {
+                left: offset,
+                ..Padding::ZERO
+            })
+    } else {
+        container(panel)
+            .width(Length::Fill)
+            .height(Length::Fixed(size))
+            .padding(Padding {
+                top: offset,
+                ..Padding::ZERO
+            })
+    }
+    .clip(true);
+    let veil = Color {
+        a: (1.0 - eased) * 0.9,
+        ..veil
+    };
+    let cover = container(text(""))
+        .width(Length::Fill)
+        .height(Length::Fill)
+        .style(move |_: &Theme| container::Style {
+            background: Some(Background::Color(veil)),
+            ..container::Style::default()
+        });
+    let layered = stack([moved.into(), cover.into()]);
+    if from_side {
+        container(layered)
+            .width(Length::Fixed(size))
+            .height(Length::Fill)
+            .into()
+    } else {
+        container(layered)
+            .width(Length::Fill)
+            .height(Length::Fixed(size))
+            .into()
+    }
+}
+
 fn ease_out_cubic(t: f32) -> f32 {
     let t = t.clamp(0.0, 1.0);
     1.0 - (1.0 - t).powi(3)
@@ -6294,6 +6429,15 @@ pub fn view(state: &FerriteBrowser) -> Element<'_, FerriteBrowserMessage> {
     } else {
         None
     };
+    let drawer = drawer.map(|panel| {
+        panel_entrance(
+            panel,
+            state.drawer_anim,
+            true,
+            state.panels.side_width(state.window_size),
+            palette.surface,
+        )
+    });
     let main_content: Element<FerriteBrowserMessage> = match drawer {
         Some(drawer) => iced::widget::row![
             content,
@@ -6308,7 +6452,13 @@ pub fn view(state: &FerriteBrowser) -> Element<'_, FerriteBrowserMessage> {
     layout.push(main_content);
     if let Some(p) = bottom_panel {
         layout.push(layout::splitter(state, palette, layout::Handle::Bottom));
-        layout.push(p);
+        layout.push(panel_entrance(
+            p,
+            state.bottom_anim,
+            false,
+            bottom_height,
+            palette.surface,
+        ));
     }
 
     let window: Element<FerriteBrowserMessage> = container(column(layout))
@@ -6702,6 +6852,14 @@ pub fn subscription(state: &FerriteBrowser) -> Subscription<FerriteBrowserMessag
         Subscription::none()
     };
 
+    // A side drawer or bottom panel easing in, only while one is.
+    let panel_anim_tick = if state.drawer_anim < 1.0 || state.bottom_anim < 1.0 {
+        time::every(std::time::Duration::from_millis(16))
+            .map(|_| FerriteBrowserMessage::PanelAnimTick)
+    } else {
+        Subscription::none()
+    };
+
     // Chat-thread entrance animations — same 16ms tick shape, gated so it only
     // runs while an item is actually fading in.
     let thread_anim_tick = if agent_panel::thread_anim_active(state) {
@@ -6758,6 +6916,7 @@ pub fn subscription(state: &FerriteBrowser) -> Subscription<FerriteBrowserMessag
         agent_event_sub,
         consent_anim_tick,
         menu_anim_tick,
+        panel_anim_tick,
         tab_anim_tick,
         control_anim_tick,
         thread_anim_tick,
@@ -6823,7 +6982,7 @@ fn window_settings() -> window::Settings {
 
 pub fn launch() -> iced::Result {
     lifecycle::start_stall_note();
-    iced::application(window_title, update, view)
+    iced::application(window_title, update_app, view)
         .window(window_settings())
         .window_size(Size::new(1280.0, 800.0))
         .centered()

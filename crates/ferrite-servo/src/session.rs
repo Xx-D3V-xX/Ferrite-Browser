@@ -3329,6 +3329,95 @@ mod svg_compat_tests {
         }
     }
 
+    /// `svg_compat.js`'s geometry (getTotalLength, getPointAtLength, getBBox), run
+    /// under node against stub SVG elements: Google Meet stopped on a missing
+    /// `getTotalLength` while starting a call.
+    #[test]
+    fn svg_geometry_measures_shapes_and_paths() {
+        let node_ok = std::process::Command::new("node")
+            .arg("--version")
+            .output()
+            .map(|o| o.status.success())
+            .unwrap_or(false);
+        if !node_ok {
+            eprintln!("SKIPPED: `node` is not installed; svg_compat.js geometry not exercised");
+            return;
+        }
+        let harness = format!(
+            "class SVGGraphicsElement {{}}\n\
+             class SVGGeometryElement extends SVGGraphicsElement {{}}\n\
+             globalThis.SVGGraphicsElement = SVGGraphicsElement;\n\
+             globalThis.SVGGeometryElement = SVGGeometryElement;\n\
+             globalThis.window = {{ addEventListener() {{}} }};\n\
+             globalThis.document = {{ addEventListener() {{}}, readyState: 'loading', querySelectorAll: () => [] }};\n\
+             globalThis.MutationObserver = class {{ observe() {{}} }};\n\
+             {source}\n\
+             const SHAPES = ['path','line','polyline','polygon','circle','ellipse','rect'];\n\
+             function el(tag, attrs, kids) {{\n\
+               const e = Object.create((SHAPES.includes(tag) ? SVGGeometryElement : SVGGraphicsElement).prototype);\n\
+               e.localName = tag; e.getAttribute = n => n in attrs ? String(attrs[n]) : null;\n\
+               e.hasAttribute = n => n in attrs; kids = kids || [];\n\
+               e.firstElementChild = kids[0] || null;\n\
+               kids.forEach((k, i) => k.nextElementSibling = kids[i + 1] || null);\n\
+               return e;\n\
+             }}\n\
+             const P = d => el('path', {{ d }});\n\
+             const pt = P('M0 0 L30 40').getPointAtLength(25);\n\
+             const box = el('g', {{}}, [el('rect', {{ x: 5, y: 5, width: 10, height: 10 }}), el('circle', {{ cx: 50, cy: 50, r: 5 }})]).getBBox();\n\
+             console.log(JSON.stringify([\n\
+               P('M0 0 L30 40').getTotalLength(),\n\
+               P('m10 10 h10 v10 h-10 z').getTotalLength(),\n\
+               el('circle', {{ r: 10 }}).getTotalLength(),\n\
+               el('rect', {{ width: 10, height: 10, rx: 5 }}).getTotalLength(),\n\
+               P('M0 0a10 10 0 0110 10').getTotalLength(),\n\
+               P('M0 0 Q5 0 10 0 T20 0').getTotalLength(),\n\
+               P('M0 0 H10 M100 100 H110').getTotalLength(),\n\
+               P('M0 0 L10 0 L foo').getTotalLength(),\n\
+               pt.x, pt.y, box.x, box.y, box.width, box.height,\n\
+             ]));\n",
+            source = SVG_COMPAT_JS
+        );
+        let dir = std::env::temp_dir().join(format!("ferrite-svg-geometry-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("svg_harness.js");
+        std::fs::write(&path, harness).unwrap();
+        let out = std::process::Command::new("node")
+            .arg(&path)
+            .output()
+            .expect("node runs");
+        let _ = std::fs::remove_dir_all(&dir);
+        assert!(
+            out.status.success(),
+            "{}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        let got: Vec<f64> = serde_json::from_slice(&out.stdout).expect("a JSON list");
+        let pi = std::f64::consts::PI;
+        let want = [
+            50.0,            // a 3-4-5 line
+            40.0,            // relative h/v and a closing z
+            2.0 * pi * 10.0, // a circle, from four arcs
+            2.0 * pi * 5.0,  // a 10x10 rect with rx 5 is a circle
+            pi * 10.0 / 2.0, // a quarter circle, flags written without separators
+            20.0,            // a quadratic and its smooth continuation
+            20.0,            // a move between subpaths is not length
+            10.0,            // bad data keeps what came before it
+            15.0,            // the point 25 along the 3-4-5 line: x
+            20.0,            // and y
+            5.0,             // a group's box (a rect and a circle): x
+            5.0,             // y
+            50.0,            // width
+            50.0,            // height
+        ];
+        for (i, (g, w)) in got.iter().zip(want.iter()).enumerate() {
+            assert!(
+                (g - w).abs() <= 0.002 * w.abs().max(1.0),
+                "value {i}: got {g}, want {w}"
+            );
+        }
+        assert_eq!(got.len(), want.len());
+    }
+
     fn parses_under_node(name: &str, source: &str) {
         let node_ok = std::process::Command::new("node")
             .arg("--version")

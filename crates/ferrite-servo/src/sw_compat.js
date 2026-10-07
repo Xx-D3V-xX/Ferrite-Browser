@@ -479,7 +479,12 @@
 
   function fetchScript(url) {
     if (!originalFetch) return Promise.reject(new TypeError('fetch is not available'));
-    return originalFetch(url, { cache: 'no-store', credentials: 'same-origin' }).then(function (r) {
+    // `Service-Worker: script` is what browsers send for a service worker's script
+    // (the Service Workers spec, "update"); servers check it, and Google Meet's answers
+    // 400 without it, so Meet's worker never registered.
+    return originalFetch(url, {
+      cache: 'no-store', credentials: 'same-origin', headers: { 'Service-Worker': 'script' }
+    }).then(function (r) {
       if (!r.ok) throw new TypeError('A bad HTTP response code (' + r.status + ') was received when fetching the script');
       var type = (r.headers.get('content-type') || '').toLowerCase();
       if (type && !/javascript|ecmascript|text\/plain|application\/octet-stream|text\/x-/.test(type)) {
