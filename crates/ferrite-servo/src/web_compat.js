@@ -568,6 +568,66 @@
       return true;
     });
   }
+
+  // `for await (const chunk of response.body)`: a ReadableStream is async-iterable in
+  // Firefox and Chrome. On top of the stream's own reader; `return()` (a `break`)
+  // cancels the stream unless `preventCancel` was asked for, as the standard says.
+  if (typeof ReadableStream === 'function' && typeof Symbol === 'function' && Symbol.asyncIterator &&
+      typeof ReadableStream.prototype[Symbol.asyncIterator] !== 'function') {
+    var values = function values(options) {
+      var reader = this.getReader();
+      var preventCancel = !!(options && options.preventCancel);
+      var done = false;
+      var iterator = {
+        next: function () {
+          if (done) return Promise.resolve({ value: undefined, done: true });
+          return reader.read().then(function (r) {
+            if (r.done) { done = true; reader.releaseLock(); }
+            return r;
+          }, function (e) { done = true; reader.releaseLock(); throw e; });
+        },
+        'return': function (value) {
+          if (done) return Promise.resolve({ value: value, done: true });
+          done = true;
+          var finish = function () { reader.releaseLock(); return { value: value, done: true }; };
+          return preventCancel ? Promise.resolve(finish()) : reader.cancel(value).then(finish);
+        }
+      };
+      iterator[Symbol.asyncIterator] = function () { return this; };
+      return iterator;
+    };
+    define(ReadableStream.prototype, 'values', values);
+    define(ReadableStream.prototype, Symbol.asyncIterator, values);
+  }
+
+  // Pages are never cross-origin isolated here (no COOP/COEP isolation), which is what
+  // Firefox reports for an ordinary page.
+  if (typeof window !== 'undefined') {
+    if (!('crossOriginIsolated' in window)) {
+      try { Object.defineProperty(window, 'crossOriginIsolated', { get: function () { return false; }, configurable: true }); } catch (e) { /* frozen */ }
+    }
+    if (!('originAgentCluster' in window)) {
+      try { Object.defineProperty(window, 'originAgentCluster', { get: function () { return false; }, configurable: true }); } catch (e) { /* frozen */ }
+    }
+  }
+
+  // input.showPicker(): pages call it where they would otherwise call click(), so it
+  // opens the same picker click() does (files, colours), with the standard's checks:
+  // a disabled or read-only control throws InvalidStateError, and without a user
+  // gesture it throws NotAllowedError. Other types take focus.
+  if (typeof HTMLInputElement === 'function' && typeof HTMLInputElement.prototype.showPicker !== 'function') {
+    define(HTMLInputElement.prototype, 'showPicker', function showPicker() {
+      if (this.disabled || this.readOnly) {
+        throw new DOMException('The control is disabled or read-only.', 'InvalidStateError');
+      }
+      var activation = navigator.userActivation;
+      if (activation && !activation.isActive) {
+        throw new DOMException('showPicker() needs a user gesture.', 'NotAllowedError');
+      }
+      var type = String(this.type).toLowerCase();
+      if (type === 'file' || type === 'color') this.click(); else this.focus();
+    });
+  }
 })();
 
 // The Popover API (`popover` attribute, showPopover / hidePopover / togglePopover, the

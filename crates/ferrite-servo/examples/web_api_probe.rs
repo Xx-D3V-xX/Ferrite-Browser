@@ -59,6 +59,14 @@ const REQUIRED: &[(&str, &str)] = &[
     ("visualViewport", "typeof visualViewport === 'object' && visualViewport.width > 0"),
     ("document.execCommand", "typeof document.execCommand === 'function'"),
     ("TextEncoder / TextDecoder", "new TextDecoder().decode(new TextEncoder().encode('é')) === 'é'"),
+    (
+        "crossOriginIsolated is false (no isolation)",
+        "window.crossOriginIsolated === false && window.originAgentCluster === false",
+    ),
+    (
+        "input.showPicker without a user gesture throws NotAllowedError",
+        "(function(){try{document.createElement('input').showPicker();return false}catch(e){return e.name==='NotAllowedError'}})()",
+    ),
     ("structuredClone", "structuredClone({a:[1,{b:2}]}).a[1].b === 2"),
     ("queueMicrotask", "typeof queueMicrotask === 'function'"),
     ("MutationObserver", "typeof MutationObserver === 'function'"),
@@ -189,6 +197,13 @@ const ASYNC: &[(&str, &str)] = &[
          i.onload=function(){clearTimeout(t);i.naturalWidth===1?res():rej(new Error('naturalWidth '+i.naturalWidth))};\
          i.onerror=function(){clearTimeout(t);rej(new Error('error event'))};\
          i.src='data:image/gif;base64,R0lGODlhAQABAAAAACH5BAEAAAAALAAAAAABAAEAAAICRAEAOw=='})",
+    ),
+    (
+        "for await over a ReadableStream",
+        "(async function(){var s=new ReadableStream({start:function(c){c.enqueue('a');c.enqueue('b');c.close()}});\
+         var out='';for await (const x of s) out+=x;if(out!=='ab')throw new Error('got '+out);\
+         var t=new ReadableStream({start:function(c){c.enqueue(1);c.enqueue(2)}});for await (const y of t) break;\
+         if(t.locked)throw new Error('break left the stream locked');})()",
     ),
     (
         "fetch() of a same-origin resource",
