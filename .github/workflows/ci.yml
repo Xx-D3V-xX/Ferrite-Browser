@@ -1,5 +1,5 @@
 name: CI
-run-name: CI${{ inputs.only_sites && ' (real-site check; media builds only, no release)' || inputs.only_media && ' (media builds only, no release)' || inputs.only_tests && ' (lint and tests only; no release, as for media builds only)' || '' }}
+run-name: CI${{ inputs.only_sites && ' (real-site check; media builds only, no release)' || inputs.only_media && ' (media builds only, no release)' || inputs.only_tests && ' (lint and tests only; no release, as for media builds only)' || inputs.only_smoke && ' (bundle smoke tests only; no release, as for media builds only)' || '' }}
 
 # Manual trigger only — no automatic run on push or pull_request, and no
 # schedule. A project-owner decision (docs/TO-DO.md T-210), not the rebuild's
