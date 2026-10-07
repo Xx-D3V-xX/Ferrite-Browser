@@ -93,7 +93,11 @@ var WEBM = 'video/webm; codecs="vp9, opus"';
   for (var t = 0; t < 30 && v.currentTime <= 0.4; t++) await wait(100);
   ok('time advances', v.currentTime > 0.4, v.currentTime);
   ok('a decoded frame can be drawn', frameDrawn(v));
-  ok('the clip ends', v.ended || await once(v, 'ended', 8000), [v.currentTime, v.ended]);
+  // Wait for the end steps themselves (paused set, `ended` fired), not only the getter: it
+  // turns true a task earlier, and a seek in between finds the element not paused, so the
+  // new player plays on by itself and `playing` comes before the play() below (T-339).
+  ok('the clip ends', (v.ended && v.paused) || await once(v, 'ended', 8000), [v.currentTime, v.ended, v.paused]);
+  ok('the end paused the element', v.paused, v.paused);
   ok('currentTime is at the end', Math.abs(v.currentTime - 2) < 0.2, v.currentTime);
 
   // ---- Seeking back after the end plays again.
