@@ -411,6 +411,25 @@ jobs:
           fi
           cat "$RUNNER_TEMP/package.log"
 
+      # The Linux package on a Linux that has no GStreamer at all: a clean Ubuntu container
+      # with only what every desktop has (the libraries bundle-gstreamer.py leaves to the
+      # machine). The packaged app must find every library it names, and the engine's media
+      # probes, bundled the same way, must pass. The first Linux media release needed the
+      # machine's GStreamer and did not start without it ("libgstplay-1.0.so.0: cannot open
+      # shared object file"). It runs before the upload: a package that fails it is never
+      # published (this job may fail without holding up the release).
+      - name: Run the package and the media probes on a clean Linux (Linux)
+        if: matrix.platform == 'linux'
+        run: |
+          cargo build --release -p ferrite-servo --features servo,media --example media_probe --example mse_probe
+          e2e="$RUNNER_TEMP/e2e"; rm -rf "$e2e"; mkdir -p "$e2e/probes" "$e2e/package"
+          cp target/release/examples/media_probe target/release/examples/mse_probe "$e2e/probes/"
+          python3 scripts/bundle-gstreamer.py linux "$e2e/probes" --main media_probe --extra mse_probe
+          python3 scripts/bundle-gstreamer.py check-linux "$e2e/probes"
+          tar -C "$e2e/package" -xzf dist/*-linux-x64-media.tar.gz
+          if ! bash scripts/linux-clean-run.sh "$e2e" > "$RUNNER_TEMP/clean.log" 2>&1; then
+            cat "$RUNNER_TEMP/clean.log"
+
       - name: Upload package
         uses: actions/upload-artifact@v4
         with:
@@ -471,23 +490,6 @@ jobs:
           sudo mv /opt/homebrew.hidden /opt/homebrew
           if [ -n "$bad" ]; then bash scripts/ci-annotate.sh "media probes from a bundle (macOS)" "$summary" '.'; exit 1; fi
 
-      # The Linux package on a Linux that has no GStreamer at all: a clean Ubuntu container
-      # with only what every desktop has (the libraries bundle-gstreamer.py leaves to the
-      # machine). The packaged app must find every library it names, and the engine's media
-      # probes, bundled the same way, must pass. The first Linux media release needed the
-      # machine's GStreamer and did not start without it ("libgstplay-1.0.so.0: cannot open
-      # shared object file").
-      - name: Run the package and the media probes on a clean Linux (Linux)
-        if: matrix.platform == 'linux'
-        run: |
-          cargo build --release -p ferrite-servo --features servo,media --example media_probe --example mse_probe
-          e2e="$RUNNER_TEMP/e2e"; rm -rf "$e2e"; mkdir -p "$e2e/probes" "$e2e/package"
-          cp target/release/examples/media_probe target/release/examples/mse_probe "$e2e/probes/"
-          python3 scripts/bundle-gstreamer.py linux "$e2e/probes" --main media_probe --extra mse_probe
-          python3 scripts/bundle-gstreamer.py check-linux "$e2e/probes"
-          tar -C "$e2e/package" -xzf dist/*-linux-x64-media.tar.gz
-          if ! bash scripts/linux-clean-run.sh "$e2e" > "$RUNNER_TEMP/clean.log" 2>&1; then
-            cat "$RUNNER_TEMP/clean.log"
             bash scripts/ci-annotate.sh "Linux media package on a clean Linux" "$RUNNER_TEMP/clean.log"
             exit 1
           fi

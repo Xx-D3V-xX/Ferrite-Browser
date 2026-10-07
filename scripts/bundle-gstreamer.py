@@ -322,6 +322,10 @@ def bundle_windows(stage: Path, root: Path, lists_dir: Path | None = None) -> No
 # Plugins the Linux engine uses beyond Servo's list: the sound outputs (`pulsesink` by
 # name, `autoaudiosink` picks PulseAudio or ALSA), the test sources a capture falls back
 # to, and the screen and camera sources. `required` ones fail the bundle.
+# Not `gstpipewire`: the engine uses none of its elements (sound goes through PulseAudio,
+# which PipeWire also serves; the screen through ximagesrc), and listing devices loads its
+# device provider, which crashed the process on a machine with PipeWire's library but not
+# its configuration (a clean container: "can't load config client.conf", then SIGSEGV).
 LINUX_PLUGINS = [
     ("gstpulseaudio", True),
     ("gstalsa", True),
@@ -329,7 +333,6 @@ LINUX_PLUGINS = [
     ("gstvideotestsrc", True),
     ("gstximagesrc", True),
     ("gstvideo4linux2", True),
-    ("gstpipewire", False),
 ]
 
 # Libraries a Linux release never carries. Every desktop has them, and each must be the
@@ -625,7 +628,7 @@ Load command 14
         names = [n for n, _ in linux_plugin_files(lists)]
         assert names[:2] == ["libgstcoreelements.so", "libgstnice.so"], names
         assert "libgstopusparse.so" in names and "libgstpulseaudio.so" in names
-        assert dict(linux_plugin_files(lists))["libgstpipewire.so"] is False
+        assert "libgstpipewire.so" not in names
     for system in ("libc.so.6", "libstdc++.so.6", "libglib-2.0.so.0", "libdrm.so.2",
                    "libX11.so.6", "libxcb-shm.so.0", "libwayland-client.so.0", "libpulse.so.0",
                    "libpcre2-8.so.0", "ld-linux-x86-64.so.2", "libz.so.1", "libEGL.so.1"):
