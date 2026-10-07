@@ -30,6 +30,15 @@ jobs:
       !contains(github.event.workflow_run.display_title, 'media builds only')
 
     steps:
+      # Only for docs/RELEASE_NOTES.md (what changed in this build); the packages
+      # come from the CI run below, never from a build here.
+      - name: Check out the built commit
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.workflow_run.head_sha }}
+          sparse-checkout: docs/RELEASE_NOTES.md
+          sparse-checkout-cone-mode: false
+
       - name: Download the packages built by CI
         uses: actions/download-artifact@v4
         with:
@@ -89,6 +98,9 @@ jobs:
           Mac or on Windows by the people who wrote them. If a media file is missing from the
           list, its build failed and the normal packages were published without it.
           EOF
+          if [ -f docs/RELEASE_NOTES.md ]; then
+            { echo; cat docs/RELEASE_NOTES.md; } >> release_notes.md
+          fi
 
       - name: Delete existing "latest" release (if any)
         shell: bash
