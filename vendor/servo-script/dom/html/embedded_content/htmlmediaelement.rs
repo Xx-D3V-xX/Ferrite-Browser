@@ -2978,8 +2978,9 @@ impl HTMLMediaElement {
         {
             error!("Could not stop the old player: {error:?}");
         }
-        // Only once the old player has stopped: until then its pipeline can still report
-        // a seek of its own (at its end), which would replace the new player's start.
+        // After the old player is told to stop, and as a new run: its pipeline stops on
+        // another thread and can still report a seek of its own (at its end), which the
+        // run check in the source drops instead of taking it as the new player's start.
         source
             .shared()
             .seek_all(crate::dom::mediasource::seconds_to_ns(position));
