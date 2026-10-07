@@ -82,6 +82,13 @@ pub const LOCAL_OLLAMA_BASE_URL: &str = "http://localhost:11434";
 /// Default Gemini base URL, matching the pre-rebuild integration's endpoint.
 pub const DEFAULT_GEMINI_BASE_URL: &str = "https://generativelanguage.googleapis.com/v1beta/models";
 
+/// Anthropic's API root (`FERRITE_ANTHROPIC_BASE_URL`), without `/v1`.
+pub const DEFAULT_ANTHROPIC_BASE_URL: &str = "https://api.anthropic.com";
+
+/// OpenAI's API root (`FERRITE_OPENAI_BASE_URL`), with its version. Point it
+/// at any server that speaks the same chat-completions format.
+pub const DEFAULT_OPENAI_BASE_URL: &str = "https://api.openai.com/v1";
+
 /// `FERRITE_MODEL_CALL_BUDGET`'s default (§10.3).
 pub const DEFAULT_CALL_BUDGET: u32 = 500;
 /// Default in-flight cap for the global semaphore (§10.3).
@@ -104,6 +111,10 @@ pub struct ModelConfig {
     pub ollama_base_url: String,
     /// `FERRITE_GEMINI_BASE_URL`, default [`DEFAULT_GEMINI_BASE_URL`].
     pub gemini_base_url: String,
+    /// `FERRITE_ANTHROPIC_BASE_URL`, default [`DEFAULT_ANTHROPIC_BASE_URL`].
+    pub anthropic_base_url: String,
+    /// `FERRITE_OPENAI_BASE_URL`, default [`DEFAULT_OPENAI_BASE_URL`].
+    pub openai_base_url: String,
     /// `FERRITE_MODEL_CALL_BUDGET`, default [`DEFAULT_CALL_BUDGET`].
     pub call_budget: u32,
     /// `FERRITE_MODEL_MAX_IN_FLIGHT`, default [`DEFAULT_MAX_IN_FLIGHT`].
@@ -153,6 +164,12 @@ impl ModelConfig {
             gemini_base_url: env
                 .get("FERRITE_GEMINI_BASE_URL")
                 .unwrap_or_else(|| DEFAULT_GEMINI_BASE_URL.to_string()),
+            anthropic_base_url: env
+                .get("FERRITE_ANTHROPIC_BASE_URL")
+                .unwrap_or_else(|| DEFAULT_ANTHROPIC_BASE_URL.to_string()),
+            openai_base_url: env
+                .get("FERRITE_OPENAI_BASE_URL")
+                .unwrap_or_else(|| DEFAULT_OPENAI_BASE_URL.to_string()),
             call_budget: parse_or(env, "FERRITE_MODEL_CALL_BUDGET", DEFAULT_CALL_BUDGET)?,
             max_in_flight: parse_or(env, "FERRITE_MODEL_MAX_IN_FLIGHT", DEFAULT_MAX_IN_FLIGHT)?,
             request_timeout: Duration::from_secs(parse_or(

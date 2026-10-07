@@ -43,7 +43,7 @@ use std::time::{Duration, Instant};
 
 use async_trait::async_trait;
 use ferrite_core::Clock;
-use ferrite_model::backends::{GeminiProvider, OllamaProvider};
+use ferrite_model::backends::{AnthropicProvider, GeminiProvider, OllamaProvider, OpenAiProvider};
 use ferrite_model::decorators::{BackoffPolicy, RateLimit};
 use ferrite_model::testing::Sleeper;
 use ferrite_model::{
@@ -464,7 +464,9 @@ pub fn connect(
     if let Some(url) = &args.base_url {
         let var = match kind {
             ProviderKind::Gemini => "FERRITE_GEMINI_BASE_URL",
-            _ => "FERRITE_OLLAMA_BASE_URL",
+            ProviderKind::Anthropic => "FERRITE_ANTHROPIC_BASE_URL",
+            ProviderKind::OpenAi => "FERRITE_OPENAI_BASE_URL",
+            ProviderKind::Ollama | ProviderKind::Mock => "FERRITE_OLLAMA_BASE_URL",
         };
         flags = flags.with(var, url.clone());
     }
@@ -477,6 +479,15 @@ pub fn connect(
         }
         ProviderKind::Ollama => {
             let provider = OllamaProvider::from_config(&model_config, ModelTier::Main, env, store)?;
+            Ok(build_stack(provider, &config, clock, sleeper, &redactor))
+        }
+        ProviderKind::Anthropic => {
+            let provider =
+                AnthropicProvider::from_config(&model_config, ModelTier::Main, env, store)?;
+            Ok(build_stack(provider, &config, clock, sleeper, &redactor))
+        }
+        ProviderKind::OpenAi => {
+            let provider = OpenAiProvider::from_config(&model_config, ModelTier::Main, env, store)?;
             Ok(build_stack(provider, &config, clock, sleeper, &redactor))
         }
         ProviderKind::Mock => unreachable!("handled above"),

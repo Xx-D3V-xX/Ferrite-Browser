@@ -38,6 +38,13 @@ pub enum ProviderKind {
     Gemini,
     /// Ollama: Ollama Cloud by default, a local server with `--base-url`.
     Ollama,
+    /// Anthropic's Claude models (key from `FERRITE_ANTHROPIC_API_KEY` or the
+    /// OS keyring).
+    Anthropic,
+    /// OpenAI, or any server with its chat-completions API via `--base-url`
+    /// (key from `FERRITE_OPENAI_API_KEY`; none needed for a local server).
+    #[serde(rename = "openai")]
+    OpenAi,
     /// A deterministic stand-in with no network: exercises the whole pipeline
     /// offline. Its results say nothing about any real model.
     Mock,
@@ -50,6 +57,8 @@ impl ProviderKind {
         match self {
             Self::Gemini => "gemini",
             Self::Ollama => "ollama",
+            Self::Anthropic => "anthropic",
+            Self::OpenAi => "openai",
             Self::Mock => "mock",
         }
     }
@@ -58,11 +67,13 @@ impl ProviderKind {
         match text {
             "gemini" => Ok(Self::Gemini),
             "ollama" => Ok(Self::Ollama),
+            "anthropic" => Ok(Self::Anthropic),
+            "openai" => Ok(Self::OpenAi),
             "mock" => Ok(Self::Mock),
             other => Err(ArgsError::value(
                 "--provider",
                 other,
-                "gemini, ollama or mock",
+                "gemini, ollama, anthropic, openai or mock",
             )),
         }
     }
@@ -706,6 +717,20 @@ mod tests {
     }
 
     #[test]
+    fn anthropic_and_openai_are_providers_with_stable_names() {
+        for (flag, kind) in [
+            ("anthropic", ProviderKind::Anthropic),
+            ("openai", ProviderKind::OpenAi),
+        ] {
+            let args = parse(&["--provider", flag, "--model", "m"]).expect("parses");
+            assert_eq!(args.provider, Some(kind));
+            assert_eq!(kind.as_str(), flag);
+            assert_eq!(serde_json::to_string(&kind).unwrap(), format!("\"{flag}\""));
+        }
+        assert!(parse(&["--provider", "open_ai"]).is_err());
+    }
+
+    #[test]
     fn a_flag_beats_the_environment_and_the_live_env_beats_the_apps() {
         let env = MapEnv::new()
             .with("FERRITE_LIVE_PROVIDER", "ollama")
@@ -798,7 +823,7 @@ mod tests {
     #[test]
     fn bad_input_is_named_not_swallowed() {
         assert!(matches!(
-            parse(&["--provider", "openai"]),
+            parse(&["--provider", "no-such-provider"]),
             Err(ArgsError::BadValue { .. })
         ));
         assert!(matches!(

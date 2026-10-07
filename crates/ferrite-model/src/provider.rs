@@ -29,6 +29,11 @@ pub enum ProviderId {
     Ollama,
     /// [`GeminiProvider`](crate::backends::GeminiProvider).
     Gemini,
+    /// [`AnthropicProvider`](crate::backends::AnthropicProvider).
+    Anthropic,
+    /// [`OpenAiProvider`](crate::backends::OpenAiProvider) — OpenAI and every
+    /// server that speaks its `/chat/completions` format.
+    OpenAi,
 }
 
 impl ProviderId {
@@ -44,6 +49,8 @@ impl ProviderId {
             Self::Replay => "replay",
             Self::Ollama => "ollama",
             Self::Gemini => "gemini",
+            Self::Anthropic => "anthropic",
+            Self::OpenAi => "openai",
         }
     }
 }
@@ -171,6 +178,8 @@ mod tests {
         assert_eq!(ProviderId::Replay.as_str(), "replay");
         assert_eq!(ProviderId::Ollama.as_str(), "ollama");
         assert_eq!(ProviderId::Gemini.as_str(), "gemini");
+        assert_eq!(ProviderId::Anthropic.as_str(), "anthropic");
+        assert_eq!(ProviderId::OpenAi.as_str(), "openai");
         assert_eq!(ModelTier::Small.as_str(), "small");
         assert_eq!(ModelTier::Main.as_str(), "main");
     }

@@ -2,7 +2,7 @@
 title: Models and settings
 order: 5
 group: Use
-summary: How Ferrite connects to Ollama or Gemini, where your API key and settings are stored, how environment variables interact, what leaves your machine, and how to use a model for the live evaluation.
+summary: How Ferrite connects to Ollama, Gemini, Anthropic or an OpenAI-compatible server, where your API key and settings are stored, how environment variables interact, what leaves your machine, and how to use a model for the live evaluation.
 -->
 <p class="lede">Ferrite does not come with an AI model. You connect your own in Settings. The app keeps the secret part (your key) and the non-secret part (your choices) in different places on purpose. Some words here are new. <a href="{{ROOT}}docs/glossary.html">Words we use</a> explains them.</p>
 
@@ -20,8 +20,11 @@ summary: How Ferrite connects to Ollama or Gemini, where your API key and settin
 <tr><td>Ollama Cloud</td><td>Yes</td><td><code>https://ollama.com</code></td><td><code>ollama.com/settings/keys</code></td></tr>
 <tr><td>Ollama (this computer)</td><td>No, and none is sent</td><td>A server on <code>localhost</code> / <code>127.0.0.1</code>, default <code>http://localhost:11434</code></td><td>n/a</td></tr>
 <tr><td>Google Gemini</td><td>Yes</td><td><code>generativelanguage.googleapis.com</code></td><td><code>aistudio.google.com/apikey</code></td></tr>
+<tr><td>Anthropic Claude</td><td>Yes</td><td><code>https://api.anthropic.com</code></td><td><code>console.anthropic.com/settings/keys</code></td></tr>
+<tr><td>OpenAI or compatible</td><td>Yes, unless the server is on this computer</td><td>The server address you type, default <code>https://api.openai.com/v1</code>. OpenRouter, Groq, vLLM, LM Studio and llama.cpp's server work too.</td><td>From that provider</td></tr>
 </tbody></table></div>
-<p>Only Ollama and Gemini exist. An OpenAI-compatible or Anthropic backend would be a new provider in the model layer. Nobody has written it. The “local” choice must be on this computer. This is on purpose. A bearer token is a secret that is sent with each request. Ferrite must never send one toward anything that is not the cloud service. Ferrite matches the <em>whole host</em>. So <code>localhost.evil.example</code> is not local. You can still use a remote Ollama server. Choose Ollama Cloud, and set <code>FERRITE_OLLAMA_BASE_URL</code> to that server. Your key is then sent to that server. So do this only for a server you trust.</p>
+<p><strong>OpenAI or compatible</strong> takes the server's address with its version, like <code>https://openrouter.ai/api/v1</code> or <code>http://localhost:1234/v1</code>. Servers differ in which settings they accept. If a server refuses one by name (for example <code>temperature</code> or <code>max_completion_tokens</code>), Ferrite sends the request again without it and remembers that for later calls. <strong>Anthropic</strong> is sent no temperature, because current Claude models refuse one, and is given room of at least 1,024 output tokens, because a model that thinks spends some of them thinking. A refusal from either is treated like an empty answer, so the agent predicts nothing and asks you.</p>
+<p>The Ollama “local” choice must be on this computer. This is on purpose. A bearer token is a secret that is sent with each request. Ferrite must never send one toward anything that is not the cloud service. Ferrite matches the <em>whole host</em>. So <code>localhost.evil.example</code> is not local. You can still use a remote Ollama server. Choose Ollama Cloud, and set <code>FERRITE_OLLAMA_BASE_URL</code> to that server. Your key is then sent to that server. So do this only for a server you trust.</p>
 
 <h2>The two models</h2>
 <dl class="defs">
@@ -35,7 +38,7 @@ summary: How Ferrite connects to Ollama or Gemini, where your API key and settin
 <thead><tr><th>What</th><th>Where</th><th>Notes</th></tr></thead>
 <tbody>
 <tr><td>Provider, model names, local server address</td><td><code>settings.json</code> in the data directory</td><td>Not secret. The data directory is <code>$FERRITE_HOME</code> if you set it. Otherwise it is <code>~/.local/share/ferrite</code>. The file is written atomically. That means a crash cannot leave half a file.</td></tr>
-<tr><td>API keys</td><td>Your operating system's credential store, service <code>ferrite</code></td><td>The account names are <code>OLLAMA_API_KEY</code> and <code>FERRITE_GEMINI_API_KEY</code>. A key is never in a file or a log.</td></tr>
+<tr><td>API keys</td><td>Your operating system's credential store, service <code>ferrite</code></td><td>The account names are <code>OLLAMA_API_KEY</code>, <code>FERRITE_GEMINI_API_KEY</code>, <code>FERRITE_ANTHROPIC_API_KEY</code> and <code>FERRITE_OPENAI_API_KEY</code>. A key is never in a file or a log.</td></tr>
 <tr><td>Model-activity trace</td><td><code>logs/model-activity.jsonl</code> in the data directory</td><td>Local only. It holds prompts and answers. See below.</td></tr>
 <tr><td>Panel sizes, chats, bookmarks, browser profile</td><td><code>ui-layout.json</code>, <code>chats/</code>, <code>bookmarks.json</code> and <code>profile/</code> in the data directory</td><td>The profile (cookies, storage) is written on a clean shutdown.</td></tr>
 <tr><td>The app's log file</td><td>A separate log folder, not the data directory</td><td>See <a href="{{ROOT}}docs/debugging.html#the-log-file">Debugging and logs</a>.</td></tr>
@@ -68,8 +71,12 @@ export FERRITE_GEMINI_API_KEY=&lt;your key&gt;</code></pre>
 <tr><td><code>FERRITE_MODEL_MAIN</code></td><td>The agent model's name</td><td>none (required)</td></tr>
 <tr><td><code>OLLAMA_API_KEY</code></td><td>Ollama Cloud key (overrides the keyring)</td><td>none</td></tr>
 <tr><td><code>FERRITE_GEMINI_API_KEY</code></td><td>Gemini key (overrides the keyring)</td><td>none</td></tr>
+<tr><td><code>FERRITE_ANTHROPIC_API_KEY</code></td><td>Anthropic key (overrides the keyring)</td><td>none</td></tr>
+<tr><td><code>FERRITE_OPENAI_API_KEY</code></td><td>OpenAI-compatible key (overrides the keyring)</td><td>none</td></tr>
 <tr><td><code>FERRITE_OLLAMA_BASE_URL</code></td><td>Ollama endpoint</td><td><code>https://ollama.com</code></td></tr>
 <tr><td><code>FERRITE_GEMINI_BASE_URL</code></td><td>Gemini endpoint</td><td><code>https://generativelanguage.googleapis.com/v1beta/models</code></td></tr>
+<tr><td><code>FERRITE_ANTHROPIC_BASE_URL</code></td><td>Anthropic endpoint (no <code>/v1</code>)</td><td><code>https://api.anthropic.com</code></td></tr>
+<tr><td><code>FERRITE_OPENAI_BASE_URL</code></td><td>OpenAI-compatible endpoint (with its version)</td><td><code>https://api.openai.com/v1</code></td></tr>
 <tr><td><code>FERRITE_MODEL_CALL_BUDGET</code></td><td>Most model calls in a run</td><td>500</td></tr>
 <tr><td><code>FERRITE_MODEL_MAX_IN_FLIGHT</code></td><td>Model requests at the same time</td><td>2</td></tr>
 <tr><td><code>FERRITE_MODEL_TIMEOUT_SECS</code></td><td>Timeout for each request</td><td>60</td></tr>
@@ -106,7 +113,7 @@ export FERRITE_GEMINI_API_KEY=&lt;your key&gt;</code></pre>
 <p>If there is no model, a bad key, a timeout or a malformed answer, the defense never gets weaker. The prediction layer of the fingerprint fails to <em>empty</em>. That sends more actions to consent. The agent loop fails closed. That means it refuses to act without a model. If you save a configuration that cannot be built, Ferrite refuses it and gives the reason. The previous working connection stays as it was.</p>
 
 <h2>Using a model for the live evaluation</h2>
-<p>The live runner uses the same model layer and the same keys. It reads <code>OLLAMA_API_KEY</code> or <code>FERRITE_GEMINI_API_KEY</code>, or the OS keyring. You never pass a key as a flag. A model tag has no default. You pass <code>--model TAG</code> for both roles, or <code>--small-model</code> and <code>--main-model</code>. A local Ollama needs no key. Add <code>--base-url http://localhost:11434</code> for it.</p>
+<p>The live runner uses the same model layer and the same keys. It reads <code>OLLAMA_API_KEY</code>, <code>FERRITE_GEMINI_API_KEY</code>, <code>FERRITE_ANTHROPIC_API_KEY</code> or <code>FERRITE_OPENAI_API_KEY</code>, or the OS keyring. <code>--provider</code> is <code>ollama</code>, <code>gemini</code>, <code>anthropic</code>, <code>openai</code> or <code>mock</code>; <code>--base-url</code> points <code>openai</code> at another compatible server. You never pass a key as a flag. A model tag has no default. You pass <code>--model TAG</code> for both roles, or <code>--small-model</code> and <code>--main-model</code>. A local Ollama needs no key. Add <code>--base-url http://localhost:11434</code> for it.</p>
 <p>This is a command like the one the owner used for the live run with ollama gemma4:31b. The owner ran it in batches of 100 cases. The first batch used the default <code>--max-calls</code> of 100, which stopped after 18 cases. The value 800 below is a suggestion for finishing a batch of 100 cases. It is not a recorded value:</p>
 <pre><code>$ just live-eval --provider ollama --model gemma4:31b --corpus all --seed 1 --batch-size 100 --max-calls 800 --pause-ms 2000</code></pre>
 <div class="callout note">
