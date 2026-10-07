@@ -80,7 +80,7 @@ pub use config::{EnvSource, MapEnv, ModelConfig, SystemEnv};
 pub use decorators::{Budget, Cache, Throttle, ThrottleConfig, Trace};
 pub use error::ModelError;
 pub use laya_governor::{Gate, LaneGovernor, Paused};
-pub use provider::{ModelProvider, ModelTier, ProviderCapabilities, ProviderId};
+pub use provider::{ModelProvider, ModelTier, ProviderCapabilities, ProviderId, TextSink};
 pub use request::{CompletionRequest, Message, Role, SamplingOptions};
 pub use response::{CompletionResponse, Provenance, TokenUsage};
 pub use secret::{MemoryVault, OsKeyring, SecretStore, SecretVault, Token};

@@ -30,3 +30,4 @@ pub mod chat;
 pub mod context;
 pub mod decider;
 pub mod effects;
+pub mod streaming;

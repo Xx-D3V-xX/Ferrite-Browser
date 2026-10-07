@@ -33,7 +33,7 @@ use async_trait::async_trait;
 use crate::config::{ModelConfig, is_local_url};
 use crate::error::ModelError;
 use crate::guard::{self, RawCompletion, bounded};
-use crate::provider::{ModelProvider, ModelTier, ProviderCapabilities, ProviderId};
+use crate::provider::{ModelProvider, ModelTier, ProviderCapabilities, ProviderId, TextSink};
 use crate::request::CompletionRequest;
 use crate::response::{CompletionResponse, TokenUsage};
 use crate::secret::{SecretStore, Token};
@@ -48,6 +48,7 @@ const OLD_MAX_TOKENS: u8 = 1;
 const NO_TEMPERATURE: u8 = 2;
 const NO_SEED: u8 = 4;
 const NO_SCHEMA: u8 = 8;
+const NO_STREAM_OPTIONS: u8 = 16;
 
 /// Builds a `/chat/completions` body, leaving out what `refused` names.
 #[must_use]
@@ -99,6 +100,7 @@ fn refused_knob(body_excerpt: &str, refused: u8) -> Option<u8> {
         ("seed", NO_SEED),
         ("response_format", NO_SCHEMA),
         ("json_schema", NO_SCHEMA),
+        ("stream_options", NO_STREAM_OPTIONS),
     ]
     .into_iter()
     .find(|(name, _)| text.contains(name))
@@ -146,6 +148,46 @@ pub(crate) fn parse_chat_response(body: &[u8]) -> Result<RawCompletion, ModelErr
             eval_count: count("completion_tokens"),
         },
     })
+}
+
+/// Adds one line of a streamed chat completion (`"stream": true`) to the
+/// answer so far: each `data:` event carries a `choices[0].delta.content`
+/// piece, and, when asked for with `stream_options`, a last event carries
+/// `usage`. Returns whether the text grew.
+pub(crate) fn absorb_stream_line(
+    answer: &mut RawCompletion,
+    line: &str,
+) -> Result<bool, ModelError> {
+    let Some(data) = http::sse_data(line) else {
+        return Ok(false);
+    };
+    let event: serde_json::Value =
+        serde_json::from_str(data).map_err(|e| ModelError::MalformedJson {
+            provider: ProviderId::OpenAi,
+            detail: format!("{e} (event: {})", bounded(data)),
+        })?;
+    if event.get("error").is_some() {
+        return Err(http::stream_error(ProviderId::OpenAi, &event));
+    }
+    if let Some(usage) = event.get("usage").filter(|u| u.is_object()) {
+        let n = |field: &str| {
+            usage
+                .get(field)
+                .and_then(serde_json::Value::as_u64)
+                .and_then(|v| u32::try_from(v).ok())
+                .unwrap_or(0)
+        };
+        answer.usage = TokenUsage {
+            prompt_eval_count: n("prompt_tokens"),
+            eval_count: n("completion_tokens"),
+        };
+    }
+    let piece = event
+        .pointer("/choices/0/delta/content")
+        .and_then(serde_json::Value::as_str)
+        .unwrap_or("");
+    answer.content.push_str(piece);
+    Ok(!piece.is_empty())
 }
 
 /// Parses `GET {base}/models`: every model id, sorted.
@@ -279,21 +321,74 @@ impl ModelProvider for OpenAiProvider {
     }
 
     async fn complete(&self, req: CompletionRequest) -> Result<CompletionResponse, ModelError> {
+        self.chat(&req, None).await
+    }
+
+    async fn complete_streaming(
+        &self,
+        req: CompletionRequest,
+        sink: &TextSink<'_>,
+    ) -> Result<CompletionResponse, ModelError> {
+        self.chat(&req, Some(sink)).await
+    }
+
+    fn capabilities(&self) -> ProviderCapabilities {
+        ProviderCapabilities {
+            supports_json_schema: self.refused.load(Ordering::Relaxed) & NO_SCHEMA == 0,
+            context_window_tokens: 32_768,
+            tier: self.model_tier,
+            reaches_network: true,
+        }
+    }
+}
+
+impl OpenAiProvider {
+    /// One chat completion, streamed to `sink` when there is one, giving up a
+    /// refused knob and asking again as the module docs describe.
+    async fn chat(
+        &self,
+        req: &CompletionRequest,
+        sink: Option<&TextSink<'_>>,
+    ) -> Result<CompletionResponse, ModelError> {
         loop {
             let refused = self.refused.load(Ordering::Relaxed);
+            let mut body = build_chat_body(req, refused);
+            if sink.is_some() {
+                body["stream"] = serde_json::json!(true);
+                if refused & NO_STREAM_OPTIONS == 0 {
+                    body["stream_options"] = serde_json::json!({ "include_usage": true });
+                }
+            }
             let response = self
                 .request(reqwest::Method::POST, "/chat/completions")
-                .json(&build_chat_body(&req, refused))
+                .json(&body)
                 .send()
                 .await
                 .map_err(|e| Self::transport(&e))?;
             match http::classify(ProviderId::OpenAi, response, self.max_response_bytes).await {
                 Ok(response) => {
-                    let body =
-                        http::read_bounded(ProviderId::OpenAi, response, self.max_response_bytes)
+                    let raw = match sink {
+                        Some(sink) => {
+                            http::stream_text(
+                                ProviderId::OpenAi,
+                                response,
+                                self.max_response_bytes,
+                                sink,
+                                absorb_stream_line,
+                            )
+                            .await?
+                        }
+                        None => {
+                            let body = http::read_bounded(
+                                ProviderId::OpenAi,
+                                response,
+                                self.max_response_bytes,
+                            )
                             .await?;
-                    let raw = parse_chat_response(&body)?;
-                    return guard::finalize(ProviderId::OpenAi, &req, raw, self.max_response_bytes);
+                            parse_chat_response(&body)?
+                        }
+                    };
+                    return guard::finalize(ProviderId::OpenAi, req, raw, self.max_response_bytes);
                 }
                 Err(ModelError::ClientError {
                     status: 400,
@@ -313,15 +408,6 @@ impl ModelProvider for OpenAiProvider {
                 },
                 Err(other) => return Err(other),
             }
-        }
-    }
-
-    fn capabilities(&self) -> ProviderCapabilities {
-        ProviderCapabilities {
-            supports_json_schema: self.refused.load(Ordering::Relaxed) & NO_SCHEMA == 0,
-            context_window_tokens: 32_768,
-            tier: self.model_tier,
-            reaches_network: true,
         }
     }
 }
@@ -525,6 +611,76 @@ mod tests {
         assert!(
             !seen[0].to_lowercase().contains("authorization"),
             "no key, no header"
+        );
+    }
+
+    /// Collects every text the sink was shown.
+    fn recorder() -> (
+        std::sync::Arc<std::sync::Mutex<Vec<String>>>,
+        impl Fn(&str) + Send + Sync,
+    ) {
+        let seen = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let log = std::sync::Arc::clone(&seen);
+        (seen, move |t: &str| log.lock().unwrap().push(t.to_string()))
+    }
+
+    #[tokio::test]
+    async fn a_streamed_completion_reads_deltas_and_the_last_usage_event() {
+        use super::super::fake_server::{body_of, scripted};
+        let events = concat!(
+            "data: {\"choices\":[{\"index\":0,\"delta\":{\"role\":\"assistant\",\"content\":\"\"}}]}\n\n",
+            "data: {\"choices\":[{\"index\":0,\"delta\":{\"content\":\"Hi \"}}]}\n\n",
+            "data: {\"choices\":[{\"index\":0,\"delta\":{\"content\":\"there\"},\"finish_reason\":\"stop\"}]}\n\n",
+            "data: {\"choices\":[],\"usage\":{\"prompt_tokens\":8,\"completion_tokens\":2}}\n\n",
+            "data: [DONE]\n\n",
+        );
+        let server = scripted(vec![(200, events.to_string())]).await;
+        let provider = OpenAiProvider::new(&server.url, None, ModelTier::Main, 1 << 20);
+        let (seen, sink) = recorder();
+        let response = provider
+            .complete_streaming(req(), &sink)
+            .await
+            .expect("streams");
+        assert_eq!(response.content, "Hi there");
+        assert_eq!(response.usage.prompt_eval_count, 8);
+        assert_eq!(
+            *seen.lock().unwrap(),
+            vec!["Hi ".to_string(), "Hi there".to_string()]
+        );
+        let body = body_of(&server.seen.lock().unwrap()[0]);
+        assert_eq!(body["stream"], true);
+        assert_eq!(body["stream_options"]["include_usage"], true);
+    }
+
+    #[tokio::test]
+    async fn a_server_that_refuses_stream_options_is_asked_again_without_them() {
+        use super::super::fake_server::{body_of, scripted};
+        let server = scripted(vec![
+            (
+                400,
+                r#"{"error":{"message":"Unrecognized request argument supplied: stream_options"}}"#
+                    .into(),
+            ),
+            (
+                200,
+                "data: {\"choices\":[{\"delta\":{\"content\":\"ok\"}}]}\n\ndata: [DONE]\n\n".into(),
+            ),
+        ])
+        .await;
+        let provider = OpenAiProvider::new(&server.url, None, ModelTier::Main, 1 << 20);
+        let (_, sink) = recorder();
+        assert_eq!(
+            provider
+                .complete_streaming(req(), &sink)
+                .await
+                .expect("ok")
+                .content,
+            "ok"
+        );
+        assert!(
+            body_of(&server.seen.lock().unwrap()[1])
+                .get("stream_options")
+                .is_none()
         );
     }
 }

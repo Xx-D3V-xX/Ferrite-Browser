@@ -786,6 +786,11 @@ fn thread_body(state: &FerriteBrowser) -> Element<'_, FerriteBrowserMessage> {
         if let Some(section) = agent_section(state, ti, turn, live) {
             items.push(section);
         }
+        if live {
+            if let Some(reply) = streaming_reply(state) {
+                items.push(reply);
+            }
+        }
     }
 
     scrollable(column(items).width(Length::Fill).padding(Padding {
@@ -1095,6 +1100,34 @@ fn live_activity(state: &FerriteBrowser, ti: usize) -> Element<'_, FerriteBrowse
     }
     rows.push(working_indicator(state));
     activity_frame(column(rows).spacing(2).width(Length::Fill), palette)
+}
+
+/// The reply the model is writing right now, laid out as the finished answer
+/// will be, with a caret where the next words appear. Display only.
+fn streaming_reply(state: &FerriteBrowser) -> Option<Element<'_, FerriteBrowserMessage>> {
+    let written = state.agent_stream.as_deref()?;
+    let palette = state.palette();
+    let caret = text_caret(state.progress_offset);
+    let shown = format!("{written}{caret}");
+    Some(answer_frame(
+        column![
+            answer_body(&shown, palette, 1.0),
+            text("Writing…").size(11).color(palette.text_dim),
+        ]
+        .spacing(6),
+        palette,
+        1.0,
+        false,
+    ))
+}
+
+/// A block caret that blinks with the panel's own animation clock.
+fn text_caret(phase: f32) -> &'static str {
+    if (phase * 2.0).fract() < 0.5 {
+        " ▍"
+    } else {
+        "  "
+    }
 }
 
 /// "Working" with the existing animated dots.

@@ -37,7 +37,7 @@ use rand::{Rng, SeedableRng, rngs::StdRng};
 use tokio::sync::Semaphore;
 
 use crate::error::ModelError;
-use crate::provider::{ModelProvider, ProviderCapabilities, ProviderId};
+use crate::provider::{ModelProvider, ProviderCapabilities, ProviderId, TextSink};
 use crate::request::CompletionRequest;
 use crate::response::CompletionResponse;
 use crate::testing::Sleeper;
@@ -245,27 +245,33 @@ impl<P: ModelProvider> Throttle<P> {
         }
     }
 
-    /// One attempt, bounded by the per-request timeout.
-    async fn attempt(&self, req: CompletionRequest) -> Result<CompletionResponse, ModelError> {
+    /// One attempt of `call`, bounded by the per-request timeout.
+    async fn attempt<F>(&self, call: F) -> Result<CompletionResponse, ModelError>
+    where
+        F: std::future::Future<Output = Result<CompletionResponse, ModelError>>,
+    {
         let provider = self.inner.id();
         let timeout = self.config.timeout;
         tokio::select! {
             // Biased so a provider that answered in the same poll as the
             // timeout elapsed is reported as a success, not a timeout.
             biased;
-            result = self.inner.complete(req) => result,
+            result = call => result,
             () = self.sleeper.sleep(timeout) => Err(ModelError::Timeout { provider, after: timeout }),
         }
     }
-}
 
-#[async_trait]
-impl<P: ModelProvider> ModelProvider for Throttle<P> {
-    fn id(&self) -> ProviderId {
-        self.inner.id()
-    }
-
-    async fn complete(&self, req: CompletionRequest) -> Result<CompletionResponse, ModelError> {
+    /// Admission, the token bucket, the timeout and retries with backoff,
+    /// around whatever `call` makes of the request.
+    async fn run<F, Fut>(
+        &self,
+        req: &CompletionRequest,
+        call: F,
+    ) -> Result<CompletionResponse, ModelError>
+    where
+        F: Fn(CompletionRequest) -> Fut,
+        Fut: std::future::Future<Output = Result<CompletionResponse, ModelError>>,
+    {
         let mut attempt = 0;
         loop {
             let outcome = {
@@ -275,7 +281,7 @@ impl<P: ModelProvider> ModelProvider for Throttle<P> {
                     .await
                     .expect("the semaphore is owned by this Throttle and is never closed");
                 self.await_token().await;
-                self.attempt(req.clone()).await
+                self.attempt(call(req.clone())).await
             };
 
             match outcome {
@@ -290,6 +296,28 @@ impl<P: ModelProvider> ModelProvider for Throttle<P> {
                 Err(e) => return Err(e),
             }
         }
+    }
+}
+
+#[async_trait]
+impl<P: ModelProvider> ModelProvider for Throttle<P> {
+    fn id(&self) -> ProviderId {
+        self.inner.id()
+    }
+
+    async fn complete(&self, req: CompletionRequest) -> Result<CompletionResponse, ModelError> {
+        self.run(&req, |r| self.inner.complete(r)).await
+    }
+
+    async fn complete_streaming(
+        &self,
+        req: CompletionRequest,
+        sink: &TextSink<'_>,
+    ) -> Result<CompletionResponse, ModelError> {
+        // A retry starts the answer over; the sink is told the whole text so
+        // far each time, so it simply shows the new attempt's.
+        self.run(&req, |r| self.inner.complete_streaming(r, sink))
+            .await
     }
 
     fn capabilities(&self) -> ProviderCapabilities {
@@ -729,5 +757,24 @@ mod tests {
         let throttle = ThrottleConfig::from_model_config(&config);
         assert_eq!(throttle.max_in_flight, 3);
         assert_eq!(throttle.timeout, Duration::from_secs(9));
+    }
+
+    #[tokio::test]
+    async fn a_streamed_call_is_retried_and_shows_only_what_answered() {
+        let inner = Arc::new(
+            MockProvider::new()
+                .push_error(rate_limited())
+                .push_content("second try"),
+        );
+        let (throttle, _) = throttle(Arc::clone(&inner), ThrottleConfig::default());
+        let shown = std::sync::Mutex::new(Vec::new());
+        let sink = |t: &str| shown.lock().unwrap().push(t.to_string());
+        let response = throttle
+            .complete_streaming(req(), &sink)
+            .await
+            .expect("retried");
+        assert_eq!(response.content, "second try");
+        assert_eq!(inner.call_count(), 2);
+        assert_eq!(*shown.lock().unwrap(), vec!["second try"]);
     }
 }

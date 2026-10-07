@@ -124,6 +124,11 @@ pub struct ProviderCapabilities {
     pub reaches_network: bool,
 }
 
+/// Where [`ModelProvider::complete_streaming`] reports progress: called with
+/// the **whole text so far** each time more arrives (not just the new part),
+/// so a retry that starts the answer over simply reports a shorter text.
+pub type TextSink<'a> = dyn Fn(&str) + Send + Sync + 'a;
+
 /// A text/structured-JSON completion backend.
 ///
 /// Deliberately *narrow*: one request in, one response out. Tool/function
@@ -146,6 +151,23 @@ pub trait ModelProvider: Send + Sync {
     /// on, never a panic and never an unbounded allocation.
     async fn complete(&self, req: CompletionRequest) -> Result<CompletionResponse, ModelError>;
 
+    /// [`Self::complete`], reporting the answer to `sink` while it is being
+    /// written, for a person watching. The result is the same complete,
+    /// guarded response `complete` returns: what is shown on the way is
+    /// display only, and nothing may act on it.
+    ///
+    /// The default reports the finished answer once. A backend whose wire
+    /// format can stream overrides it.
+    async fn complete_streaming(
+        &self,
+        req: CompletionRequest,
+        sink: &TextSink<'_>,
+    ) -> Result<CompletionResponse, ModelError> {
+        let response = self.complete(req).await?;
+        sink(&response.content);
+        Ok(response)
+    }
+
     /// What this backend supports.
     fn capabilities(&self) -> ProviderCapabilities;
 }
@@ -158,6 +180,14 @@ impl<P: ModelProvider + ?Sized> ModelProvider for std::sync::Arc<P> {
 
     async fn complete(&self, req: CompletionRequest) -> Result<CompletionResponse, ModelError> {
         (**self).complete(req).await
+    }
+
+    async fn complete_streaming(
+        &self,
+        req: CompletionRequest,
+        sink: &TextSink<'_>,
+    ) -> Result<CompletionResponse, ModelError> {
+        (**self).complete_streaming(req, sink).await
     }
 
     fn capabilities(&self) -> ProviderCapabilities {

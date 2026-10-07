@@ -39,7 +39,7 @@ use async_trait::async_trait;
 use crate::config::ModelConfig;
 use crate::error::ModelError;
 use crate::guard::{self, RawCompletion, bounded};
-use crate::provider::{ModelProvider, ModelTier, ProviderCapabilities, ProviderId};
+use crate::provider::{ModelProvider, ModelTier, ProviderCapabilities, ProviderId, TextSink};
 use crate::request::{CompletionRequest, Role};
 use crate::response::{CompletionResponse, TokenUsage};
 use crate::secret::{SecretStore, Token};
@@ -132,6 +132,60 @@ pub(crate) fn parse_messages_response(body: &[u8]) -> Result<RawCompletion, Mode
             eval_count: count("output_tokens"),
         },
     })
+}
+
+/// Adds one line of a streamed Messages answer (`"stream": true`) to the
+/// answer so far. Text arrives as `content_block_delta` events with a
+/// `text_delta`; thinking deltas are not the answer and are skipped; the
+/// prompt's token count comes in `message_start` and the answer's in
+/// `message_delta`. Returns whether the text grew.
+pub(crate) fn absorb_stream_line(
+    answer: &mut RawCompletion,
+    line: &str,
+) -> Result<bool, ModelError> {
+    let Some(data) = http::sse_data(line) else {
+        return Ok(false);
+    };
+    let event: serde_json::Value =
+        serde_json::from_str(data).map_err(|e| ModelError::MalformedJson {
+            provider: ProviderId::Anthropic,
+            detail: format!("{e} (event: {})", bounded(data)),
+        })?;
+    let number = |pointer: &str| {
+        event
+            .pointer(pointer)
+            .and_then(serde_json::Value::as_u64)
+            .and_then(|v| u32::try_from(v).ok())
+    };
+    match event.get("type").and_then(serde_json::Value::as_str) {
+        Some("error") => Err(http::stream_error(ProviderId::Anthropic, &event)),
+        Some("message_start") => {
+            if let Some(n) = number("/message/usage/input_tokens") {
+                answer.usage.prompt_eval_count = n;
+            }
+            Ok(false)
+        }
+        Some("message_delta") => {
+            if let Some(n) = number("/usage/output_tokens") {
+                answer.usage.eval_count = n;
+            }
+            Ok(false)
+        }
+        Some("content_block_delta")
+            if event
+                .pointer("/delta/type")
+                .and_then(serde_json::Value::as_str)
+                == Some("text_delta") =>
+        {
+            let piece = event
+                .pointer("/delta/text")
+                .and_then(serde_json::Value::as_str)
+                .unwrap_or("");
+            answer.content.push_str(piece);
+            Ok(!piece.is_empty())
+        }
+        _ => Ok(false),
+    }
 }
 
 /// Parses `GET /v1/models`: every model id, sorted, and the id to continue
@@ -290,6 +344,32 @@ impl ModelProvider for AnthropicProvider {
         let body =
             http::read_bounded(ProviderId::Anthropic, response, self.max_response_bytes).await?;
         let raw = parse_messages_response(&body)?;
+        guard::finalize(ProviderId::Anthropic, &req, raw, self.max_response_bytes)
+    }
+
+    async fn complete_streaming(
+        &self,
+        req: CompletionRequest,
+        sink: &TextSink<'_>,
+    ) -> Result<CompletionResponse, ModelError> {
+        let mut body = build_messages_body(&req);
+        body["stream"] = serde_json::json!(true);
+        let response = self
+            .request(reqwest::Method::POST, "/v1/messages")
+            .json(&body)
+            .send()
+            .await
+            .map_err(|e| Self::transport(&e))?;
+        let response =
+            http::classify(ProviderId::Anthropic, response, self.max_response_bytes).await?;
+        let raw = http::stream_text(
+            ProviderId::Anthropic,
+            response,
+            self.max_response_bytes,
+            sink,
+            absorb_stream_line,
+        )
+        .await?;
         guard::finalize(ProviderId::Anthropic, &req, raw, self.max_response_bytes)
     }
 
@@ -515,5 +595,69 @@ mod tests {
         );
         let seen = server.seen.lock().unwrap();
         assert!(seen[1].contains("after_id=m-b"), "{}", seen[1]);
+    }
+
+    /// Collects every text the sink was shown.
+    fn recorder() -> (
+        std::sync::Arc<std::sync::Mutex<Vec<String>>>,
+        impl Fn(&str) + Send + Sync,
+    ) {
+        let seen = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let log = std::sync::Arc::clone(&seen);
+        (seen, move |t: &str| log.lock().unwrap().push(t.to_string()))
+    }
+
+    #[tokio::test]
+    async fn a_streamed_message_skips_thinking_and_keeps_the_token_counts() {
+        use super::super::fake_server::{body_of, scripted};
+        let events = concat!(
+            "event: message_start\n",
+            "data: {\"type\":\"message_start\",\"message\":{\"id\":\"m\",\"usage\":{\"input_tokens\":21,\"output_tokens\":1}}}\n\n",
+            "event: content_block_delta\n",
+            "data: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"thinking_delta\",\"thinking\":\"\"}}\n\n",
+            "event: content_block_delta\n",
+            "data: {\"type\":\"content_block_delta\",\"index\":1,\"delta\":{\"type\":\"text_delta\",\"text\":\"The price \"}}\n\n",
+            "event: content_block_delta\n",
+            "data: {\"type\":\"content_block_delta\",\"index\":1,\"delta\":{\"type\":\"text_delta\",\"text\":\"is 4 EUR.\"}}\n\n",
+            "event: message_delta\n",
+            "data: {\"type\":\"message_delta\",\"delta\":{\"stop_reason\":\"end_turn\"},\"usage\":{\"output_tokens\":9}}\n\n",
+            "event: message_stop\n",
+            "data: {\"type\":\"message_stop\"}\n\n",
+        );
+        let server = scripted(vec![(200, events.to_string())]).await;
+        let provider =
+            AnthropicProvider::new(&server.url, Token::new("k"), ModelTier::Main, 1 << 20);
+        let (seen, sink) = recorder();
+        let response = provider
+            .complete_streaming(req(), &sink)
+            .await
+            .expect("streams");
+        assert_eq!(response.content, "The price is 4 EUR.");
+        assert_eq!(response.usage.prompt_eval_count, 21);
+        assert_eq!(response.usage.eval_count, 9);
+        assert_eq!(
+            *seen.lock().unwrap(),
+            vec!["The price ".to_string(), "The price is 4 EUR.".to_string()]
+        );
+        assert_eq!(body_of(&server.seen.lock().unwrap()[0])["stream"], true);
+    }
+
+    #[tokio::test]
+    async fn an_error_event_mid_stream_is_a_typed_error() {
+        use super::super::fake_server::scripted;
+        let events = "event: error\ndata: {\"type\":\"error\",\"error\":{\"type\":\"overloaded_error\",\"message\":\"Overloaded\"}}\n\n";
+        let server = scripted(vec![(200, events.to_string())]).await;
+        let provider =
+            AnthropicProvider::new(&server.url, Token::new("k"), ModelTier::Main, 1 << 20);
+        let (_, sink) = recorder();
+        let err = provider
+            .complete_streaming(req(), &sink)
+            .await
+            .expect_err("error");
+        assert!(matches!(err, ModelError::ServerError { .. }), "{err:?}");
+        assert!(
+            err.is_retryable(),
+            "an overloaded stream is worth another try"
+        );
     }
 }

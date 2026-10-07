@@ -32,7 +32,7 @@ use async_trait::async_trait;
 use crate::config::ModelConfig;
 use crate::error::ModelError;
 use crate::guard::{self, RawCompletion, bounded};
-use crate::provider::{ModelProvider, ModelTier, ProviderCapabilities, ProviderId};
+use crate::provider::{ModelProvider, ModelTier, ProviderCapabilities, ProviderId, TextSink};
 use crate::request::{CompletionRequest, Role};
 use crate::response::{CompletionResponse, TokenUsage};
 use crate::secret::{SecretStore, Token};
@@ -128,6 +128,44 @@ pub(crate) fn parse_generate_response(body: &[u8]) -> Result<RawCompletion, Mode
             eval_count: count(&json, "candidatesTokenCount"),
         },
     })
+}
+
+/// Adds one line of a `streamGenerateContent?alt=sse` answer to the answer
+/// so far: each event carries the next text parts and the token counts so
+/// far. Returns whether the text grew.
+pub(crate) fn absorb_stream_line(
+    answer: &mut RawCompletion,
+    line: &str,
+) -> Result<bool, ModelError> {
+    let Some(data) = http::sse_data(line) else {
+        return Ok(false);
+    };
+    let json: serde_json::Value =
+        serde_json::from_str(data).map_err(|e| ModelError::MalformedJson {
+            provider: ProviderId::Gemini,
+            detail: format!("{e} (event: {})", bounded(data)),
+        })?;
+    if json.get("error").is_some() {
+        return Err(http::stream_error(ProviderId::Gemini, &json));
+    }
+    if json.get("usageMetadata").is_some() {
+        answer.usage = TokenUsage {
+            prompt_eval_count: count(&json, "promptTokenCount"),
+            eval_count: count(&json, "candidatesTokenCount"),
+        };
+    }
+    let piece: String = json
+        .pointer("/candidates/0/content/parts")
+        .and_then(serde_json::Value::as_array)
+        .map(|parts| {
+            parts
+                .iter()
+                .filter_map(|p| p.get("text").and_then(serde_json::Value::as_str))
+                .collect()
+        })
+        .unwrap_or_default();
+    answer.content.push_str(&piece);
+    Ok(!piece.is_empty())
 }
 
 fn count(json: &serde_json::Value, field: &str) -> u32 {
@@ -285,6 +323,36 @@ impl ModelProvider for GeminiProvider {
         let body =
             http::read_bounded(ProviderId::Gemini, response, self.max_response_bytes).await?;
         let raw = parse_generate_response(&body)?;
+        guard::finalize(ProviderId::Gemini, &req, raw, self.max_response_bytes)
+    }
+
+    async fn complete_streaming(
+        &self,
+        req: CompletionRequest,
+        sink: &TextSink<'_>,
+    ) -> Result<CompletionResponse, ModelError> {
+        let url = format!("{}/{}:streamGenerateContent", self.base_url, req.model_tag);
+        let response = self
+            .client
+            .post(&url)
+            .query(&[("key", self.api_key.expose()), ("alt", "sse")])
+            .json(&build_generate_body(&req))
+            .send()
+            .await
+            .map_err(|e| ModelError::Transport {
+                provider: ProviderId::Gemini,
+                detail: bounded(&redact(&e.to_string(), self.api_key.expose())),
+            })?;
+        let response =
+            http::classify(ProviderId::Gemini, response, self.max_response_bytes).await?;
+        let raw = http::stream_text(
+            ProviderId::Gemini,
+            response,
+            self.max_response_bytes,
+            sink,
+            absorb_stream_line,
+        )
+        .await?;
         guard::finalize(ProviderId::Gemini, &req, raw, self.max_response_bytes)
     }
 
@@ -565,5 +633,42 @@ mod tests {
         let err = parse_models_response(br#"{"data":[]}"#).expect_err("wrong shape");
         assert!(matches!(err, ModelError::MalformedJson { .. }), "{err:?}");
         assert!(parse_models_response(b"not json").is_err());
+    }
+
+    /// Collects every text the sink was shown.
+    fn recorder() -> (
+        std::sync::Arc<std::sync::Mutex<Vec<String>>>,
+        impl Fn(&str) + Send + Sync,
+    ) {
+        let seen = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let log = std::sync::Arc::clone(&seen);
+        (seen, move |t: &str| log.lock().unwrap().push(t.to_string()))
+    }
+
+    #[tokio::test]
+    async fn a_streamed_answer_arrives_as_server_sent_events() {
+        use super::super::fake_server::scripted;
+        let events = concat!(
+            "data: {\"candidates\":[{\"content\":{\"parts\":[{\"text\":\"Hel\"}],\"role\":\"model\"}}]}\r\n\r\n",
+            "data: {\"candidates\":[{\"content\":{\"parts\":[{\"text\":\"lo\"}],\"role\":\"model\"}}],",
+            "\"usageMetadata\":{\"promptTokenCount\":7,\"candidatesTokenCount\":2}}\r\n\r\n",
+        );
+        let server = scripted(vec![(200, events.to_string())]).await;
+        let provider =
+            GeminiProvider::new(&server.url, Token::new("g-key"), ModelTier::Main, 1 << 20);
+        let (seen, sink) = recorder();
+        let response = provider
+            .complete_streaming(req(), &sink)
+            .await
+            .expect("streams");
+        assert_eq!(response.content, "Hello");
+        assert_eq!(response.usage.prompt_eval_count, 7);
+        assert_eq!(
+            *seen.lock().unwrap(),
+            vec!["Hel".to_string(), "Hello".to_string()]
+        );
+        let request = server.seen.lock().unwrap()[0].clone();
+        assert!(request.contains(":streamGenerateContent?"), "{request}");
+        assert!(request.contains("alt=sse"), "{request}");
     }
 }

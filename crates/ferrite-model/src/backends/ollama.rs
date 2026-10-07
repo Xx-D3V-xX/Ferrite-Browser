@@ -32,7 +32,7 @@ use async_trait::async_trait;
 use crate::config::ModelConfig;
 use crate::error::ModelError;
 use crate::guard::{self, RawCompletion, bounded};
-use crate::provider::{ModelProvider, ModelTier, ProviderCapabilities, ProviderId};
+use crate::provider::{ModelProvider, ModelTier, ProviderCapabilities, ProviderId, TextSink};
 use crate::request::{CompletionRequest, Role};
 use crate::response::{CompletionResponse, TokenUsage};
 use crate::secret::{SecretStore, Token};
@@ -114,6 +114,38 @@ pub(crate) fn parse_chat_response(body: &[u8]) -> Result<RawCompletion, ModelErr
             eval_count: count(&json, "eval_count"),
         },
     })
+}
+
+/// Adds one line of a streamed `/api/chat` answer (`"stream": true`: one JSON
+/// object per line, the last with `"done": true` and the token counts) to the
+/// answer so far. Returns whether the text grew.
+pub(crate) fn absorb_stream_line(
+    answer: &mut RawCompletion,
+    line: &str,
+) -> Result<bool, ModelError> {
+    if line.trim().is_empty() {
+        return Ok(false);
+    }
+    let json: serde_json::Value =
+        serde_json::from_str(line).map_err(|e| ModelError::MalformedJson {
+            provider: ProviderId::Ollama,
+            detail: format!("{e} (line: {})", bounded(line)),
+        })?;
+    if json.get("error").is_some() {
+        return Err(http::stream_error(ProviderId::Ollama, &json));
+    }
+    if json.get("done").and_then(serde_json::Value::as_bool) == Some(true) {
+        answer.usage = TokenUsage {
+            prompt_eval_count: count(&json, "prompt_eval_count"),
+            eval_count: count(&json, "eval_count"),
+        };
+    }
+    let piece = json
+        .pointer("/message/content")
+        .and_then(serde_json::Value::as_str)
+        .unwrap_or("");
+    answer.content.push_str(piece);
+    Ok(!piece.is_empty())
 }
 
 fn count(json: &serde_json::Value, field: &str) -> u32 {
@@ -364,6 +396,35 @@ impl ModelProvider for OllamaProvider {
         let body =
             http::read_bounded(ProviderId::Ollama, response, self.max_response_bytes).await?;
         let raw = parse_chat_response(&body)?;
+        guard::finalize(ProviderId::Ollama, &req, raw, self.max_response_bytes)
+    }
+
+    async fn complete_streaming(
+        &self,
+        req: CompletionRequest,
+        sink: &TextSink<'_>,
+    ) -> Result<CompletionResponse, ModelError> {
+        let mut body = build_chat_body(&req);
+        body["stream"] = serde_json::json!(true);
+        let response = self
+            .request(reqwest::Method::POST, "/api/chat")
+            .json(&body)
+            .send()
+            .await
+            .map_err(|e| ModelError::Transport {
+                provider: ProviderId::Ollama,
+                detail: bounded(&e.to_string()),
+            })?;
+        let response =
+            http::classify(ProviderId::Ollama, response, self.max_response_bytes).await?;
+        let raw = http::stream_text(
+            ProviderId::Ollama,
+            response,
+            self.max_response_bytes,
+            sink,
+            absorb_stream_line,
+        )
+        .await?;
         guard::finalize(ProviderId::Ollama, &req, raw, self.max_response_bytes)
     }
 
@@ -677,5 +738,66 @@ mod tests {
         );
         let rendered = format!("{provider:?}");
         assert!(!rendered.contains("sk-do-not-log-me"), "{rendered}");
+    }
+
+    /// Collects every text the sink was shown.
+    fn recorder() -> (
+        std::sync::Arc<std::sync::Mutex<Vec<String>>>,
+        impl Fn(&str) + Send + Sync,
+    ) {
+        let seen = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let log = std::sync::Arc::clone(&seen);
+        (seen, move |t: &str| log.lock().unwrap().push(t.to_string()))
+    }
+
+    #[tokio::test]
+    async fn a_streamed_chat_shows_the_text_as_it_grows_and_finishes_guarded() {
+        use super::super::fake_server::{body_of, scripted};
+        let lines = concat!(
+            "{\"message\":{\"role\":\"assistant\",\"content\":\"{\\\"action\\\":\"},\"done\":false}\n",
+            "{\"message\":{\"role\":\"assistant\",\"content\":\"\\\"finish\\\"}\"},\"done\":false}\n",
+            "{\"message\":{\"role\":\"assistant\",\"content\":\"\"},\"done\":true,\"prompt_eval_count\":11,\"eval_count\":4}\n",
+        );
+        let server = scripted(vec![(200, lines.to_string())]).await;
+        let provider = OllamaProvider::new(&server.url, None, ModelTier::Main, 1 << 20);
+        let (seen, sink) = recorder();
+        let req = CompletionRequest::new(
+            "m",
+            ModelTier::Main,
+            vec![crate::request::Message::user("go")],
+        );
+        let response = provider
+            .complete_streaming(req, &sink)
+            .await
+            .expect("streams");
+        assert_eq!(response.content, r#"{"action":"finish"}"#);
+        assert_eq!(response.usage.prompt_eval_count, 11);
+        assert_eq!(response.usage.eval_count, 4);
+        assert_eq!(
+            *seen.lock().unwrap(),
+            vec![
+                r#"{"action":"#.to_string(),
+                r#"{"action":"finish"}"#.to_string()
+            ]
+        );
+        assert_eq!(body_of(&server.seen.lock().unwrap()[0])["stream"], true);
+    }
+
+    #[tokio::test]
+    async fn an_error_line_in_the_stream_is_a_typed_error() {
+        use super::super::fake_server::scripted;
+        let server = scripted(vec![(200, "{\"error\":\"model crashed\"}\n".to_string())]).await;
+        let provider = OllamaProvider::new(&server.url, None, ModelTier::Main, 1 << 20);
+        let (_, sink) = recorder();
+        let req = CompletionRequest::new(
+            "m",
+            ModelTier::Main,
+            vec![crate::request::Message::user("go")],
+        );
+        let err = provider
+            .complete_streaming(req, &sink)
+            .await
+            .expect_err("error");
+        assert!(matches!(err, ModelError::ServerError { .. }), "{err:?}");
     }
 }

@@ -1525,6 +1525,10 @@ pub struct FerriteBrowser {
     pub agent_log: Vec<AgentLogEntry>,
     pub agent_response: Option<String>,
     pub agent_is_running: bool,
+    /// The reply the model is writing in the current step, as far as it has
+    /// written it (`ferrite_agent::streaming::reply_so_far`). Display only:
+    /// the step acts on the complete response, never on this.
+    pub agent_stream: Option<String>,
     /// Sender used by spawned agent task to emit progress messages.
     pub agent_event_tx: Option<tokio::sync::mpsc::UnboundedSender<FerriteBrowserMessage>>,
     /// Receiver drained by the agent_event_sub subscription.
@@ -1868,6 +1872,7 @@ impl Default for FerriteBrowser {
             agent_log: Vec::new(),
             agent_response: None,
             agent_is_running: false,
+            agent_stream: None,
             agent_event_tx: Some(agent_event_tx),
             agent_event_rx: Some(std::sync::Arc::new(tokio::sync::Mutex::new(agent_event_rx))),
             // Test-safe by construction: no chat store (so nothing is read or
@@ -2033,6 +2038,11 @@ pub enum FerriteBrowserMessage {
     AgentStepReady {
         run_id: u64,
         action: Result<AgentAction, StepFailure>,
+    },
+    /// The reply the current step's model call has written so far.
+    AgentReplyStreaming {
+        run_id: u64,
+        text: String,
     },
     /// The Laya fast lane chose this step (no LLM call). Handled by exactly
     /// the same code as `AgentStepReady` — the same consent check, execution,
@@ -2951,6 +2961,22 @@ pub fn update(
         FerriteBrowserMessage::AgentStepReady { run_id, action } => {
             return handle_agent_step(state, run_id, action, None);
         }
+        FerriteBrowserMessage::AgentReplyStreaming { run_id, text } => {
+            if run_id != state.run_id || !state.agent_is_running {
+                return Task::none();
+            }
+            let first = state.agent_stream.is_none();
+            state.agent_stream = Some(text);
+            // Keep the reply in view as it grows (new lines push it down).
+            if first
+                || state
+                    .agent_stream
+                    .as_deref()
+                    .is_some_and(|t| t.ends_with('\n'))
+            {
+                return scroll_to_latest(state);
+            }
+        }
         FerriteBrowserMessage::FastStepReady {
             run_id,
             action,
@@ -3486,6 +3512,7 @@ fn conclude_run(state: &mut FerriteBrowser, outcome: Outcome) -> Task<FerriteBro
         state.agent_response = Some(text);
     }
     state.agent_is_running = false;
+    state.agent_stream = None;
     state.live_loop = None;
     state.signin_handoff = None;
     state.pending_runtime = None;
@@ -3823,6 +3850,9 @@ fn handle_agent_step(
     if run_id != state.run_id {
         return Task::none();
     }
+    // The step's response is complete: its reply, if any, is shown from the
+    // outcome now, not from the stream.
+    state.agent_stream = None;
     // Rule: the agent does not act while the page's request for the camera, the
     // microphone or the screen waits on the person. Hold the step; `tab_diag` sends it
     // again when the request is answered or withdrawn.
@@ -5676,7 +5706,26 @@ fn spawn_next_step(
             .with_system_prompt(SYSTEM_PROMPT, SYSTEM_PROMPT_VERSION)
             .with_options(SamplingOptions::default().with_num_predict(AGENT_LOOP_NUM_PREDICT));
         let llm_started = std::time::Instant::now();
-        let completion = provider.complete(request).await;
+        // The reply is shown as it is written; nothing acts on it until the
+        // whole response is in and parsed below.
+        let shown = std::sync::Mutex::new(None::<String>);
+        let stream_tx = event_tx.clone();
+        let sink = move |so_far: &str| {
+            let Some(reply) = ferrite_agent::streaming::reply_so_far(so_far) else {
+                return;
+            };
+            let mut last = shown
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            if last.as_deref() != Some(reply.as_str()) {
+                *last = Some(reply.clone());
+                let _ = stream_tx.send(FerriteBrowserMessage::AgentReplyStreaming {
+                    run_id,
+                    text: reply,
+                });
+            }
+        };
+        let completion = provider.complete_streaming(request, &sink).await;
         if let Some(decider) = &laya_timing {
             // What the fast lane competes with; it decides whether asking
             // Laya first is worth it (`LaneGovernor`).
@@ -7968,6 +8017,54 @@ mod tests {
             .as_deref()
             .unwrap_or_default()
             .contains("step budget"));
+    }
+
+    #[tokio::test]
+    async fn a_streamed_reply_shows_for_the_current_run_and_clears_when_the_step_is_in() {
+        let mut state = FerriteBrowser {
+            run_id: 3,
+            agent_is_running: true,
+            ..FerriteBrowser::default()
+        };
+        state.live_loop = Some(fresh_live_loop());
+        let _ = update(
+            &mut state,
+            FerriteBrowserMessage::AgentReplyStreaming {
+                run_id: 3,
+                text: "The price".into(),
+            },
+        );
+        assert_eq!(state.agent_stream.as_deref(), Some("The price"));
+        // A reply from a run that was stopped is not shown.
+        let _ = update(
+            &mut state,
+            FerriteBrowserMessage::AgentReplyStreaming {
+                run_id: 2,
+                text: "stale".into(),
+            },
+        );
+        assert_eq!(state.agent_stream.as_deref(), Some("The price"));
+        // The whole response arrived: the outcome shows it now, not the stream.
+        let _ = update(
+            &mut state,
+            FerriteBrowserMessage::AgentStepReady {
+                run_id: 3,
+                action: Ok(AgentAction::Finish {
+                    answer: "The price is 4 EUR.".into(),
+                }),
+            },
+        );
+        assert_eq!(state.agent_stream, None);
+        assert!(!state.agent_is_running);
+        // And nothing arriving late brings it back.
+        let _ = update(
+            &mut state,
+            FerriteBrowserMessage::AgentReplyStreaming {
+                run_id: 3,
+                text: "The price is".into(),
+            },
+        );
+        assert_eq!(state.agent_stream, None);
     }
 
     #[test]
