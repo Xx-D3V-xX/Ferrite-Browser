@@ -69,6 +69,18 @@ jobs:
             libx11-dev libxcb-render0-dev libxcb-shape0-dev libxcb-xfixes0-dev \
             libwayland-dev libegl1-mesa-dev libgl1-mesa-dev libvulkan-dev libudev-dev
 
+      # Every shell step of every workflow parses, and the packaging scripts' own tests
+      # pass: a broken step otherwise fails only when its job reaches it, an hour into a
+      # release build (a step cut in half did, in the run before this check).
+      - name: Workflow steps parse; packaging script self-tests (Linux)
+        if: matrix.platform == 'linux'
+        run: |
+          python3 -c "import yaml" 2>/dev/null || pip install --quiet pyyaml
+          python3 scripts/check-workflow-shell.py
+          python3 scripts/windows-runtime.py self-test
+          python3 scripts/bundle-gstreamer.py self-test
+          bash -n scripts/package.sh scripts/linux-clean-run.sh scripts/ci-annotate.sh
+
       - name: Install system dependencies (macOS)
         if: matrix.platform == 'macos'
         run: |
@@ -429,6 +441,10 @@ jobs:
           tar -C "$e2e/package" -xzf dist/*-linux-x64-media.tar.gz
           if ! bash scripts/linux-clean-run.sh "$e2e" > "$RUNNER_TEMP/clean.log" 2>&1; then
             cat "$RUNNER_TEMP/clean.log"
+            bash scripts/ci-annotate.sh "Linux media package on a clean Linux" "$RUNNER_TEMP/clean.log"
+            exit 1
+          fi
+          cat "$RUNNER_TEMP/clean.log"
 
       - name: Upload package
         uses: actions/upload-artifact@v4
@@ -489,11 +505,6 @@ jobs:
           run_probe "Homebrew hidden" mse_probe
           sudo mv /opt/homebrew.hidden /opt/homebrew
           if [ -n "$bad" ]; then bash scripts/ci-annotate.sh "media probes from a bundle (macOS)" "$summary" '.'; exit 1; fi
-
-            bash scripts/ci-annotate.sh "Linux media package on a clean Linux" "$RUNNER_TEMP/clean.log"
-            exit 1
-          fi
-          cat "$RUNNER_TEMP/clean.log"
 
   # Tests scripts/bundle-gstreamer.py without building Servo (which takes an hour). It
   # bundles GStreamer's own gst-inspect-1.0 the way a release bundles the app, then does
