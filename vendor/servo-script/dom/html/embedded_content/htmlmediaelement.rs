@@ -2110,10 +2110,7 @@ impl HTMLMediaElement {
             source.reopen_if_ended();
             if self.media_source_player_ended.replace(false) {
                 // The new player is made to start at the target, so it is not seeked.
-                source
-                    .shared()
-                    .seek_all(crate::dom::mediasource::seconds_to_ns(time));
-                self.restart_media_source_player(&source);
+                self.restart_media_source_player(&source, time);
                 new_player = true;
             }
         }
@@ -2482,10 +2479,7 @@ impl HTMLMediaElement {
         let position = if position.is_finite() { position.max(0.) } else { 0. };
         warn!("The media player lost a stream ({error}); starting a new one at {position}s");
         self.media_source_player_ended.set(false);
-        source
-            .shared()
-            .seek_all(crate::dom::mediasource::seconds_to_ns(position));
-        self.restart_media_source_player(&source);
+        self.restart_media_source_player(&source, position);
         if self.seeking.get() {
             self.media_source_pending_seek.set(Some(position));
         }
@@ -2976,13 +2970,19 @@ impl HTMLMediaElement {
         }
     }
 
-    /// Replaces the player with a new one for the same `MediaSource`.
-    fn restart_media_source_player(&self, source: &MediaSource) {
+    /// Replaces the player with a new one for the same `MediaSource`, which starts at
+    /// `position` seconds.
+    fn restart_media_source_player(&self, source: &MediaSource, position: f64) {
         if let Some(player) = self.player.borrow_mut().take() &&
             let Err(error) = player.lock().unwrap().stop()
         {
             error!("Could not stop the old player: {error:?}");
         }
+        // Only once the old player has stopped: until then its pipeline can still report
+        // a seek of its own (at its end), which would replace the new player's start.
+        source
+            .shared()
+            .seek_all(crate::dom::mediasource::seconds_to_ns(position));
         *self.event_handler.borrow_mut() = None;
         self.video_renderer.lock().unwrap().reset();
         if self

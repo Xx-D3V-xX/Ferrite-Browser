@@ -43,3 +43,12 @@ trait methods are declared) and `vendor/servo-embedder-traits`.
    until its ghost pad is added, then synced with the bin.
 7. `player.rs`: **`not-linked` is reported as `PlayerEvent::StreamLost`**, not as an error
    (see `vendor/servo-script/FERRITE-PATCHES.md` item 15).
+8. `mse_source.rs` (`make_pad`, `seek_data`): **a replaced player's seeks are ignored.**
+   When the element replaces its player (a seek after the end, or a lost stream), the old
+   pipeline stops asynchronously (`Play::stop` runs on GstPlay's thread) and could still
+   report a seek of its own, at its end, after the new player's start was set; that
+   replaced the start, the new player reported the old end as its position, and the
+   element never reached `playing` (T-339, about one loaded `mse_probe` run in thirty).
+   Each pipeline takes the `MediaSource`'s current run (`ferrite_mse::Shared::run`) when
+   it builds its streams and reports its seeks with it; `Shared::seek_all` (a new player)
+   starts a new run, and a seek from an older one is dropped.

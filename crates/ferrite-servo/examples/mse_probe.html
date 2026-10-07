@@ -76,7 +76,9 @@ var WEBM = 'video/webm; codecs="vp9, opus"';
   // A player sets the stream's nominal length, which the last frame may overrun by a few
   // milliseconds: that is raised to the buffered end, not refused (YouTube's player threw
   // InvalidStateError here). Cutting off whole frames is still refused.
-  var bufEnd = sb.buffered.end(0), durErr = null;
+  // Appending already raised the duration to the end of the longest track (here the
+  // audio, past the video): that is the buffered end the algorithm compares against.
+  var bufEnd = ms.duration, durErr = null;
   try { ms.duration = bufEnd - 0.005; } catch (e) { durErr = e.name; }
   ok('a duration inside the last frame is raised to the buffered end', durErr === null && Math.abs(ms.duration - bufEnd) < 0.001, [durErr, ms.duration, bufEnd]);
   durErr = null; try { ms.duration = 1; } catch (e) { durErr = e.name; }

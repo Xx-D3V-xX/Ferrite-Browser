@@ -459,11 +459,13 @@ fn make_pad(
     {
         let shared = shared.clone();
         let push_lock = push_lock.clone();
+        // This pipeline's run: once a new player replaces it, its seeks are ignored.
+        let run = shared.run();
         appsrc.set_callbacks(
             gstreamer_app::AppSrcCallbacks::builder()
                 .seek_data(move |_, offset| {
                     let _guard = push_lock.lock().unwrap();
-                    shared.seek(slot, offset as i64);
+                    shared.seek(run, slot, offset as i64);
                     true
                 })
                 .build(),

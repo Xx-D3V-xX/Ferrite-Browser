@@ -172,3 +172,8 @@ directory) when the engine is upgraded to a release that includes the fixes.
    stream's nominal length right after appending, a few milliseconds inside the last
    frame, and stopped on the exception (T-342). The latest frame start comes from
    `ferrite_mse::Shared::highest_pts`.
+17. `dom/html/embedded_content/htmlmediaelement.rs` (`restart_media_source_player`, with
+   `vendor/servo-media-gstreamer` item 8): **a new `MediaSource` player's start is set after
+   the old player is told to stop**, in one place for both callers (a seek after the end
+   and a lost stream), not before; with the run check in the source, a seek the old
+   pipeline still reports cannot replace it (T-339).

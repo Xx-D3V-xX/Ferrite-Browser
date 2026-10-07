@@ -60,6 +60,9 @@ struct State {
     last_seek: Option<i64>,
     /// The playhead, for eviction.
     position: i64,
+    /// Bumped by [`Shared::seek_all`], when a new player replaces the old one: a seek
+    /// reported by an older player's pipeline is ignored.
+    run: u64,
 }
 
 /// The tracks of one `MediaSource`, shared by its `SourceBuffer`s (which append and
@@ -86,6 +89,7 @@ impl Shared {
                 initialized: 0,
                 last_seek: None,
                 position: 0,
+                run: 0,
             }),
             wake: Condvar::new(),
             quota,
@@ -357,16 +361,28 @@ impl Shared {
         self.lock().position = position;
     }
 
-    /// The player flushed track `slot`'s stream and wants it from `time` nanoseconds
-    /// (a seek): that track's feeder restarts there.
+    /// The current run: a player's pipeline takes it when it builds its streams and
+    /// reports its seeks with it.
+    pub fn run(&self) -> u64 {
+        self.lock().run
+    }
+
+    /// The player of `run` flushed track `slot`'s stream and wants it from `time`
+    /// nanoseconds (a seek): that track's feeder restarts there. A seek from an older
+    /// run is ignored and returns `false`: a pipeline being replaced can still report
+    /// one (at its own end) after the new player's start was set, and it replaced that
+    /// start, so the new player never played (T-339).
     ///
     /// Each track's stream is flushed, and reports it, on its own. A seek once
     /// restarted every feeder at the first report and took a second report of the
     /// same time as a repeat: a feeder that had already re-sent its frames and its end
     /// of stream before its own stream's flush lost them to that flush, and nothing
     /// sent them again (the element played to the end and never fired `ended`).
-    pub fn seek(&self, slot: usize, time: i64) {
+    pub fn seek(&self, run: u64, slot: usize, time: i64) -> bool {
         let mut st = self.lock();
+        if run != st.run {
+            return false;
+        }
         if let Some(track) = st.slots.get_mut(slot) {
             track.epoch += 1;
             track.seek_to = time;
@@ -374,12 +390,15 @@ impl Shared {
         st.last_seek = Some(time);
         st.position = time;
         self.wake.notify_all();
+        true
     }
 
-    /// Every track starts again from `time` nanoseconds (a page seek after the end,
-    /// for which a new player is made: it and its feeders start at the target).
+    /// Every track starts again from `time` nanoseconds, for a new player that replaces
+    /// the old one (a page seek after the end, or a lost stream): it and its feeders
+    /// start at the target, and a new run begins.
     pub fn seek_all(&self, time: i64) {
         let mut st = self.lock();
+        st.run += 1;
         for track in &mut st.slots {
             track.epoch += 1;
             track.seek_to = time;
@@ -629,7 +648,7 @@ mod tests {
         shared.append(slot, run(0, 15, 5)).unwrap();
         let mut h = shared.handle(slot);
         assert!(matches!(h.next(SHORT), Next::Sample(_)));
-        shared.seek(slot, 250 * MS);
+        shared.seek(shared.run(), slot, 250 * MS);
         assert_eq!(h.next(SHORT), Next::Flush { position: 250 * MS });
         // Restarts at the key at 200, not at 250.
         assert!(matches!(h.next(SHORT), Next::Sample(s) if s.pts == 200 * MS && s.key));
@@ -641,7 +660,7 @@ mod tests {
         let slot = shared.add_track(info(1, TrackKind::Video));
         shared.append(slot, run(0, 5, 5)).unwrap();
         let mut h = shared.handle(slot);
-        shared.seek(slot, 10_000 * MS);
+        shared.seek(shared.run(), slot, 10_000 * MS);
         assert!(matches!(h.next(SHORT), Next::Flush { .. }));
         assert_eq!(h.next(SHORT), Next::Wait);
         shared.append(slot, run(10_000, 5, 5)).unwrap();
@@ -654,7 +673,7 @@ mod tests {
         let slot = shared.add_track(info(1, TrackKind::Video));
         shared.append(slot, run(0, 15, 5)).unwrap();
         assert_eq!(shared.start_position(), None);
-        shared.seek(slot, 250 * MS);
+        shared.seek(shared.run(), slot, 250 * MS);
         assert_eq!(shared.start_position(), Some(250 * MS));
         let mut h = shared.handle(slot);
         // Starts at the sync sample before 250 ms, without a flush to tell of.
@@ -807,7 +826,7 @@ mod tests {
         assert_eq!(drain(&mut v), 5);
         assert_eq!(drain(&mut a), 5);
         // The video's stream is flushed for a seek to 0: only the video restarts.
-        shared.seek(video, 0);
+        shared.seek(shared.run(), video, 0);
         assert!(v.stale());
         assert!(!a.stale());
         assert_eq!(v.next(SHORT), Next::Flush { position: 0 });
@@ -816,7 +835,7 @@ mod tests {
         // The audio's own flush, for the same time, a moment later, throws away what
         // it had: it is sent again, end of stream included (once this was taken for a
         // repeat of the video's report and the audio never ended).
-        shared.seek(audio, 0);
+        shared.seek(shared.run(), audio, 0);
         assert_eq!(a.next(SHORT), Next::Flush { position: 0 });
         assert_eq!(drain(&mut a), 5);
         assert_eq!(v.next(SHORT), Next::Wait);
@@ -838,6 +857,23 @@ mod tests {
     }
 
     #[test]
+    fn a_seek_from_a_replaced_player_is_ignored() {
+        // T-339: the old pipeline, still shutting down, reports a seek at its own end
+        // after the new player's start was set; it must not move that start.
+        let shared = Shared::new();
+        let slot = shared.add_track(info(1, TrackKind::Video));
+        shared.append(slot, run(0, 60, 5)).unwrap();
+        let old_run = shared.run();
+        shared.seek_all(500 * MS);
+        assert_ne!(shared.run(), old_run);
+        assert!(!shared.seek(old_run, slot, 2_000 * MS));
+        assert_eq!(shared.start_position(), Some(500 * MS));
+        // The new player's own seeks still count.
+        assert!(shared.seek(shared.run(), slot, 800 * MS));
+        assert_eq!(shared.start_position(), Some(800 * MS));
+    }
+
+    #[test]
     fn a_frame_fetched_before_a_seek_is_stale_after_it() {
         let shared = Shared::new();
         let slot = shared.add_track(info(1, TrackKind::Video));
@@ -845,7 +881,7 @@ mod tests {
         let mut h = shared.handle(slot);
         assert!(matches!(h.next(SHORT), Next::Sample(_)));
         assert!(!h.stale());
-        shared.seek(slot, 80 * MS);
+        shared.seek(shared.run(), slot, 80 * MS);
         assert!(h.stale());
         assert!(matches!(h.next(SHORT), Next::Flush { .. }));
         assert!(!h.stale());
