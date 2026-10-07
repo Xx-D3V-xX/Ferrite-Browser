@@ -105,7 +105,37 @@ fn redirect_stderr(file: &File) -> Option<()> {
     (unsafe { dup2(file.as_raw_fd(), 2) } >= 0).then_some(())
 }
 
-#[cfg(not(unix))]
+/// Windows has no `dup2` on handles: standard error is a per-process handle,
+/// which Rust's `stderr` looks up on every write, so pointing it at the file
+/// catches the app's own messages and panics. The engine's C libraries
+/// (SpiderMonkey, GStreamer) write to the C runtime's descriptor 2 instead,
+/// which is pointed at the same file where the runtime allows it.
+#[cfg(windows)]
+fn redirect_stderr(file: &File) -> Option<()> {
+    use std::os::windows::io::AsRawHandle;
+    unsafe extern "system" {
+        fn SetStdHandle(which: u32, handle: *mut std::ffi::c_void) -> i32;
+    }
+    unsafe extern "C" {
+        fn _open_osfhandle(handle: isize, flags: i32) -> i32;
+        fn _dup2(from: i32, to: i32) -> i32;
+    }
+    const STD_ERROR_HANDLE: u32 = -12_i32 as u32;
+    let handle = file.as_raw_handle();
+    // SAFETY: `handle` is the open file's, and it stays open for the process.
+    if unsafe { SetStdHandle(STD_ERROR_HANDLE, handle) } == 0 {
+        return None;
+    }
+    // SAFETY: as above; the descriptor is never closed, so the handle it
+    // wraps is never closed under the file.
+    let fd = unsafe { _open_osfhandle(handle as isize, 0) };
+    if fd >= 0 {
+        unsafe { _dup2(fd, 2) };
+    }
+    Some(())
+}
+
+#[cfg(not(any(unix, windows)))]
 fn redirect_stderr(_file: &File) -> Option<()> {
     None
 }
@@ -124,5 +154,31 @@ mod tests {
                 assert!(s.ends_with("ferrite"), "{s}");
             }
         }
+    }
+
+    /// Windows only (the CI Windows job runs it): what is written to standard
+    /// error after the redirect lands in the file. Standard error is put back
+    /// afterwards so the test harness keeps its own.
+    #[cfg(windows)]
+    #[test]
+    fn standard_error_reaches_the_log_file_on_windows() {
+        unsafe extern "system" {
+            fn GetStdHandle(which: u32) -> *mut std::ffi::c_void;
+            fn SetStdHandle(which: u32, handle: *mut std::ffi::c_void) -> i32;
+        }
+        const STD_ERROR_HANDLE: u32 = -12_i32 as u32;
+        let path = std::env::temp_dir().join(format!("ferrite-log-{}.log", std::process::id()));
+        let file = File::create(&path).unwrap();
+        // SAFETY: reading and restoring this process's own standard handle.
+        let saved = unsafe { GetStdHandle(STD_ERROR_HANDLE) };
+        assert!(redirect_stderr(&file).is_some());
+        // `io::stderr()` directly: the test harness captures `eprintln!`.
+        std::io::stderr()
+            .write_all(b"ferrite-log-marker\n")
+            .unwrap();
+        unsafe { SetStdHandle(STD_ERROR_HANDLE, saved) };
+        let written = fs::read_to_string(&path).unwrap();
+        assert!(written.contains("ferrite-log-marker"), "{written:?}");
+        std::mem::forget(file);
     }
 }

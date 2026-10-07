@@ -277,11 +277,23 @@ impl AuditLog {
     }
 
     pub fn verify_chain(&self) -> bool {
+        self.check_chain().is_ok()
+    }
+
+    /// Like [`Self::verify_chain`], but says where the chain breaks: the first
+    /// entry whose `prev_hash` is not the previous entry's hash
+    /// ([`AuditError::ChainBroken`]), or whose stored hash is not the hash of
+    /// its own fields ([`AuditError::HashMismatch`]).
+    pub fn check_chain(&self) -> Result<(), AuditError> {
         let mut expected_prev = String::new();
 
         for entry in &self.entries {
             if entry.prev_hash != expected_prev {
-                return false;
+                return Err(AuditError::ChainBroken {
+                    sequence: entry.sequence,
+                    expected_prev,
+                    actual_prev: entry.prev_hash.clone(),
+                });
             }
 
             let computed_hash = compute_entry_hash(
@@ -297,12 +309,16 @@ impl AuditLog {
             );
 
             if computed_hash != entry.entry_hash {
-                return false;
+                return Err(AuditError::HashMismatch {
+                    sequence: entry.sequence,
+                    expected: entry.entry_hash.clone(),
+                    actual: computed_hash,
+                });
             }
             expected_prev = entry.entry_hash.clone();
         }
 
-        true
+        Ok(())
     }
 }
 
@@ -622,6 +638,41 @@ mod tests {
         );
         log.entries[0].url = Some("case-FORGED".to_string());
         assert!(!log.verify_chain());
+    }
+
+    #[test]
+    fn check_chain_names_the_entry_and_the_kind_of_break() {
+        let mut edited = base_log();
+        edited.entries[1].url = Some("https://evil.example".to_string());
+        match edited.check_chain() {
+            Err(AuditError::HashMismatch {
+                sequence,
+                expected,
+                actual,
+            }) => {
+                assert_eq!(sequence, edited.entries[1].sequence);
+                assert_eq!(expected, edited.entries[1].entry_hash);
+                assert_ne!(expected, actual);
+            }
+            other => panic!("expected HashMismatch, got {other:?}"),
+        }
+
+        let mut relinked = base_log();
+        relinked.entries[1].prev_hash = "0".repeat(64);
+        match relinked.check_chain() {
+            Err(AuditError::ChainBroken {
+                sequence,
+                expected_prev,
+                actual_prev,
+            }) => {
+                assert_eq!(sequence, relinked.entries[1].sequence);
+                assert_eq!(expected_prev, relinked.entries[0].entry_hash);
+                assert_eq!(actual_prev, "0".repeat(64));
+            }
+            other => panic!("expected ChainBroken, got {other:?}"),
+        }
+
+        assert!(base_log().check_chain().is_ok());
     }
 
     // ---- tamper matrix: every field, not just the two the bug report named ----

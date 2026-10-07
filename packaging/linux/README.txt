@@ -10,4 +10,7 @@ X11/Wayland client libraries. On Ubuntu/Debian:
   sudo apt install libfontconfig1 libfreetype6 libxkbcommon0 libegl1 \
        libgl1 libx11-6 libwayland-client0 libvulkan1 libudev1
 
-Set your model key and options in ~/.ferrite/env.local (see the project README).
+Set your model provider, model and key in the Settings drawer (the gear button);
+the key is kept in the system keyring. Environment variables set when the app is
+launched also work (see the project README). The app does not read
+~/.ferrite/env.local; only scripts/run-local.sh does.
