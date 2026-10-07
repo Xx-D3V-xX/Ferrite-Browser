@@ -1,5 +1,5 @@
 name: CI
-run-name: CI${{ inputs.only_sites && ' (real-site check; media builds only, no release)' || inputs.only_media && ' (media builds only, no release)' || '' }}
+run-name: CI${{ inputs.only_sites && ' (real-site check; media builds only, no release)' || inputs.only_media && ' (media builds only, no release)' || inputs.only_tests && ' (lint and tests only; no release, as for media builds only)' || '' }}
 
 # Manual trigger only — no automatic run on push or pull_request, and no
 # schedule. A project-owner decision (docs/TO-DO.md T-210), not the rebuild's
@@ -25,6 +25,10 @@ on:
         description: "With only_sites: site names from scripts/site-check/sites.txt, space-separated (empty: all)."
         type: string
         default: ""
+      only_tests:
+        description: "Run only lint and tests on Linux, Windows and macOS (no Servo or media builds). Never publishes a release: release.yml skips a title that says 'media builds only'."
+        type: boolean
+        default: false
 
 jobs:
   # ─────────────────────────────────────────────────────────────
@@ -146,7 +150,7 @@ jobs:
     name: Media probe (Linux, GStreamer)
     runs-on: ubuntu-latest
     needs: ci
-    if: ${{ !inputs.only_media && !inputs.only_sites }}
+    if: ${{ !inputs.only_media && !inputs.only_sites && !inputs.only_tests }}
     continue-on-error: true
 
     steps:
@@ -197,7 +201,7 @@ jobs:
     name: Build Servo release (${{ matrix.name }})
     runs-on: ${{ matrix.os }}
     needs: ci
-    if: ${{ !inputs.only_media && !inputs.only_sites }}
+    if: ${{ !inputs.only_media && !inputs.only_sites && !inputs.only_tests }}
 
     strategy:
       fail-fast: false
@@ -286,7 +290,7 @@ jobs:
     runs-on: ${{ matrix.os }}
     needs: ci
     # `ci` is skipped in a media-only run; a real failure of it still stops this job.
-    if: ${{ !inputs.only_smoke && !inputs.only_sites && !cancelled() && (needs.ci.result == 'success' || needs.ci.result == 'skipped') }}
+    if: ${{ !inputs.only_smoke && !inputs.only_sites && !inputs.only_tests && !cancelled() && (needs.ci.result == 'success' || needs.ci.result == 'skipped') }}
     continue-on-error: true
 
     strategy:
@@ -439,7 +443,7 @@ jobs:
   # Mac: nothing may load from it) and with Homebrew moved away.
   bundle-smoke-macos:
     name: GStreamer bundle smoke test (macOS)
-    if: ${{ !inputs.only_sites }}
+    if: ${{ !inputs.only_sites && !inputs.only_tests }}
     runs-on: macos-latest
     continue-on-error: true
 
@@ -516,7 +520,7 @@ jobs:
 
   bundle-smoke-windows:
     name: GStreamer bundle smoke test (Windows)
-    if: ${{ !inputs.only_sites }}
+    if: ${{ !inputs.only_sites && !inputs.only_tests }}
     runs-on: windows-latest
     timeout-minutes: 45
     continue-on-error: true
