@@ -25,10 +25,13 @@ docker run -i --rm -v "$dir:/e2e" "$image" bash -s <<'INSIDE' 2>&1 | tee "$out"
 set -euo pipefail
 export DEBIAN_FRONTEND=noninteractive
 apt-get update -qq
-# A desktop's libraries: C and C++ runtimes and GLib come with the image or these.
+# A desktop's libraries: C and C++ runtimes and GLib come with the image or these. Every
+# Ubuntu desktop has them (Cairo and GTK need libxcb-render and libxcb-shm; PipeWire is
+# Ubuntu's sound and screen service); the package leaves them to the machine.
 apt-get install -y -qq --no-install-recommends \
   libglib2.0-0t64 libfontconfig1 libfreetype6 libharfbuzz0b \
-  libx11-6 libx11-xcb1 libxcb1 libxkbcommon0 libxkbcommon-x11-0 libxext6 libxrandr2 \
+  libx11-6 libx11-xcb1 libxcb1 libxcb-render0 libxcb-shm0 libxkbcommon0 libxkbcommon-x11-0 \
+  libxext6 libxrandr2 libpipewire-0.3-0t64 \
   libxi6 libxcursor1 libxfixes3 libxdamage1 libxrender1 libxtst6 libxv1 \
   libwayland-client0 libwayland-egl1 libwayland-cursor0 \
   libegl1 libgl1 libgles2 libgbm1 libdrm2 libegl-mesa0 libgl1-mesa-dri libvulkan1 \
