@@ -72,6 +72,11 @@ const REQUIRED: &[(&str, &str)] = &[
     ("getAnimations on elements, the document and shadow roots", "typeof document.getAnimations === 'function' && typeof document.createElement('div').getAnimations === 'function' && typeof document.createElement('div').attachShadow({mode:'open'}).getAnimations === 'function'"),
     ("SVGAElement and the other missing SVG interfaces answer instanceof by tag", "(function(){var n='http://www.w3.org/2000/svg';var a=document.createElementNS(n,'a'),t=document.createElementNS(n,'text');return typeof SVGAElement==='function'&&a instanceof SVGAElement&&a instanceof SVGElement&&!(t instanceof SVGAElement)&&t instanceof SVGTextContentElement&&!(document.createElement('a') instanceof SVGAElement)})()"),
     ("PublicKeyCredential says there is no authenticator", "typeof PublicKeyCredential === 'function' && typeof PublicKeyCredential.getClientCapabilities === 'function' && typeof PublicKeyCredential.isUserVerifyingPlatformAuthenticatorAvailable === 'function'"),
+    // An exception the engine makes says where in the page's script it was made, so a
+    // rejection the console reports can name the file (vendored servo-script, patch 12).
+    ("a DOMException the engine throws has a stack", "(function(){try{document.createElement('a b')}catch(e){return e instanceof DOMException&&e.name==='InvalidCharacterError'&&typeof e.stack==='string'&&e.stack.length>0&&!Object.keys(e).includes('stack')}return false})()"),
+    ("new DOMException() has a stack", "typeof new DOMException('x','AbortError').stack === 'string'"),
+    ("cancelIdleCallback beside requestIdleCallback", "typeof cancelIdleCallback === 'function' && typeof requestIdleCallback === 'function'"),
     ("AbortController", "typeof AbortController === 'function' && typeof AbortSignal === 'function'"),
     ("URL / URLSearchParams", "new URL('https://a.b/c?d=1').searchParams.get('d') === '1'"),
     ("fetch / Headers / Request", "typeof fetch === 'function' && typeof Headers === 'function' && typeof Request === 'function'"),

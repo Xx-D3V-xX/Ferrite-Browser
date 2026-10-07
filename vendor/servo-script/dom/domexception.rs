@@ -3,12 +3,18 @@
  * file, You can obtain one at https://mozilla.org/MPL/2.0/. */
 
 use dom_struct::dom_struct;
+use js::capture_stack;
 use js::context::{JSContext, NoGC};
+use js::conversions::ToJSValConvertible;
+use js::jsapi::StackFormat;
+use js::jsval::UndefinedValue;
+use js::rooted;
 use js::rust::HandleObject;
+use js::rust::wrappers2::JS_DefineProperty;
 use rustc_hash::FxHashMap;
 use script_bindings::match_domstring_ascii;
 use script_bindings::reflector::{
-    Reflector, reflect_dom_object_with_cx, reflect_dom_object_with_proto,
+    DomObject, Reflector, reflect_dom_object_with_cx, reflect_dom_object_with_proto,
 };
 use servo_base::id::{DomExceptionId, DomExceptionIndex};
 use servo_constellation_traits::DomException;
@@ -184,11 +190,13 @@ impl DOMException {
     ) -> DomRoot<DOMException> {
         let (message, name) = DOMException::get_error_data_by_code(code);
 
-        reflect_dom_object_with_cx(
+        let exception = reflect_dom_object_with_cx(
             Box::new(DOMException::new_inherited(message, name)),
             global,
             cx,
-        )
+        );
+        exception.attach_stack(cx);
+        exception
     }
 
     pub(crate) fn new_with_custom_message(
@@ -199,11 +207,36 @@ impl DOMException {
     ) -> DomRoot<DOMException> {
         let (_, name) = DOMException::get_error_data_by_code(code);
 
-        reflect_dom_object_with_cx(
+        let exception = reflect_dom_object_with_cx(
             Box::new(DOMException::new_inherited(DOMString::from(message), name)),
             global,
             cx,
-        )
+        );
+        exception.attach_stack(cx);
+        exception
+    }
+
+    /// Ferrite: where in the page's script the exception was made, as an own `stack`
+    /// property (non-enumerable, writable, configurable), as other browsers give one. An
+    /// exception the engine made had none, so a rejected promise or a caught error could
+    /// not say whose code it came from: the console showed "The object is in an invalid
+    /// state." and nothing more. At most 16 frames; nothing is added when no script runs.
+    #[expect(unsafe_code)]
+    fn attach_stack(&self, cx: &mut JSContext) {
+        // Safety: `cx` is the script thread's context, borrowed for the whole capture.
+        let stack = unsafe {
+            capture_stack!(&in(cx) let stack = with max depth(16));
+            stack.and_then(|mut stack| stack.as_string(None, StackFormat::Default))
+        };
+        let Some(stack) = stack.filter(|stack| !stack.is_empty()) else {
+            return;
+        };
+        rooted!(&in(cx) let mut value = UndefinedValue());
+        stack.to_jsval(cx, value.handle_mut());
+        let object = self.reflector().get_jsobject();
+        unsafe {
+            JS_DefineProperty(cx, object, c"stack".as_ptr(), value.handle(), 0);
+        }
     }
 
     // not an IDL stringifier, used internally
@@ -221,12 +254,14 @@ impl DOMExceptionMethods<crate::DomTypeHolder> for DOMException {
         message: DOMString,
         name: DOMString,
     ) -> Result<DomRoot<DOMException>, Error> {
-        Ok(reflect_dom_object_with_proto(
+        let exception = reflect_dom_object_with_proto(
             cx,
             Box::new(DOMException::new_inherited(message, name)),
             global,
             proto,
-        ))
+        );
+        exception.attach_stack(cx);
+        Ok(exception)
     }
 
     /// <https://webidl.spec.whatwg.org/#dom-domexception-code>

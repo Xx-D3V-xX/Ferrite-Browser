@@ -2978,8 +2978,20 @@ impl HTMLMediaElement {
         const FUTURE: f64 = 0.1;
         const ENOUGH: f64 = 3.0;
         let ended = source.is_ended();
-        let Some((_, end)) = source
-            .buffered_seconds()
+        let ranges = source.buffered_seconds();
+        // Once the stream has ended, a position at or past the end of the last range is the
+        // end of the media, not data running out: the player's clock runs a little past the
+        // last frame while its sinks drain. Taken for running out, the element paused the
+        // player there, before it could report the end, and `ended` never fired (the WebM
+        // check in `mse_probe`, about one run in six; CI's macOS media job).
+        if ended &&
+            let Some(&(start, end)) = ranges.last() &&
+            position >= start - GAP &&
+            position >= end
+        {
+            return ReadyState::HaveEnoughData;
+        }
+        let Some((_, end)) = ranges
             .into_iter()
             .find(|&(start, end)| position >= start - GAP && (position < end || (ended && position <= end)))
         else {

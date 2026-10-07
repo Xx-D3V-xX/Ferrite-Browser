@@ -125,3 +125,25 @@ directory) when the engine is upgraded to a release that includes the fixes.
    at `webglbuffer.rs:85` from the VAO's drop, then exit 139, three runs of three).
    **Cost:** a buffer the page deleted while a collected VAO still held it is freed when
    its context goes, not at once, so its GPU memory lives as long as the context.
+11. `dom/performance/performanceobserver.rs`: **the "no valid entry type" warning names the
+   types.** github.com, google.com, amazon.com, nytimes.com and figma.com all ask for
+   timings this engine does not record (such as `longtask` or `layout-shift`), and the
+   console said only "No valid entry type provided to observe()." It now names what was
+   asked for, as other browsers' warnings do. Still a warning, as the specification asks
+   (performance-timeline, observe() steps 6.3 and 7.2); nothing else changes.
+12. `dom/domexception.rs`: **a DOMException carries a `stack`.** One the engine made (for
+   a rejected promise or a thrown error) had none, so a page's logging and Ferrite's own
+   console could not say where it came from: YouTube showed "unhandled promise rejection:
+   The object is in an invalid state." three times with no file. Like other browsers'
+   exceptions, each now has an own `stack` property (the script position it was made at,
+   at most 16 frames; non-enumerable, writable, configurable), including one a page makes
+   with `new DOMException()`. The cost is one stack capture per exception.
+13. `dom/html/embedded_content/htmlmediaelement.rs` (`media_source_ready_state`, item 8's
+   Media Source Extensions): **the end of an ended `MediaSource` is the end, not data
+   running out.** The player's clock runs a little past the last frame while its sinks
+   drain, so the playhead (2.0124 s) passed the end of what was buffered (2.0120 s). The
+   element took that for running out of data, dropped its ready state and paused the
+   player, before the player could report the end of the stream: `ended` never fired.
+   `mse_probe`'s "WebM ends" failed this way about one run in six, here and in CI's macOS
+   media job (run 37561043209). Once the source has ended, a position at or past the end
+   of the last buffered range keeps `HAVE_ENOUGH_DATA`.
