@@ -14,7 +14,7 @@ description: Ferrite is a browser for AI agents. It limits a hijacked agent by d
         <a class="btn btn-ghost" href="{{ROOT}}docs/how-it-works.html">{{icon:book}}How the defense works</a>
       </div>
       <div class="hero-note">
-        <span>{{icon:check}}Bring your own model: Ollama or Gemini</span>
+        <span>{{icon:check}}Bring your own model: Ollama, Gemini, Claude or any OpenAI-compatible server</span>
         <span>{{icon:check}}macOS, Windows and Linux</span>
         <span>{{icon:check}}Open source</span>
         <span>{{icon:check}}Research prototype. Its <a href="{{ROOT}}docs/limits.html">limits are published</a></span>
@@ -110,8 +110,8 @@ description: Ferrite is a browser for AI agents. It limits a hijacked agent by d
     </figure>
 
     <div class="cards c3" style="margin-top:34px">
-      <div class="card"><div class="ico">{{icon:terminal}}</div><h3>DevTools</h3><p>Console, Network and Engine tabs in a bottom panel. Open it with <kbd>Cmd</kbd>+<kbd>Opt</kbd>+<kbd>I</kbd> on macOS or <kbd>Ctrl</kbd>+<kbd>Shift</kbd>+<kbd>I</kbd> elsewhere. Or use <kbd>Cmd/Ctrl</kbd>+<kbd>J</kbd>. <kbd>F12</kbd> opens the audit log instead.</p></div>
-      <div class="card"><div class="ico">{{icon:layers}}</div><h3>Page controls</h3><p>Dropdowns, <code>alert</code>/<code>confirm</code>/<code>prompt</code>, colour and file pickers and right-click menus are drawn by Ferrite as overlays. The page is blocked until you answer. Its text is shown as plain text.</p></div>
+      <div class="card"><div class="ico">{{icon:terminal}}</div><h3>DevTools</h3><p>Console, Network (with each request's size and time) and Engine tabs in a bottom panel. Open it with <kbd>Cmd</kbd>+<kbd>Opt</kbd>+<kbd>I</kbd> on macOS or <kbd>Ctrl</kbd>+<kbd>Shift</kbd>+<kbd>I</kbd> elsewhere. Or use <kbd>Cmd/Ctrl</kbd>+<kbd>J</kbd>. <kbd>F12</kbd> opens the audit log instead.</p></div>
+      <div class="card"><div class="ico">{{icon:layers}}</div><h3>Page controls</h3><p>Dropdowns, <code>alert</code>/<code>confirm</code>/<code>prompt</code>, colour pickers, right-click menus and HTTP sign-in are drawn by Ferrite as overlays that ease in. A file input opens your system's own file dialog. The page is blocked until you answer. Its text is shown as plain text.</p></div>
       <div class="card"><div class="ico">{{icon:list}}</div><h3>Logs you can send</h3><p>Without a terminal, Ferrite writes a log file. After a crash, the page stays frozen under a banner with Reload. A script gathers the log, crash reports and system details into one zip.</p></div>
     </div>
 
@@ -259,12 +259,13 @@ description: Ferrite is a browser for AI agents. It limits a hijacked agent by d
         <h2 style="margin:14px 0 14px">Connect an agent in Settings. No terminal needed.</h2>
         <p class="muted">Pick a provider. Paste a key. Load the models your account can use. Choose one and save. It takes effect on the agent's next task.</p>
         <ul class="checks">
-          <li>{{icon:check}}<span><b>Ollama Cloud, local Ollama or Google Gemini.</b> With local Ollama, no page text leaves your computer.</span></li>
+          <li>{{icon:check}}<span><b>Ollama Cloud, local Ollama, Google Gemini, Anthropic Claude, or OpenAI and any server with the same API</b> (OpenRouter, Groq, vLLM, LM Studio). With a model on your own computer, no page text leaves it.</span></li>
+          <li>{{icon:check}}<span><b>Answers appear as they are written.</b> The agent's reply streams into the panel word by word. It is only something to watch: the agent acts on a step once the model has finished it and Ferrite has checked it.</span></li>
           <li>{{icon:key}}<span><b>Keys live in your OS credential store.</b> That is macOS Keychain or Windows Credential Manager. A key is never in a file or a log. On Linux the store is the kernel keyring. A restart clears it. So export the key as an environment variable if you want it to stay.</span></li>
           <li>{{icon:check}}<span><b>Models come from your account.</b> “Load models” asks the provider what your key can use. This also checks that the key works.</span></li>
           <li>{{icon:check}}<span><b>One model or two.</b> A small fast model predicts what the task needs. A stronger one drives the browser. You can use one model for both.</span></li>
         </ul>
-        <p class="tiny" style="margin-top:18px">The agent sends page content to the model you choose, because it needs that content to act. Environment variables still override the saved choice, for CI (automated builds) and power users. Only Ollama and Gemini work today. There is no OpenAI-compatible or Anthropic backend yet.</p>
+        <p class="tiny" style="margin-top:18px">The agent sends page content to the model you choose, because it needs that content to act. Environment variables still override the saved choice, for CI (automated builds) and power users. The Anthropic and OpenAI-compatible connections are tested against stand-in servers; nobody has run a live task through them yet.</p>
         <p style="margin-top:18px"><a class="btn btn-ghost btn-sm" href="{{ROOT}}docs/models-and-settings.html">Settings reference {{icon:arrow}}</a></p>
       </div>
       <figure class="shot" style="margin:0 auto;max-width:380px">
