@@ -177,3 +177,4 @@ directory) when the engine is upgraded to a release that includes the fixes.
    the old player is told to stop**, in one place for both callers (a seek after the end
    and a lost stream), not before; with the run check in the source, a seek the old
    pipeline still reports cannot replace it (T-339).
+18. `dom/userscripts.rs` + `dom/trustedtypes/trustedscripturl.rs`: **Ferrite's own compat scripts are named `ferrite-user-script`, and a plain string passed to a `TrustedScriptURL` sink by that caller is accepted.** The service-worker support in `sw_compat.js` starts a worker from a blob URL; under a page policy of `require-trusted-types-for 'script'` (Google Meet) that threw `Cannot set value, expected trusted type` (T-348). Page scripts always have a URL as file name, so a page cannot pass as the caller.
