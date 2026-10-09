@@ -130,7 +130,16 @@
     if (raw !== null && String(raw).trim() === '') return;
     // No address at all (an `<img>` a script has not filled in yet): nothing was loaded.
     if (raw === null && !target.getAttribute('srcset') && !target.currentSrc) return;
-    say(tag + ' failed to load: ' + brief(target.currentSrc || target.src || target.href || target.data || '(no address)'));
+    // A media element says why in its `error` (1 aborted, 2 network, 3 decode, 4 source
+    // not supported); the address alone does not tell a stream the engine lost from one
+    // it could not decode.
+    var why = '';
+    try {
+      if ((tag === 'video' || tag === 'audio') && target.error) {
+        why = ' [MediaError ' + target.error.code + (target.error.message ? ': ' + target.error.message : '') + ']';
+      }
+    } catch (e) { /* the log line is the same without it */ }
+    say(tag + ' failed to load: ' + brief(target.currentSrc || target.src || target.href || target.data || '(no address)') + why);
   }, true);
   window.addEventListener('unhandledrejection', function (event) {
     var reason = event && event.reason;
