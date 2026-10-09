@@ -667,7 +667,7 @@ impl WebGLRenderingContext {
         Ok(Some(match source {
             TexImageSource::ImageBitmap(bitmap) => {
                 if !bitmap.origin_is_clean() {
-                    return Err(Error::Security(None));
+                    return Err(Error::Security(Some("WebGL texImage: the source holds cross-origin pixels".into())));
                 }
 
                 let Some(snapshot) = bitmap.bitmap_data().clone() else {
@@ -718,7 +718,7 @@ impl WebGLRenderingContext {
                     },
                 };
                 if !image.same_origin(&document.origin()) {
-                    return Err(Error::Security(None));
+                    return Err(Error::Security(Some("WebGL texImage: the source holds cross-origin pixels".into())));
                 }
 
                 // Vector images are not currently supported here and there are
@@ -751,7 +751,7 @@ impl WebGLRenderingContext {
             // WebGLContext (probably via GetPixels()).
             TexImageSource::HTMLCanvasElement(canvas) => {
                 if !canvas.origin_is_clean() {
-                    return Err(Error::Security(None));
+                    return Err(Error::Security(Some("WebGL texImage: the source holds cross-origin pixels".into())));
                 }
 
                 let Some(snapshot) = canvas.get_image_data() else {
@@ -778,7 +778,7 @@ impl WebGLRenderingContext {
             },
             TexImageSource::HTMLVideoElement(video) => {
                 if !video.origin_is_clean() {
-                    return Err(Error::Security(None));
+                    return Err(Error::Security(Some("WebGL texImage: the source holds cross-origin pixels".into())));
                 }
 
                 let Some(snapshot) = video.get_current_frame_data() else {

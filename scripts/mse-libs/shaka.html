@@ -1,0 +1,18 @@
+<!doctype html><meta charset=utf-8><title>shaka</title>
+<video id=v muted playsinline width=320 height=240></video>
+<script src="shaka-player.compiled.js"></script><script src="common.js"></script>
+<script>
+(async function(){ try {
+  var v = document.getElementById('v');
+  shaka.polyfill.installAll();
+  ok('Shaka says the browser is supported', shaka.Player.isBrowserSupported());
+  var player = new shaka.Player();
+  var errors = [];
+  player.addEventListener('error', function(e){ errors.push(e.detail.code + ' ' + e.detail.message); log('INFO shaka error ' + e.detail.code + ' ' + (e.detail.message || '')); });
+  await player.attach(v);
+  try { await player.load('manifest.mpd'); ok('the manifest loads', true); } catch (e) { ok('the manifest loads', false, (e.code || '') + ' ' + (e.message || e)); }
+  v.play().catch(function(e){ log('INFO play ' + e); });
+  await standardChecks(v, 12);
+  ok('no errors', errors.length === 0, errors);
+ } catch (e) { log('EXCEPTION ' + e + ' ' + (e && e.stack)); } document.title = 'DONE'; })();
+</script>

@@ -21,7 +21,7 @@ use std::collections::BTreeSet;
 use std::path::PathBuf;
 
 use ferrite_servo::diag::{
-    parse_hex_color, ControlAnswer, DeviceRect, DialogKind, MenuItemView, PageControl,
+    parse_hex_color, ControlAnswer, DeviceRect, DialogKind, MenuItemView, PageControl, Password,
     SelectOptionView,
 };
 use ferrite_servo::session::{PageKey, PageKeyEvent, PageNamedKey};
@@ -65,6 +65,8 @@ const POPUP_PAD: f32 = 4.0;
 const FOOTER_H: f32 = 44.0;
 
 pub(crate) const INPUT_ID: &str = "ferrite_control_input";
+/// The longest username or password the sign-in card keeps.
+const AUTH_CHARS: usize = 256;
 
 /// A small, fixed palette for the colour picker.
 const SWATCHES: [&str; 16] = [
@@ -456,6 +458,8 @@ pub(crate) struct FileState {
     pub content: text_editor::Content,
     pub single: String,
     pub checks: Vec<PathCheck>,
+    /// Why the system file picker could not be shown, if it could not.
+    pub picker_note: Option<String>,
 }
 
 impl FileState {
@@ -466,6 +470,26 @@ impl FileState {
             content: text_editor::Content::new(),
             single: String::new(),
             checks: Vec::new(),
+            picker_note: None,
+        }
+    }
+
+    /// Fills the card with what the system picker returned (nothing for a
+    /// cancelled picker), to be checked and confirmed like typed paths.
+    fn take_picked(&mut self, picked: Result<Vec<std::path::PathBuf>, String>) {
+        match picked {
+            Ok(paths) if paths.is_empty() => {}
+            Ok(paths) => {
+                let lines: Vec<String> = paths.iter().map(|p| p.display().to_string()).collect();
+                if self.multiple {
+                    self.content = text_editor::Content::with_text(&lines.join("\n"));
+                } else {
+                    self.single = lines[0].clone();
+                }
+                self.picker_note = None;
+                self.recheck();
+            }
+            Err(why) => self.picker_note = Some(why),
         }
     }
 
@@ -516,10 +540,21 @@ pub(crate) fn menu_step(items: &[MenuItemView], from: Option<usize>, delta: i32)
 
 pub(crate) enum ControlUi {
     Select(SelectState),
-    Dialog { reply: String },
+    Dialog {
+        reply: String,
+    },
     File(FileState),
-    Color { typed: String },
-    Menu { highlighted: Option<usize> },
+    Color {
+        typed: String,
+    },
+    Menu {
+        highlighted: Option<usize>,
+    },
+    /// A site's (or proxy's) request for a username and password.
+    Auth {
+        username: String,
+        password: String,
+    },
 }
 
 /// A control the engine is waiting on, with the UI state to answer it.
@@ -530,7 +565,16 @@ pub(crate) struct PendingControl {
     /// load can tell whether the page has since moved on (and the control with
     /// it) or merely reported the same address again.
     pub page_url: String,
+    /// How far its entrance has run, `0.0..=1.0` (see [`ENTRANCE_STEP`]).
+    pub shown: f32,
 }
+
+/// Advance per `ControlAnimTick`: an overlay eases in over ~140 ms.
+pub(crate) const ENTRANCE_STEP: f32 = 16.0 / 140.0;
+/// How far below its place a card starts its entrance, in logical pixels.
+const ENTRANCE_RISE: f32 = 10.0;
+/// The scrim's darkness behind a centred card once it is in.
+const SCRIM_ALPHA: f32 = 0.46;
 
 /// A key the control cares about.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -553,6 +597,14 @@ pub enum Msg {
     ReplyChanged(String),
     FileAction(text_editor::Action),
     FileTextChanged(String),
+    /// Show the system's own file picker.
+    BrowseFiles,
+    /// The sign-in card's username field.
+    AuthUser(String),
+    /// The sign-in card's password field.
+    AuthPass(String),
+    /// What the system picker returned (nothing if cancelled).
+    FilesPicked(Result<Vec<std::path::PathBuf>, String>),
     ColorChanged(String),
     MenuHover(usize),
     MenuChoose(usize),
@@ -570,6 +622,8 @@ pub(crate) enum Outcome {
     Answer(ControlAnswer),
     /// Scroll the list to this offset.
     ScrollTo(f32),
+    /// Show the system file picker (several files or one).
+    Browse(bool),
 }
 
 impl PendingControl {
@@ -592,11 +646,16 @@ impl PendingControl {
             PageControl::Menu { items, .. } => ControlUi::Menu {
                 highlighted: menu_step(items, None, 1),
             },
+            PageControl::Auth { .. } => ControlUi::Auth {
+                username: String::new(),
+                password: String::new(),
+            },
         };
         Self {
             control,
             ui,
             page_url: String::new(),
+            shown: 0.0,
         }
     }
 
@@ -685,9 +744,38 @@ impl PendingControl {
                 f.recheck();
                 Outcome::Nothing
             }
+            (ControlUi::File(f), _, Msg::BrowseFiles) => Outcome::Browse(f.multiple),
+            (ControlUi::File(f), _, Msg::FilesPicked(picked)) => {
+                f.take_picked(picked);
+                Outcome::Nothing
+            }
             (ControlUi::File(f), _, Msg::Accept) => {
                 f.recheck();
                 f.answer().map_or(Outcome::Nothing, Outcome::Answer)
+            }
+
+            // ── sign-in (HTTP authentication) ──
+            (ControlUi::Auth { username, .. }, _, Msg::AuthUser(text)) => {
+                *username = text.chars().take(AUTH_CHARS).collect();
+                Outcome::Nothing
+            }
+            (ControlUi::Auth { password, .. }, _, Msg::AuthPass(text)) => {
+                *password = text.chars().take(AUTH_CHARS).collect();
+                Outcome::Nothing
+            }
+            (
+                ControlUi::Auth { username, password },
+                _,
+                Msg::Accept | Msg::Key(ControlKey::Enter),
+            ) => {
+                if username.is_empty() {
+                    Outcome::Nothing
+                } else {
+                    Outcome::Answer(ControlAnswer::Credentials {
+                        username: std::mem::take(username),
+                        password: Password(std::mem::take(password)),
+                    })
+                }
             }
 
             // ── colour ──
@@ -862,6 +950,11 @@ pub(crate) fn update(state: &mut FerriteBrowser, msg: Msg) -> iced::Task<Ferrite
             select_scroll_id(),
             scrollable::AbsoluteOffset { x: 0.0, y },
         ),
+        Outcome::Browse(multiple) => {
+            iced::Task::perform(crate::native_picker::pick(multiple), |r| {
+                control_msg(Msg::FilesPicked(r))
+            })
+        }
     }
 }
 
@@ -896,7 +989,9 @@ pub(crate) fn focus_task(control: &PendingControl) -> iced::Task<FerriteBrowserM
             text_input::focus(text_input::Id::new(INPUT_ID))
         }
         ControlUi::File(f) if !f.multiple => text_input::focus(text_input::Id::new(INPUT_ID)),
-        ControlUi::Color { .. } => text_input::focus(text_input::Id::new(INPUT_ID)),
+        ControlUi::Color { .. } | ControlUi::Auth { .. } => {
+            text_input::focus(text_input::Id::new(INPUT_ID))
+        }
         _ => iced::Task::none(),
     }
 }
@@ -921,7 +1016,12 @@ pub(crate) fn overlay<'a>(
             .map_or("", String::as_str),
     );
     let scale = state.scale_factor;
-    Some(match (&pending.control, &pending.ui) {
+    let eased = crate::ease_out_cubic(pending.shown);
+    let modal = matches!(
+        pending.control,
+        PageControl::Dialog { .. } | PageControl::File { .. } | PageControl::Auth { .. }
+    );
+    let view = match (&pending.control, &pending.ui) {
         (PageControl::Select { anchor, .. }, ControlUi::Select(s)) => {
             select_view(palette, s, anchor_to_logical(*anchor, scale), area)
         }
@@ -932,6 +1032,9 @@ pub(crate) fn overlay<'a>(
         (PageControl::Color { anchor, .. }, ControlUi::Color { typed }) => {
             color_view(palette, typed, anchor_to_logical(*anchor, scale), area)
         }
+        (PageControl::Auth { host, for_proxy }, ControlUi::Auth { username, password }) => {
+            auth_view(palette, host, *for_proxy, username, password)
+        }
         (PageControl::Menu { items, anchor }, ControlUi::Menu { highlighted }) => menu_view(
             palette,
             items,
@@ -940,7 +1043,51 @@ pub(crate) fn overlay<'a>(
             area,
         ),
         _ => return None,
-    })
+    };
+    Some(entrance(view, eased, modal))
+}
+
+/// The overlay as it eases in: a centred card's scrim darkens and the content
+/// rises the last few pixels into place. At `eased == 1.0` it is the overlay as is.
+fn entrance(
+    view: Element<'_, FerriteBrowserMessage>,
+    eased: f32,
+    modal: bool,
+) -> Element<'_, FerriteBrowserMessage> {
+    let risen = container(view).padding(Padding {
+        top: ENTRANCE_RISE * (1.0 - eased),
+        ..Padding::ZERO
+    });
+    if !modal {
+        return risen.into();
+    }
+    let scrim = container(Space::new(Length::Fill, Length::Fill))
+        .width(Length::Fill)
+        .height(Length::Fill)
+        .style(move |_: &Theme| container::Style {
+            background: Some(Background::Color(Color {
+                a: SCRIM_ALPHA * eased,
+                ..Color::BLACK
+            })),
+            ..container::Style::default()
+        });
+    stack([scrim.into(), risen.into()]).into()
+}
+
+/// Moves the active tab's overlay entrance one step on.
+pub(crate) fn advance_entrance(state: &mut FerriteBrowser) {
+    if let Some(control) = state
+        .tab_diag
+        .get_mut(state.active_tab)
+        .and_then(|d| d.control.as_mut())
+    {
+        control.shown = (control.shown + ENTRANCE_STEP).min(1.0);
+    }
+}
+
+/// Whether the active tab's overlay is still easing in.
+pub(crate) fn entrance_running(state: &FerriteBrowser) -> bool {
+    active_control(state).is_some_and(|c| c.shown < 1.0)
 }
 
 /// A layer that dismisses the control on any press outside the card.
@@ -970,17 +1117,12 @@ fn popup_layer<'a>(
 
 /// A centred modal `card` over a dimmed, input-blocking layer.
 fn modal_layer<'a>(card: Element<'a, FerriteBrowserMessage>) -> Element<'a, FerriteBrowserMessage> {
+    // The scrim's colour is drawn under this by `entrance`, so it can fade in;
+    // this layer only keeps presses off the page.
     let scrim = mouse_area(
         container(Space::new(Length::Fill, Length::Fill))
             .width(Length::Fill)
-            .height(Length::Fill)
-            .style(|_: &Theme| container::Style {
-                background: Some(Background::Color(Color {
-                    a: 0.46,
-                    ..Color::BLACK
-                })),
-                ..container::Style::default()
-            }),
+            .height(Length::Fill),
     )
     .on_press(FerriteBrowserMessage::Noop);
     let centred = container(mouse_area(card).on_press(FerriteBrowserMessage::Noop))
@@ -1494,20 +1636,103 @@ fn dialog_view<'a>(
     ))
 }
 
+/// A site's or proxy's request for a username and password. The host is the
+/// browser's own reading of the address (not text the page chose), and the
+/// password field is masked.
+fn auth_view<'a>(
+    palette: &'static Palette,
+    host: &str,
+    for_proxy: bool,
+    username: &'a str,
+    password: &'a str,
+) -> Element<'a, FerriteBrowserMessage> {
+    let field_style = |theme: &Theme, status: text_input::Status| {
+        crate::tokens::field_style(theme, status, RADIUS_SM)
+    };
+    let what = if for_proxy {
+        format!(
+            "The proxy {} asks for a username and password.",
+            sanitize_untrusted(host, 80)
+        )
+    } else {
+        format!(
+            "{} asks for a username and password.",
+            sanitize_untrusted(host, 80)
+        )
+    };
+    let body = column![
+        text(what)
+            .size(TEXT_SMALL)
+            .color(palette.text_dim)
+            .wrapping(text::Wrapping::Word),
+        text_input("Username", username)
+            .id(text_input::Id::new(INPUT_ID))
+            .on_input(|t| control_msg(Msg::AuthUser(t)))
+            .on_submit(control_msg(Msg::Accept))
+            .size(TEXT_BODY)
+            .padding([SP_SM - 1.0, SP_SM])
+            .style(field_style),
+        text_input("Password", password)
+            .secure(true)
+            .on_input(|t| control_msg(Msg::AuthPass(t)))
+            .on_submit(control_msg(Msg::Accept))
+            .size(TEXT_BODY)
+            .padding([SP_SM - 1.0, SP_SM])
+            .style(field_style),
+    ]
+    .spacing(SP_SM);
+    modal_layer(page_card(
+        palette,
+        "Sign in",
+        host,
+        body.into(),
+        "Sent only to this site, and only when you press Sign in.",
+        buttons(Some("Cancel"), "Sign in", !username.is_empty()),
+    ))
+}
+
 fn file_view<'a>(
     palette: &'static Palette,
     f: &'a FileState,
     host: &str,
 ) -> Element<'a, FerriteBrowserMessage> {
-    let mut body: Vec<Element<FerriteBrowserMessage>> = vec![text(if f.multiple {
-        "Ferrite has no file browser yet. Type or paste the full path of each file, one per line (or separated by commas)."
-    } else {
-        "Ferrite has no file browser yet. Type or paste the full path of the file."
-    })
-    .size(TEXT_SMALL)
-    .color(palette.text_dim)
-    .wrapping(text::Wrapping::Word)
-    .into()];
+    let mut body: Vec<Element<FerriteBrowserMessage>> = vec![
+        button(
+            row![
+                icon(Icon::Folder, TEXT_BODY, palette.text),
+                text(if f.multiple {
+                    "Choose files…"
+                } else {
+                    "Choose a file…"
+                })
+                .size(TEXT_BODY),
+            ]
+            .spacing(SP_SM)
+            .align_y(Alignment::Center),
+        )
+        .padding([SP_SM - 1.0, SP_LG])
+        .style(outline_btn_style)
+        .on_press(control_msg(Msg::BrowseFiles))
+        .into(),
+        text(if f.multiple {
+            "Or type or paste the full path of each file, one per line (or separated by commas)."
+        } else {
+            "Or type or paste the full path of the file."
+        })
+        .size(TEXT_SMALL)
+        .color(palette.text_dim)
+        .wrapping(text::Wrapping::Word)
+        .into(),
+    ];
+    if let Some(note) = &f.picker_note {
+        body.push(
+            text(note.as_str())
+                .size(TEXT_CAPTION)
+                .color(palette.danger)
+                .wrapping(text::Wrapping::Word)
+                .into(),
+        );
+    }
     let field_style = |theme: &Theme, status: text_input::Status| {
         crate::tokens::field_style(theme, status, RADIUS_SM)
     };
@@ -1619,6 +1844,87 @@ fn file_view<'a>(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_picked_file_fills_the_card_and_is_checked_before_it_is_sent() {
+        let dir = std::env::temp_dir().join(format!("ferrite-picker-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let file = dir.join("photo.png");
+        std::fs::write(&file, b"x").unwrap();
+
+        let mut one = FileState::new(false, Vec::new());
+        // Cancelled: nothing changes.
+        one.take_picked(Ok(Vec::new()));
+        assert!(one.single.is_empty() && one.answer().is_none());
+        one.take_picked(Ok(vec![file.clone()]));
+        assert_eq!(one.single, file.display().to_string());
+        assert_eq!(one.answer(), Some(ControlAnswer::Files(vec![file.clone()])));
+        // No picker on this system: said so, and the typed field still works.
+        one.take_picked(Err("No system file picker".into()));
+        assert!(one.picker_note.is_some());
+
+        let second = dir.join("notes.txt");
+        std::fs::write(&second, b"y").unwrap();
+        let mut many = FileState::new(true, Vec::new());
+        many.take_picked(Ok(vec![file.clone(), second.clone()]));
+        assert_eq!(
+            many.answer(),
+            Some(ControlAnswer::Files(vec![file, second]))
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_sign_in_prompt_needs_a_username_and_never_prints_the_password() {
+        let mut p = PendingControl::new(
+            PageControl::Auth {
+                host: "intranet.example".into(),
+                for_proxy: false,
+            },
+            Size::new(800.0, 600.0),
+        );
+        // No username yet: Sign in does nothing.
+        assert_eq!(p.handle(Msg::AuthPass("hunter2".into())), Outcome::Nothing);
+        assert_eq!(p.handle(Msg::Accept), Outcome::Nothing);
+        p.handle(Msg::AuthUser("ann".into()));
+        let answer = p.handle(Msg::Key(ControlKey::Enter));
+        assert_eq!(
+            answer,
+            Outcome::Answer(ControlAnswer::Credentials {
+                username: "ann".into(),
+                password: Password("hunter2".into()),
+            })
+        );
+        assert!(!format!("{answer:?}").contains("hunter2"));
+        // Cancel answers with nothing.
+        let mut q = PendingControl::new(
+            PageControl::Auth {
+                host: "proxy.example".into(),
+                for_proxy: true,
+            },
+            Size::new(800.0, 600.0),
+        );
+        assert_eq!(
+            q.handle(Msg::Dismiss),
+            Outcome::Answer(ControlAnswer::Dismiss)
+        );
+    }
+
+    #[test]
+    fn a_long_username_is_cut_to_the_limit() {
+        let mut p = PendingControl::new(
+            PageControl::Auth {
+                host: "a.example".into(),
+                for_proxy: false,
+            },
+            Size::new(800.0, 600.0),
+        );
+        p.handle(Msg::AuthUser("é".repeat(AUTH_CHARS + 9)));
+        let ControlUi::Auth { username, .. } = &p.ui else {
+            panic!("an auth card");
+        };
+        assert_eq!(username.chars().count(), AUTH_CHARS);
+    }
 
     fn option(index: usize, label: &str) -> SelectOptionView {
         SelectOptionView {
@@ -2290,6 +2596,28 @@ mod tests {
     }
 
     // ── app integration ──
+
+    #[test]
+    fn an_overlay_eases_in_once_and_then_stops_ticking() {
+        let mut state = state_with(PageControl::Auth {
+            host: "a.example".into(),
+            for_proxy: false,
+        });
+        assert!(entrance_running(&state));
+        let mut ticks = 0;
+        while entrance_running(&state) {
+            advance_entrance(&mut state);
+            ticks += 1;
+            assert!(ticks < 100, "the entrance never finished");
+        }
+        // About 140 ms of 16 ms frames, and it ends exactly in place.
+        assert_eq!(ticks, (1.0 / ENTRANCE_STEP).ceil() as usize);
+        assert_eq!(active_control(&state).unwrap().shown, 1.0);
+        // Nothing to advance once the control is answered.
+        state.tab_diag[0].control = None;
+        advance_entrance(&mut state);
+        assert!(!entrance_running(&state));
+    }
 
     fn state_with(control: PageControl) -> FerriteBrowser {
         let mut state = FerriteBrowser::default();

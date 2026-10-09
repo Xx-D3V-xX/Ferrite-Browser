@@ -261,8 +261,21 @@ impl VertexArrayObject {
 
 impl Drop for VertexArrayObject {
     fn drop(&mut self) {
-        if self.id.is_some() {
-            self.delete(Operation::Fallible);
+        // Ferrite: this runs from the object's GC finalizer, where a panic aborts
+        // the process. `delete` also walks the attached buffers, which the same
+        // GC may already have finalized (every object goes when the script
+        // thread shuts down): github.com's WebGL VAOs aborted the engine on exit
+        // that way. Here only the array itself is deleted; a buffer it still
+        // held is freed with its context (see FERRITE-PATCHES.md).
+        let Some(id) = self.id else { return };
+        if self.is_deleted.replace(true) {
+            return;
+        }
+        if let Some(context) = self.context.root() {
+            context.send_with_fallibility(
+                WebGLCommand::DeleteVertexArray(id),
+                Operation::Fallible,
+            );
         }
     }
 }

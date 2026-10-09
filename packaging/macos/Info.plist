@@ -14,5 +14,9 @@
   <key>LSApplicationCategoryType</key><string>public.app-category.productivity</string>
   <key>NSHighResolutionCapable</key><true/>
   <key>NSSupportsAutomaticGraphicsSwitching</key><true/>
+  <!-- A page that asks for the camera or microphone is asked about first (Ferrite shows its
+       own card); without these keys macOS ends the app the moment a capture starts. -->
+  <key>NSCameraUsageDescription</key><string>A website you allow can use your camera.</string>
+  <key>NSMicrophoneUsageDescription</key><string>A website you allow can use your microphone.</string>
 </dict>
 </plist>

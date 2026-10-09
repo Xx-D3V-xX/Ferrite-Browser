@@ -153,10 +153,9 @@ impl AppHandler {
         let log = self.audit_log.borrow();
         let entries = &log.log.entries;
 
-        if log.log.verify_chain() {
-            println!("[ferrite] audit chain verified: {} entries", entries.len());
-        } else {
-            println!("[ferrite] AUDIT CHAIN BROKEN — investigate immediately");
+        match log.log.check_chain() {
+            Ok(()) => println!("[ferrite] audit chain verified: {} entries", entries.len()),
+            Err(e) => println!("[ferrite] AUDIT CHAIN BROKEN — investigate immediately: {e}"),
         }
 
         let grants = entries

@@ -22,7 +22,9 @@ use js::jsapi::{
 };
 use js::jsval::UndefinedValue;
 use js::realm::CurrentRealm;
-use js::rust::wrappers2::{JS_IsExceptionPending, JS_ReadStructuredClone, JS_WriteStructuredClone};
+use js::rust::wrappers2::{
+    JS_ClearPendingException, JS_IsExceptionPending, JS_ReadStructuredClone, JS_WriteStructuredClone,
+};
 use js::rust::{
     CustomAutoRooterGuard, HandleValue, JSAutoStructuredCloneBufferWrapper, MutableHandleValue,
 };
@@ -621,12 +623,15 @@ unsafe extern "C" fn report_error_callback(
     }
 }
 
+/// Called when a `SharedArrayBuffer` is written or read. It said no, so no
+/// `SharedArrayBuffer` could be cloned at all. It says yes now: the policy decides
+/// (`write_message` allows it, nothing that is stored does).
 unsafe extern "C" fn sab_cloned_callback(
     _cx: *mut RawJSContext,
     _receiving: bool,
     _closure: *mut ::std::os::raw::c_void,
 ) -> bool {
-    false
+    true
 }
 
 static STRUCTURED_CLONE_CALLBACKS: JSStructuredCloneCallbacks = JSStructuredCloneCallbacks {
@@ -735,38 +740,93 @@ pub(crate) struct StructuredDataWriter {
     pub(crate) crypto_keys: Option<FxHashMap<CryptoKeyId, SerializableCryptoKey>>,
 }
 
+/// Marks a clone that holds shared memory (a `SharedArrayBuffer`, a shared
+/// `WebAssembly.Memory`, a `WebAssembly.Module`): it was written, and must be read, with
+/// the same-process scope. Ferrite addition; not a SpiderMonkey tag (its header never
+/// starts with these bytes).
+const SHARED_MEMORY_MARK: &[u8; 4] = b"FSAB";
+
 /// Writes a structured clone. Returns a `DataClone` error if that fails.
 pub(crate) fn write(
     cx: &mut JSContext,
     message: HandleValue,
     transfer: Option<CustomAutoRooterGuard<Vec<*mut JSObject>>>,
 ) -> Fallible<StructuredSerializedData> {
+    rooted!(&in(cx) let mut val = UndefinedValue());
+    if let Some(transfer) = transfer {
+        unsafe { transfer.to_jsval(cx, val.handle_mut()) };
+    }
+    write_inner(cx, message, val.handle(), false)
+}
+
+/// [`write`] for a message sent to another script thread (`postMessage` to a worker, a
+/// window or a port). When the plain write is refused, usually because the message holds
+/// a `SharedArrayBuffer` or a `WebAssembly` module or shared memory, it is written
+/// again with the same-process scope and the policy that allows them. Only message
+/// passing does this: what is stored (IndexedDB, history state) must never carry a
+/// pointer into this process.
+///
+/// A same-process clone of shared memory holds a reference on the buffer that only the
+/// clone buffer's destructor would release. The bytes are copied out, so that
+/// destructor is not run (the clone buffer is leaked): the buffer then stays alive until
+/// the page ends, and the reader cannot find it freed under it. One buffer per message
+/// that shares memory is the price; messages that do not are unaffected.
+pub(crate) fn write_message(
+    cx: &mut JSContext,
+    message: HandleValue,
+    transfer: Option<CustomAutoRooterGuard<Vec<*mut JSObject>>>,
+) -> Fallible<StructuredSerializedData> {
+    rooted!(&in(cx) let mut val = UndefinedValue());
+    if let Some(transfer) = transfer {
+        unsafe { transfer.to_jsval(cx, val.handle_mut()) };
+    }
+    match write_inner(cx, message, val.handle(), false) {
+        Ok(data) => Ok(data),
+        Err(first) => {
+            unsafe {
+                if JS_IsExceptionPending(cx) {
+                    JS_ClearPendingException(cx);
+                }
+            }
+            write_inner(cx, message, val.handle(), true).map_err(|second| {
+                // The first refusal is the better explanation when both fail.
+                let _ = second;
+                first
+            })
+        },
+    }
+}
+
+fn write_inner(
+    cx: &mut JSContext,
+    message: HandleValue,
+    val: HandleValue,
+    shared_memory: bool,
+) -> Fallible<StructuredSerializedData> {
     unsafe {
-        rooted!(&in(cx) let mut val = UndefinedValue());
-        if let Some(transfer) = transfer {
-            transfer.to_jsval(cx, val.handle_mut());
-        }
+        let scope = if shared_memory {
+            StructuredCloneScope::SameProcess
+        } else {
+            StructuredCloneScope::DifferentProcess
+        };
         let mut sc_writer = StructuredDataWriter::default();
         let sc_writer_ptr = &mut sc_writer as *mut _;
 
-        let scbuf = JSAutoStructuredCloneBufferWrapper::new(
-            StructuredCloneScope::DifferentProcess,
-            &STRUCTURED_CLONE_CALLBACKS,
-        );
+        let scbuf = JSAutoStructuredCloneBufferWrapper::new(scope, &STRUCTURED_CLONE_CALLBACKS);
         let scdata = &mut ((*scbuf.as_raw_ptr()).data_);
         let policy = CloneDataPolicy {
-            allowIntraClusterClonableSharedObjects_: false,
-            allowSharedMemoryObjects_: false,
+            allowIntraClusterClonableSharedObjects_: shared_memory,
+            allowSharedMemoryObjects_: shared_memory,
         };
         let result = JS_WriteStructuredClone(
             cx,
             message,
             scdata,
-            StructuredCloneScope::DifferentProcess,
+            scope,
             &policy,
             &STRUCTURED_CLONE_CALLBACKS,
             sc_writer_ptr as *mut raw::c_void,
-            val.handle(),
+            val,
         );
         if !result {
             let error = if JS_IsExceptionPending(cx) {
@@ -779,9 +839,17 @@ pub(crate) fn write(
         }
 
         let nbytes = GetLengthOfJSStructuredCloneData(scdata);
-        let mut data = Vec::with_capacity(nbytes);
-        CopyJSStructuredCloneData(scdata, data.as_mut_ptr());
-        data.set_len(nbytes);
+        let mut data = Vec::with_capacity(nbytes + SHARED_MEMORY_MARK.len());
+        if shared_memory {
+            data.extend_from_slice(SHARED_MEMORY_MARK);
+        }
+        let start = data.len();
+        CopyJSStructuredCloneData(scdata, data.as_mut_ptr().add(start));
+        data.set_len(start + nbytes);
+        if shared_memory {
+            // See `write_message`: the references this buffer holds must outlive it.
+            std::mem::forget(scbuf);
+        }
 
         let data = StructuredSerializedData {
             serialized: data,
@@ -840,11 +908,19 @@ pub(crate) fn read(
         crypto_keys: data.crypto_keys.take(),
     };
     let sc_reader_ptr = &mut sc_reader as *mut _;
+    // A clone that holds shared memory says so (see `write_message`) and is read with
+    // the scope and policy it was written with.
+    let shared_memory = data.serialized.starts_with(SHARED_MEMORY_MARK);
+    if shared_memory {
+        data.serialized.drain(..SHARED_MEMORY_MARK.len());
+    }
+    let scope = if shared_memory {
+        StructuredCloneScope::SameProcess
+    } else {
+        StructuredCloneScope::DifferentProcess
+    };
     unsafe {
-        let scbuf = JSAutoStructuredCloneBufferWrapper::new(
-            StructuredCloneScope::DifferentProcess,
-            &STRUCTURED_CLONE_CALLBACKS,
-        );
+        let scbuf = JSAutoStructuredCloneBufferWrapper::new(scope, &STRUCTURED_CLONE_CALLBACKS);
         let scdata = &mut ((*scbuf.as_raw_ptr()).data_);
 
         WriteBytesToJSStructuredCloneData(
@@ -857,11 +933,11 @@ pub(crate) fn read(
             cx,
             scdata,
             JS_STRUCTURED_CLONE_VERSION,
-            StructuredCloneScope::DifferentProcess,
+            scope,
             rval,
             &CloneDataPolicy {
-                allowIntraClusterClonableSharedObjects_: false,
-                allowSharedMemoryObjects_: false,
+                allowIntraClusterClonableSharedObjects_: shared_memory,
+                allowSharedMemoryObjects_: shared_memory,
             },
             &STRUCTURED_CLONE_CALLBACKS,
             sc_reader_ptr as *mut raw::c_void,

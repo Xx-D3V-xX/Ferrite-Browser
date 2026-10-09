@@ -311,6 +311,97 @@ pub enum WebGlMode {
     V2,
 }
 
+/// Whether pages get WebRTC in the `media` build: on unless `FERRITE_WEBRTC=off`. Sign-in
+/// and anti-abuse scripts open a peer connection and a data channel; when that path was
+/// broken on a Mac (T-318), Google refused the browser, so this is the way to tell whether
+/// WebRTC is what a site objects to, and to get past a site while it is.
+#[must_use]
+pub fn webrtc_enabled(setting: Option<&str>) -> bool {
+    !matches!(
+        setting.map(|s| s.trim().to_ascii_lowercase()).as_deref(),
+        Some("off" | "0" | "false" | "no")
+    )
+}
+
+#[cfg(test)]
+mod webrtc_enabled_tests {
+    #[test]
+    fn on_unless_turned_off() {
+        assert!(super::webrtc_enabled(None));
+        assert!(super::webrtc_enabled(Some("on")));
+        assert!(!super::webrtc_enabled(Some(" OFF ")));
+        assert!(!super::webrtc_enabled(Some("0")));
+    }
+}
+
+/// Whether the compatibility script `name` (`svg`, `web`, `storage`, `sw`, `cq`) is given
+/// to pages. All are, unless `FERRITE_COMPAT` leaves some out: `none` leaves out all, and
+/// a list such as `-sw,-cq` leaves out each name written with a leading `-`. A way to find
+/// which script a site objects to, and to get past it while it does (T-319).
+#[must_use]
+pub fn compat_script_on(setting: Option<&str>, name: &str) -> bool {
+    let Some(setting) = setting.map(str::trim).filter(|s| !s.is_empty()) else {
+        return true;
+    };
+    if setting.eq_ignore_ascii_case("none") || setting.eq_ignore_ascii_case("off") {
+        return false;
+    }
+    !setting.split(',').map(str::trim).any(|item| {
+        item.strip_prefix('-')
+            .is_some_and(|n| n.eq_ignore_ascii_case(name))
+    })
+}
+
+#[cfg(test)]
+mod compat_script_tests {
+    use super::compat_script_on;
+
+    #[test]
+    fn all_on_by_default() {
+        for name in ["svg", "web", "storage", "sw", "cq"] {
+            assert!(compat_script_on(None, name));
+            assert!(compat_script_on(Some(""), name));
+        }
+    }
+
+    #[test]
+    fn none_leaves_all_out() {
+        assert!(!compat_script_on(Some("none"), "web"));
+        assert!(!compat_script_on(Some("OFF"), "svg"));
+    }
+
+    #[test]
+    fn a_dash_leaves_one_out() {
+        assert!(!compat_script_on(Some("-sw, -cq"), "sw"));
+        assert!(!compat_script_on(Some("-sw, -cq"), "cq"));
+        assert!(compat_script_on(Some("-sw, -cq"), "web"));
+        assert!(compat_script_on(Some("sw"), "sw"));
+    }
+}
+
+/// Whether the GPU renderer was asked for: `FERRITE_RENDERER=gpu` (or `hardware`).
+/// Anything else, or nothing, keeps the CPU renderer, which is the default (T-318).
+#[must_use]
+pub fn gpu_requested(setting: Option<&str>) -> bool {
+    matches!(
+        setting.map(|s| s.trim().to_ascii_lowercase()).as_deref(),
+        Some("gpu" | "hardware")
+    )
+}
+
+#[cfg(test)]
+mod gpu_requested_tests {
+    #[test]
+    fn only_an_explicit_request_turns_the_gpu_on() {
+        assert!(!super::gpu_requested(None));
+        assert!(!super::gpu_requested(Some("")));
+        assert!(!super::gpu_requested(Some("auto")));
+        assert!(!super::gpu_requested(Some("cpu")));
+        assert!(super::gpu_requested(Some(" GPU ")));
+        assert!(super::gpu_requested(Some("hardware")));
+    }
+}
+
 /// Which WebGL pages get, and the reason, from `FERRITE_WEBGL=off|webgl1|on|auto`
 /// (default auto, which is WebGL 1 only). WebGL 2 is off by default because the
 /// engine's WebGL 2 `drawBuffers`/`readBuffer` on the default framebuffer leave a
@@ -507,6 +598,145 @@ mod intersection_observer_setting_tests {
     }
 }
 
+#[cfg(test)]
+mod frame_and_wake_tests {
+    use super::{flip_rows, note_engine_wake, wait_for_engine_wake, SharedFrame};
+
+    #[test]
+    fn a_bgra_bottom_up_frame_becomes_top_down_rgba() {
+        // One pixel wide, two rows: the bottom row (first) is blue, the top red,
+        // both as B, G, R, A.
+        let frame = SharedFrame {
+            seq: 1,
+            width: 1,
+            height: 2,
+            pixels: std::sync::Arc::new(vec![255, 0, 0, 255, 0, 0, 255, 255]),
+            bottom_up: true,
+            bgra: true,
+        };
+        assert_eq!(
+            frame.to_rgba_top_down(),
+            vec![255, 0, 0, 255, 0, 0, 255, 255]
+        );
+        let rgba = SharedFrame {
+            bgra: false,
+            bottom_up: false,
+            ..frame
+        };
+        assert_eq!(
+            rgba.to_rgba_top_down(),
+            vec![255, 0, 0, 255, 0, 0, 255, 255]
+        );
+    }
+
+    #[test]
+    fn flip_rows_puts_the_last_row_first() {
+        // Two pixels wide, three rows: rows are 8 bytes each.
+        let bottom_up: Vec<u8> = (0..24).collect();
+        let top_down = flip_rows(&bottom_up, 2, 3);
+        assert_eq!(&top_down[0..8], &bottom_up[16..24]);
+        assert_eq!(&top_down[8..16], &bottom_up[8..16]);
+        assert_eq!(&top_down[16..24], &bottom_up[0..8]);
+    }
+
+    #[test]
+    fn an_engine_wake_is_seen_once() {
+        note_engine_wake();
+        assert!(wait_for_engine_wake(std::time::Duration::from_millis(10)));
+        // Taken by the first wait: the next one times out.
+        assert!(!wait_for_engine_wake(std::time::Duration::from_millis(10)));
+        // A wake from another thread ends a wait early.
+        let waker = std::thread::spawn(|| {
+            std::thread::sleep(std::time::Duration::from_millis(20));
+            note_engine_wake();
+        });
+        let started = std::time::Instant::now();
+        assert!(wait_for_engine_wake(std::time::Duration::from_secs(5)));
+        assert!(started.elapsed() < std::time::Duration::from_secs(4));
+        waker.join().unwrap();
+    }
+}
+
+/// The page's current picture without a copy: what `frame_shared` returns.
+#[derive(Debug, Clone)]
+pub struct SharedFrame {
+    /// Changes exactly when the picture does.
+    pub seq: u64,
+    pub width: u32,
+    pub height: u32,
+    /// RGBA, `width * height * 4` bytes.
+    pub pixels: std::sync::Arc<Vec<u8>>,
+    /// The first row in `pixels` is the bottom of the picture (as OpenGL reads
+    /// it back); a caller that draws it flips it on the GPU for nothing.
+    pub bottom_up: bool,
+    /// The bytes are B, G, R, A rather than R, G, B, A (macOS: the engine's
+    /// surface is BGRA, and reading it as RGBA converted every pixel on the CPU).
+    pub bgra: bool,
+}
+
+impl SharedFrame {
+    /// The picture as top-row-first RGBA (for a screenshot, or a caller that
+    /// cannot flip or swizzle it while drawing): one copy.
+    pub fn to_rgba_top_down(&self) -> Vec<u8> {
+        let mut out = if self.bottom_up {
+            flip_rows(&self.pixels, self.width, self.height)
+        } else {
+            self.pixels.as_ref().clone()
+        };
+        if self.bgra {
+            swap_red_blue(&mut out);
+        }
+        out
+    }
+}
+
+/// Turns BGRA bytes into RGBA (or back) in place.
+pub fn swap_red_blue(pixels: &mut [u8]) {
+    for pixel in pixels.as_chunks_mut::<4>().0 {
+        pixel.swap(0, 2);
+    }
+}
+
+/// Set by the engine's event-loop waker (from any thread) when it has work for
+/// the thread that drives it; cleared by [`wait_for_engine_wake`].
+static ENGINE_WAKE: (std::sync::Mutex<bool>, std::sync::Condvar) =
+    (std::sync::Mutex::new(false), std::sync::Condvar::new());
+
+/// Records that the engine asked to be spun.
+#[cfg(any(feature = "servo", test))]
+fn note_engine_wake() {
+    let (flag, signal) = &ENGINE_WAKE;
+    if let Ok(mut woken) = flag.lock() {
+        *woken = true;
+        signal.notify_all();
+    }
+}
+
+/// Blocks until the engine asks to be spun or `timeout` passes, and says
+/// which. A UI that waits on this instead of polling on a timer draws nothing
+/// while a page is still: the engine's own waker says when there is work.
+pub fn wait_for_engine_wake(timeout: std::time::Duration) -> bool {
+    let (flag, signal) = &ENGINE_WAKE;
+    let Ok(guard) = flag.lock() else {
+        std::thread::sleep(timeout);
+        return false;
+    };
+    let Ok((mut woken, _)) = signal.wait_timeout_while(guard, timeout, |woken| !*woken) else {
+        return false;
+    };
+    std::mem::take(&mut *woken)
+}
+
+/// Copies a bottom-row-first picture into top-row-first order.
+pub fn flip_rows(pixels: &[u8], width: u32, height: u32) -> Vec<u8> {
+    let stride = width as usize * 4;
+    let mut out = Vec::with_capacity(pixels.len());
+    for row in pixels.chunks_exact(stride).take(height as usize).rev() {
+        out.extend_from_slice(row);
+    }
+    out
+}
+
 /// A process-wide counter for frame numbers, so two tabs never share one.
 #[cfg(feature = "servo")]
 pub(crate) fn next_frame_seq() -> u64 {
@@ -517,7 +747,94 @@ pub(crate) fn next_frame_seq() -> u64 {
 /// Defines web interfaces Servo lacks that real sites test for; see the
 /// script's own header.
 #[cfg(feature = "servo")]
-const WEB_COMPAT_JS: &str = include_str!("web_compat.js");
+static WEB_COMPAT_JS: std::sync::LazyLock<String> = std::sync::LazyLock::new(|| {
+    include_str!("web_compat.js").replace("__FERRITE_NET_TOKEN__", net_timing_token())
+});
+
+/// This process's secret for `web_compat.js`'s request-timing reports (see
+/// [`crate::diag::parse_net_timings`]). Random per run and never shown to a
+/// page, so a page cannot forge a report the Network tab would believe.
+#[cfg(feature = "servo")]
+fn net_timing_token() -> &'static str {
+    use std::hash::{BuildHasher, Hasher};
+    static TOKEN: std::sync::LazyLock<String> = std::sync::LazyLock::new(|| {
+        let mut token = String::new();
+        for i in 0..2u8 {
+            let mut hasher = std::collections::hash_map::RandomState::new().build_hasher();
+            hasher.write_u8(i);
+            hasher.write_u128(
+                std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .map_or(0, |d| d.as_nanos()),
+            );
+            token.push_str(&format!("{:016x}", hasher.finish()));
+        }
+        token
+    });
+    &TOKEN
+}
+
+/// CSS features the style engine ships off and that work once switched on:
+/// `:has()`, `:nth-child(n of S)` and `@scope`, each checked in the real engine by
+/// `examples/web_api_probe.rs`. Not here, with the reason in `docs/TO-DO.md`
+/// T-312: container queries (the style engine parses `@container` only when built
+/// for Gecko, so the rule is dropped whatever the preference says).
+#[cfg(feature = "servo")]
+fn apply_style_prefs() {
+    stylo_static_prefs::set_pref!("layout.css.has-selector.enabled", true);
+    stylo_static_prefs::set_pref!("layout.css.nth-child-of.enabled", true);
+    stylo_static_prefs::set_pref!("layout.css.at-scope.enabled", true);
+}
+
+/// Remembered site permissions, shared by every tab of the process and kept in the
+/// profile directory (`site-permissions.json`).
+static SITE_PERMISSIONS: std::sync::LazyLock<
+    std::sync::Mutex<crate::permissions::PermissionStore>,
+> = std::sync::LazyLock::new(|| {
+    std::sync::Mutex::new(match profile_dir() {
+        Some(dir) => crate::permissions::PermissionStore::load(dir.join("site-permissions.json")),
+        None => crate::permissions::PermissionStore::in_memory(),
+    })
+});
+
+/// Every remembered site permission, for the settings list.
+pub fn site_permissions() -> Vec<(
+    String,
+    crate::permissions::CapabilityKind,
+    crate::permissions::Remembered,
+)> {
+    SITE_PERMISSIONS
+        .lock()
+        .map(|store| store.entries())
+        .unwrap_or_default()
+}
+
+/// Forget one remembered decision; returns whether there was one.
+pub fn forget_site_permission(origin: &str, kind: crate::permissions::CapabilityKind) -> bool {
+    SITE_PERMISSIONS
+        .lock()
+        .map(|mut store| store.forget(origin, kind))
+        .unwrap_or(false)
+}
+
+/// The Cache API (`caches`), built on IndexedDB; see the script's own header.
+#[cfg(feature = "servo")]
+const STORAGE_COMPAT_JS: &str = include_str!("storage_compat.js");
+
+/// CSS container queries, rewritten into ordinary rules; see the script's own header.
+#[cfg(feature = "servo")]
+const CQ_COMPAT_JS: &str = include_str!("cq_compat.js");
+
+/// Service workers, built on dedicated workers; see the script's own header. A worker
+/// has no user scripts, so the Cache API script travels inside this one (as a string it
+/// puts in front of each worker's source).
+#[cfg(feature = "servo")]
+static SW_COMPAT_JS: std::sync::LazyLock<String> = std::sync::LazyLock::new(|| {
+    include_str!("sw_compat.js").replace(
+        "__FERRITE_CACHE_SOURCE__",
+        &serde_json::to_string(STORAGE_COMPAT_JS).unwrap_or_else(|_| "\"\"".to_string()),
+    )
+});
 
 #[cfg(feature = "servo")]
 mod inner {
@@ -532,6 +849,20 @@ mod inner {
         WebViewBuilder, WebViewDelegate, WebViewPoint, WheelDelta, WheelEvent, WheelMode,
     };
     use winit::dpi::PhysicalSize;
+
+    /// The engine's event-loop waker: tells whoever waits in
+    /// [`super::wait_for_engine_wake`] that the engine has work for its thread.
+    struct EngineWaker;
+
+    impl servo::EventLoopWaker for EngineWaker {
+        fn clone_box(&self) -> Box<dyn servo::EventLoopWaker> {
+            Box::new(EngineWaker)
+        }
+
+        fn wake(&self) {
+            super::note_engine_wake();
+        }
+    }
 
     /// The `Code` (physical key) that best matches a typed character. Pages
     /// mostly read `key`; `code` matters for shortcuts and games, so an
@@ -707,34 +1038,70 @@ mod inner {
         SERVO_ENGINE.with(|cell| drop(cell.borrow_mut().take()));
     }
 
-    /// Makes the rendering context for one tab: always the CPU (software)
-    /// renderer. A GPU renderer was tried and removed: on an Apple M1 with it,
-    /// Google never finished loading and could not be scrolled or clicked, while
-    /// the CPU renderer worked (`docs/DECISIONS.md` ADR-021, `docs/TO-DO.md`
-    /// T-281 and T-305). Says once, in the log, what it uses.
+    /// Makes the rendering context for one tab. The CPU (software) renderer by default;
+    /// the GPU only when asked for with `FERRITE_RENDERER=gpu`, and only if it passes its
+    /// self-test (it falls back to the CPU and says why). The GPU path was the default once
+    /// and was taken out: on an Apple M1 with it, Google never finished loading and the
+    /// WebGL thread panicked (`docs/TO-DO.md` T-305). WebGL 2 is off and a dead WebGL
+    /// thread no longer freezes a page since then, so it is back to be tried, not trusted
+    /// (T-318). Says once, in the log, what it uses.
     fn make_rendering_context(size: PhysicalSize<u32>) -> Result<Rc<dyn RenderingContext>, String> {
         static REPORTED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
-        if !REPORTED.swap(true, std::sync::atomic::Ordering::Relaxed) {
-            eprintln!("[ferrite-render] CPU rendering (software); there is no GPU renderer");
-            if std::env::var_os("FERRITE_RENDERER").is_some() {
-                eprintln!(
-                    "[ferrite-render] FERRITE_RENDERER is ignored: there is only the CPU renderer"
-                );
+        let report = |line: String| {
+            if !REPORTED.swap(true, std::sync::atomic::Ordering::Relaxed) {
+                eprintln!("[ferrite-render] {line}");
             }
+        };
+        if super::gpu_requested(std::env::var("FERRITE_RENDERER").ok().as_deref()) {
+            match crate::gpu_context::HardwareRenderingContext::new(size) {
+                Ok(gpu) => {
+                    report(format!(
+                        "GPU rendering ({}), asked for with FERRITE_RENDERER=gpu",
+                        gpu.renderer()
+                    ));
+                    return Ok(Rc::new(gpu));
+                }
+                Err(e) => report(format!(
+                    "FERRITE_RENDERER=gpu, but the GPU did not pass its self-test ({e:?}); CPU rendering"
+                )),
+            }
+        } else {
+            report("CPU rendering (software); FERRITE_RENDERER=gpu tries the GPU".to_string());
         }
         SoftwareRenderingContext::new(size)
             .map(|cpu| Rc::new(cpu) as Rc<dyn RenderingContext>)
             .map_err(|e| format!("SoftwareRenderingContext: {e:?}"))
     }
 
-    /// The page content every tab is given: the SVG compatibility script.
+    /// The page content every tab is given: the compatibility scripts, less any that
+    /// `FERRITE_COMPAT` leaves out.
     fn user_content_manager(servo: &Servo) -> Rc<servo::UserContentManager> {
         USER_CONTENT.with(|cell| {
             cell.borrow_mut()
                 .get_or_insert_with(|| {
                     let manager = servo::UserContentManager::new(servo);
-                    manager.add_script(Rc::new(servo::UserScript::from(super::SVG_COMPAT_JS)));
-                    manager.add_script(Rc::new(servo::UserScript::from(super::WEB_COMPAT_JS)));
+                    let setting = std::env::var("FERRITE_COMPAT").ok();
+                    let scripts: [(&str, &str); 5] = [
+                        ("svg", super::SVG_COMPAT_JS),
+                        ("web", super::WEB_COMPAT_JS.as_str()),
+                        ("storage", super::STORAGE_COMPAT_JS),
+                        ("sw", super::SW_COMPAT_JS.as_str()),
+                        ("cq", super::CQ_COMPAT_JS),
+                    ];
+                    let mut left_out = Vec::new();
+                    for (name, source) in scripts {
+                        if super::compat_script_on(setting.as_deref(), name) {
+                            manager.add_script(Rc::new(servo::UserScript::from(source)));
+                        } else {
+                            left_out.push(name);
+                        }
+                    }
+                    if !left_out.is_empty() {
+                        eprintln!(
+                            "[ferrite-compat] left out by FERRITE_COMPAT: {}",
+                            left_out.join(", ")
+                        );
+                    }
                     Rc::new(manager)
                 })
                 .clone()
@@ -852,12 +1219,36 @@ mod inner {
                 {
                     prefs.user_agent = ua;
                 }
-                *guard = Some(
-                    ServoBuilder::default()
-                        .opts(opts)
-                        .preferences(prefs)
-                        .build(),
-                );
+                // With a media backend built in (the `media` feature), WebRTC peer
+                // connections work. Capture (camera, microphone, screen) stays refused:
+                // `web_compat.js` rejects it, because the engine would grant it with no
+                // prompt.
+                #[cfg(feature = "media")]
+                {
+                    let webrtc_on =
+                        super::webrtc_enabled(std::env::var("FERRITE_WEBRTC").ok().as_deref());
+                    eprintln!(
+                        "[ferrite-webrtc] {}",
+                        if webrtc_on {
+                            "on"
+                        } else {
+                            "off (FERRITE_WEBRTC=off)"
+                        }
+                    );
+                    prefs.dom_webrtc_enabled = webrtc_on;
+                    prefs.dom_webrtc_transceiver_enabled = webrtc_on;
+                }
+                // A release that carries its own GStreamer points it at the bundle before
+                // the engine starts GStreamer.
+                #[cfg(feature = "media")]
+                crate::bundle::use_bundled_gstreamer();
+                let servo = ServoBuilder::default()
+                    .opts(opts)
+                    .preferences(prefs)
+                    .event_loop_waker(Box::new(EngineWaker))
+                    .build();
+                super::apply_style_prefs();
+                *guard = Some(servo);
             }
             guard.as_ref().unwrap().clone()
         })
@@ -921,10 +1312,26 @@ mod inner {
     /// Latest favicon (width, height, RGBA8) shared between Servo's delegate and the session.
     type SharedFavicon = Rc<std::cell::RefCell<Option<(u32, u32, Vec<u8>)>>>;
 
+    /// The permission request(s) a page is waiting on a person for. Dropping a
+    /// request unanswered refuses it, so a navigation that clears this slot is a "no".
+    struct PendingPermission {
+        origin: String,
+        agent_active: bool,
+        requests: Vec<(crate::permissions::CapabilityKind, servo::PermissionRequest)>,
+    }
+
+    type SharedPermission = Rc<std::cell::RefCell<Option<PendingPermission>>>;
+
     /// What the engine is waiting on a person for, with a plain-data view of
     /// it for the UI.
-    type SharedControl =
-        Rc<std::cell::RefCell<Option<(crate::diag::PageControl, servo::EmbedderControl)>>>;
+    type SharedControl = Rc<std::cell::RefCell<Option<(crate::diag::PageControl, Waiting)>>>;
+
+    /// The engine's handle on what a person is to answer: a page control, or
+    /// an HTTP authentication challenge (which the engine asks for apart).
+    enum Waiting {
+        Control(servo::EmbedderControl),
+        Auth(servo::AuthenticationRequest),
+    }
 
     /// `#rrggbb` of an engine colour.
     fn hex_of(c: servo::RgbColor) -> String {
@@ -1102,6 +1509,8 @@ mod inner {
         console_log: Rc<std::cell::RefCell<std::collections::VecDeque<crate::diag::ConsoleEntry>>>,
         /// Every request the engine announced for this tab.
         net_log: Rc<std::cell::RefCell<std::collections::VecDeque<crate::diag::NetEvent>>>,
+        /// Request timings `web_compat.js` reported (see `show_console_message`).
+        net_timings: Rc<std::cell::RefCell<std::collections::VecDeque<crate::diag::NetTiming>>>,
         /// The one thing the page is waiting on a person for.
         control: SharedControl,
         /// The pointer the page asked for.
@@ -1112,20 +1521,130 @@ mod inner {
         /// session has read that frame back. Reading pixels is by far the most
         /// expensive thing a tick does, so an unchanged page costs nothing.
         frame_ready: Rc<std::cell::Cell<bool>>,
+        /// The throttle state the session last asked for (see `set_active`).
+        /// The engine applies a throttle to the page that is current when it
+        /// arrives and does not carry it to the next page loaded in the same tab,
+        /// so a background tab that navigates must be told again.
+        throttle: Rc<std::cell::Cell<Option<bool>>>,
+        /// A camera, microphone or screen request waiting for the person.
+        permission: SharedPermission,
+        /// Whether the AI agent is working in this tab (set by the UI).
+        agent_active: Rc<std::cell::Cell<bool>>,
+    }
+
+    /// The kind of access a request is for, if it is one a person is asked about.
+    fn capability_of(
+        feature: servo::PermissionFeature,
+    ) -> Option<crate::permissions::CapabilityKind> {
+        use crate::permissions::CapabilityKind as K;
+        match feature {
+            servo::PermissionFeature::Camera => Some(K::Camera),
+            servo::PermissionFeature::Microphone => Some(K::Microphone),
+            servo::PermissionFeature::ScreenCapture => Some(K::Screen),
+            _ => None,
+        }
+    }
+
+    impl HeadlessDelegate {
+        /// One audit entry per decision about a capture request: who asked, what for,
+        /// whether it was allowed, and whether the agent was working at the time.
+        fn audit_permission(
+            &self,
+            kind: crate::permissions::CapabilityKind,
+            origin: &str,
+            allowed: bool,
+            agent_active: bool,
+            how: &str,
+        ) {
+            let capability = format!(
+                "capture.{}{}{}",
+                kind.name(),
+                if agent_active { ".agent-active" } else { "" },
+                if how == "remembered" {
+                    ".remembered"
+                } else {
+                    ""
+                }
+            );
+            let kind = if allowed {
+                AuditEventKind::CapabilityGranted
+            } else {
+                AuditEventKind::CapabilityDenied
+            };
+            if let Err(e) = self.audit_log.borrow_mut().append(
+                kind,
+                uuid::Uuid::new_v4(),
+                Some(capability),
+                Some(origin.to_string()),
+            ) {
+                eprintln!("[ferrite-session] audit write error: {e}");
+            }
+        }
     }
 
     impl WebViewDelegate for HeadlessDelegate {
-        /// Ferrite has no permission prompt yet, so every request Servo
-        /// forwards (notifications, persistent storage, wake lock) is refused
-        /// outright rather than left unanswered. Servo does not forward
-        /// geolocation or getUserMedia here at all, which is why those stay
-        /// switched off (docs/TO-DO.md T-265).
-        fn request_permission(&self, _webview: servo::WebView, request: servo::PermissionRequest) {
-            eprintln!(
-                "[ferrite-session] denied permission request: {:?}",
-                request.feature()
-            );
-            request.deny();
+        /// A page asks for something on the person's machine. The screen wake lock is
+        /// granted (it exposes nothing). The camera, the microphone and the screen go
+        /// through `crate::permissions::decide`: refused, allowed, or put to the
+        /// person as a prompt that only the browser's own interface answers. Everything
+        /// else the engine forwards (location, push, MIDI, Bluetooth, ...) is refused
+        /// because nothing in Ferrite backs it.
+        fn request_permission(&self, webview: servo::WebView, request: servo::PermissionRequest) {
+            use crate::permissions::Verdict;
+            if matches!(
+                request.feature(),
+                servo::PermissionFeature::ScreenWakeLock(_)
+            ) {
+                request.allow();
+                return;
+            }
+            let Some(kind) = capability_of(request.feature()) else {
+                eprintln!(
+                    "[ferrite-session] denied permission request: {:?}",
+                    request.feature()
+                );
+                request.deny();
+                return;
+            };
+            let url = webview.url().map(|u| u.to_string()).unwrap_or_default();
+            let origin = crate::permissions::origin_of(&url);
+            let agent_active = self.agent_active.get();
+            let verdict = match super::SITE_PERMISSIONS.lock() {
+                Ok(store) => {
+                    crate::permissions::decide(&store, origin.as_deref(), kind, agent_active)
+                }
+                Err(_) => Verdict::Ask,
+            };
+            let shown = origin.clone().unwrap_or_else(|| url.clone());
+            match verdict {
+                Verdict::Allow => {
+                    self.audit_permission(kind, &shown, true, agent_active, "remembered");
+                    request.allow();
+                }
+                Verdict::Deny => {
+                    self.audit_permission(kind, &shown, false, agent_active, "remembered");
+                    request.deny();
+                }
+                Verdict::Ask => {
+                    let mut slot = self.permission.borrow_mut();
+                    match slot.as_mut() {
+                        // The same page asking for more (the camera, then the
+                        // microphone): one card for the lot.
+                        Some(pending) if pending.origin == shown => {
+                            pending.agent_active |= agent_active;
+                            pending.requests.push((kind, request));
+                        }
+                        // A different page: the older prompt is dropped, which refuses it.
+                        _ => {
+                            *slot = Some(PendingPermission {
+                                origin: shown,
+                                agent_active,
+                                requests: vec![(kind, request)],
+                            });
+                        }
+                    }
+                }
+            }
         }
 
         /// A `<select>`, an `alert()`/`confirm()`/`prompt()`, a file or colour
@@ -1133,16 +1652,36 @@ mod inner {
         /// replaces (and so dismisses) an older one.
         fn show_embedder_control(&self, _webview: servo::WebView, control: servo::EmbedderControl) {
             match describe_control(&control) {
-                Some(view) => *self.control.borrow_mut() = Some((view, control)),
+                Some(view) => *self.control.borrow_mut() = Some((view, Waiting::Control(control))),
                 None => drop(control),
             }
         }
 
         fn hide_embedder_control(&self, _webview: servo::WebView, id: servo::EmbedderControlId) {
             let mut slot = self.control.borrow_mut();
-            if slot.as_ref().is_some_and(|(_, c)| c.id() == id) {
+            if slot
+                .as_ref()
+                .is_some_and(|(_, w)| matches!(w, Waiting::Control(c) if c.id() == id))
+            {
                 *slot = None;
             }
+        }
+
+        /// A site (or a proxy) asked for a username and password: kept for the
+        /// UI to ask the person, like a page control. Answering nothing (a
+        /// dismissed card, or a newer control replacing it) sends none, and
+        /// the page shows the site's own "unauthorized" response.
+        fn request_authentication(
+            &self,
+            _webview: servo::WebView,
+            request: servo::AuthenticationRequest,
+        ) {
+            let host = request.url().host_str().unwrap_or("this site").to_string();
+            let view = crate::diag::PageControl::Auth {
+                host,
+                for_proxy: request.for_proxy(),
+            };
+            *self.control.borrow_mut() = Some((view, Waiting::Auth(request)));
         }
 
         fn notify_cursor_changed(&self, _webview: servo::WebView, cursor: servo::Cursor) {
@@ -1182,6 +1721,15 @@ mod inner {
                     .url()
                     .map_or_else(|| "<unknown>".to_string(), |u| u.to_string())
             );
+            // A prompt belongs to the page that asked: a new page refuses it.
+            if status == servo::LoadStatus::Started {
+                self.permission.borrow_mut().take();
+            }
+            // A new page in a background tab starts un-throttled: tell the engine
+            // again now that the page (and its window) exists.
+            if status == servo::LoadStatus::HeadParsed && self.throttle.get() == Some(true) {
+                webview.set_throttled(true);
+            }
             match status {
                 servo::LoadStatus::Complete => {
                     let url = webview
@@ -1236,6 +1784,17 @@ mod inner {
             message: String,
         ) {
             use crate::diag::{push_bounded, ConsoleEntry, ConsoleLevel};
+            // `web_compat.js`'s request timings come this way; with the right
+            // token they feed the Network tab and are not console messages.
+            if let Some(timings) =
+                crate::diag::parse_net_timings(&message, super::net_timing_token())
+            {
+                let mut log = self.net_timings.borrow_mut();
+                for timing in timings {
+                    push_bounded(&mut log, timing);
+                }
+                return;
+            }
             let mapped = match level {
                 servo::ConsoleLogLevel::Debug | servo::ConsoleLogLevel::Trace => {
                     ConsoleLevel::Debug
@@ -1323,8 +1882,22 @@ mod inner {
         rendering_context: Rc<dyn RenderingContext>,
         width: u32,
         height: u32,
-        /// Cached last frame as raw RGBA bytes (width × height × 4).
+        /// Cached last frame as raw RGBA bytes (`frame_size` × 4), bottom row
+        /// first, as OpenGL reads it back.
         last_frame: Option<std::sync::Arc<Vec<u8>>>,
+        /// The size `last_frame` was read at (the session may since have been
+        /// resized).
+        frame_size: (u32, u32),
+        /// Read the surface as BGRA (macOS, where it is stored that way; reading
+        /// it as RGBA had the driver convert every pixel, about half of each
+        /// readback). Turned off for good if the driver refuses it.
+        read_bgra: bool,
+        /// Whether `last_frame` is BGRA.
+        frame_bgra: bool,
+        /// The frame before `last_frame`: its buffer is read into next time,
+        /// once whoever was showing it has let it go, instead of allocating
+        /// tens of megabytes per frame.
+        spare_frame: Option<std::sync::Arc<Vec<u8>>>,
         /// Unique (process-wide) number of `last_frame`; changes exactly when
         /// the pixels do, so a caller can tell "same picture" without
         /// comparing or copying them.
@@ -1362,12 +1935,26 @@ mod inner {
             Rc<std::cell::RefCell<std::collections::VecDeque<crate::diag::ConsoleEntry>>>,
         /// Requests made, drained by `take_net_events`.
         shared_net_log: Rc<std::cell::RefCell<std::collections::VecDeque<crate::diag::NetEvent>>>,
+        /// Request timings, drained by `take_net_timings`.
+        shared_net_timings:
+            Rc<std::cell::RefCell<std::collections::VecDeque<crate::diag::NetTiming>>>,
         /// Most recently synced favicon (updated in `sync_and_read()`).
         last_favicon: Option<(u32, u32, Vec<u8>)>,
         /// Whether the page's script thread still answers (see [`super::ScriptWatch`]).
         script_watch: super::ScriptWatch,
         /// Set by the callback of the outstanding probe.
         probe_answered: Rc<std::cell::Cell<bool>>,
+        /// The throttle state last sent to the engine (`None` before the first).
+        throttle_sent: Rc<std::cell::Cell<Option<bool>>>,
+        /// A camera, microphone or screen request waiting for the person.
+        shared_permission: SharedPermission,
+        /// Whether the AI agent is working in this tab; read by the delegate.
+        shared_agent_active: Rc<std::cell::Cell<bool>>,
+        /// Which captures the page has live (bit 1 camera, 2 microphone, 4 screen),
+        /// last read from the page, and when a read was last asked for.
+        capture_bits: Rc<std::cell::Cell<u32>>,
+        capture_polled: std::time::Instant,
+        capture_poll_pending: Rc<std::cell::Cell<bool>>,
     }
 
     impl HeadlessServoSession {
@@ -1438,6 +2025,7 @@ mod inner {
             let audit_log = shared_audit_log()?;
 
             // ── Shared delegate ↔ session state ────────────────────────────
+            let throttle_sent: Rc<std::cell::Cell<Option<bool>>> = Rc::default();
             let shared_load_status = Rc::new(std::cell::RefCell::new(LoadStatus::Loading));
             let shared_url = Rc::new(std::cell::RefCell::new("about:blank".to_string()));
             let shared_history: Rc<std::cell::RefCell<(Vec<String>, usize)>> =
@@ -1458,6 +2046,11 @@ mod inner {
             let shared_net_log: Rc<
                 std::cell::RefCell<std::collections::VecDeque<crate::diag::NetEvent>>,
             > = Rc::default();
+            let shared_net_timings: Rc<
+                std::cell::RefCell<std::collections::VecDeque<crate::diag::NetTiming>>,
+            > = Rc::default();
+            let shared_permission: SharedPermission = Rc::default();
+            let shared_agent_active: Rc<std::cell::Cell<bool>> = Rc::default();
 
             // ── Rendering context ──────────────────────────────────────────
             let rendering_context = make_rendering_context(PhysicalSize { width, height })?;
@@ -1485,7 +2078,11 @@ mod inner {
                 crash: shared_crash.clone(),
                 console_log: shared_console_log.clone(),
                 net_log: shared_net_log.clone(),
+                net_timings: shared_net_timings.clone(),
                 frame_ready: frame_ready.clone(),
+                throttle: throttle_sent.clone(),
+                permission: shared_permission.clone(),
+                agent_active: shared_agent_active.clone(),
             });
             let webview = make(&servo, rendering_context.clone(), delegate);
 
@@ -1500,6 +2097,10 @@ mod inner {
                 width,
                 height,
                 last_frame: None,
+                frame_size: (0, 0),
+                read_bgra: cfg!(target_os = "macos"),
+                frame_bgra: false,
+                spare_frame: None,
                 frame_seq: 0,
                 frame_ready,
                 last_load_status: LoadStatus::Loading,
@@ -1517,9 +2118,16 @@ mod inner {
                 shared_crash,
                 shared_console_log,
                 shared_net_log,
+                shared_net_timings,
                 last_favicon: None,
                 script_watch: super::ScriptWatch::default(),
                 probe_answered: Rc::default(),
+                throttle_sent,
+                shared_permission,
+                shared_agent_active,
+                capture_bits: Rc::default(),
+                capture_polled: std::time::Instant::now(),
+                capture_poll_pending: Rc::default(),
             })
         }
 
@@ -1707,47 +2315,90 @@ mod inner {
             if !self.frame_ready.get() && self.last_frame.is_some() {
                 return;
             }
-            // Read back the current frame after paint.
+            // Read back the current frame after paint, straight into a buffer
+            // (Servo's `read_to_image` allocates, clones and flips: three full
+            // copies per frame, at Retina size about 30 MB each). The rows stay
+            // bottom first; the UI flips them on the GPU.
             //
             // `pump_engine()` may have called `make_current()` on another
             // tab's rendering context (GL context is a per-thread global).
             // Re-establish this tab's context as current before the readback so
             // `glReadPixels` reads the correct surface.
-            let _ = self.rendering_context.make_current();
-            let rect = servo::DeviceIntRect::from_origin_and_size(
-                servo::DeviceIntPoint::origin(),
-                servo::DeviceIntSize::new(self.width as i32, self.height as i32),
-            );
-            if let Some(rgba) = self.rendering_context.read_to_image(rect) {
-                self.frame_ready.set(false);
-                self.last_frame = Some(std::sync::Arc::new(rgba.into_raw()));
-                self.frame_seq = super::next_frame_seq();
+            let (width, height) = (self.width, self.height);
+            let len = width as usize * height as usize * 4;
+            if len == 0 {
+                return;
             }
+            let mut buffer = self
+                .spare_frame
+                .take()
+                .and_then(|spare| std::sync::Arc::try_unwrap(spare).ok())
+                .filter(|spare| spare.len() == len)
+                .unwrap_or_else(|| vec![0; len]);
+            let context = &self.rendering_context;
+            let _ = context.make_current();
+            context.prepare_for_rendering();
+            let gl = context.gleam_gl_api();
+            // See servo/servo#18606: some GL drivers need no vertex array bound
+            // for a readback after rendering.
+            gl.bind_vertex_array(0);
+            let read = |bgra: bool, buffer: &mut [u8]| {
+                let (format, kind) = if bgra {
+                    (gleam::gl::BGRA, gleam::gl::UNSIGNED_INT_8_8_8_8_REV)
+                } else {
+                    (gleam::gl::RGBA, gleam::gl::UNSIGNED_BYTE)
+                };
+                gl.read_pixels_into_buffer(0, 0, width as i32, height as i32, format, kind, buffer);
+                gl.get_error()
+            };
+            let mut error = read(self.read_bgra, &mut buffer);
+            if error != gleam::gl::NO_ERROR && self.read_bgra {
+                log::warn!(
+                    "GL error 0x{error:x} reading the page as BGRA; reading RGBA from now on"
+                );
+                self.read_bgra = false;
+                error = read(false, &mut buffer);
+            }
+            if error != gleam::gl::NO_ERROR {
+                log::warn!("GL error 0x{error:x} after reading the page back");
+                return;
+            }
+            self.frame_ready.set(false);
+            self.spare_frame = self.last_frame.replace(std::sync::Arc::new(buffer));
+            self.frame_size = (width, height);
+            self.frame_bgra = self.read_bgra;
+            self.frame_seq = super::next_frame_seq();
         }
 
         /// Convenience wrapper for the single-tab case: pump + sync + read in one call.
         pub fn spin(&mut self) {
             self.pump_engine();
             self.sync_and_read();
+            self.poll_capture();
         }
 
         /// Returns `(width, height, rgba_bytes)` of the most recently rendered
         /// frame, or `None` if no frame has been produced yet.
         pub fn get_frame(&self) -> Option<(u32, u32, Vec<u8>)> {
-            self.last_frame
-                .as_ref()
-                .map(|b| (self.width, self.height, b.as_ref().clone()))
+            self.frame_shared()
+                .map(|frame| (frame.width, frame.height, frame.to_rgba_top_down()))
         }
 
-        /// The current frame without copying it: `(sequence, width, height,
-        /// pixels)`. The sequence number changes exactly when the picture
-        /// does, so a caller that already has that number needs nothing
-        /// (this is what keeps scrolling smooth: a handle is built once per
-        /// new picture, not once per redraw).
-        pub fn frame_shared(&self) -> Option<(u64, u32, u32, std::sync::Arc<Vec<u8>>)> {
-            self.last_frame
-                .as_ref()
-                .map(|b| (self.frame_seq, self.width, self.height, b.clone()))
+        /// The current frame without copying it, bottom row first. Its
+        /// sequence number changes exactly when the picture does, so a caller
+        /// that already has that number needs nothing (the UI uploads a
+        /// picture once, not once per redraw). [`Self::get_frame`] is the
+        /// top-row-first copy, for screenshots.
+        pub fn frame_shared(&self) -> Option<super::SharedFrame> {
+            let (width, height) = self.frame_size;
+            self.last_frame.as_ref().map(|pixels| super::SharedFrame {
+                seq: self.frame_seq,
+                width,
+                height,
+                pixels: pixels.clone(),
+                bottom_up: true,
+                bgra: self.frame_bgra,
+            })
         }
 
         /// Returns `(width, height, rgba_bytes)` of the page's current favicon, or
@@ -1827,6 +2478,137 @@ mod inner {
                 .set_hidpi_scale_factor(euclid::Scale::new(super::display_scale()));
         }
 
+        /// Tell the engine side whether the AI agent is working in this tab. While it
+        /// is, a standing "allow" for the camera or microphone is not applied: the
+        /// person is asked (see `crate::permissions`).
+        pub fn set_agent_active(&self, active: bool) {
+            self.shared_agent_active.set(active);
+        }
+
+        /// The camera, microphone or screen request the page is waiting on, if any.
+        pub fn permission_prompt(&self) -> Option<crate::permissions::PermissionPrompt> {
+            let pending = self.shared_permission.borrow();
+            let pending = pending.as_ref()?;
+            let mut kinds: Vec<_> = pending.requests.iter().map(|(k, _)| *k).collect();
+            kinds.sort();
+            kinds.dedup();
+            Some(crate::permissions::PermissionPrompt {
+                origin: pending.origin.clone(),
+                kinds,
+                agent_active: pending.agent_active,
+            })
+        }
+
+        /// The person's answer to [`Self::permission_prompt`].
+        pub fn answer_permission(&mut self, choice: crate::permissions::PermissionChoice) {
+            use crate::permissions::{PermissionChoice as C, Remembered};
+            let Some(pending) = self.shared_permission.borrow_mut().take() else {
+                return;
+            };
+            let (allow, remember) = match choice {
+                C::Allow { remember } => (true, remember),
+                C::Block { remember } => (false, remember),
+            };
+            let origin = crate::permissions::origin_of(&pending.origin);
+            for (kind, request) in pending.requests {
+                // Audited before it takes effect.
+                let capability = format!(
+                    "capture.{}{}.person",
+                    kind.name(),
+                    if pending.agent_active {
+                        ".agent-active"
+                    } else {
+                        ""
+                    }
+                );
+                match shared_audit_log() {
+                    Ok(log) => {
+                        if let Err(e) = log.borrow_mut().append(
+                            if allow {
+                                AuditEventKind::CapabilityGranted
+                            } else {
+                                AuditEventKind::CapabilityDenied
+                            },
+                            uuid::Uuid::new_v4(),
+                            Some(capability),
+                            Some(pending.origin.clone()),
+                        ) {
+                            eprintln!("[ferrite-session] audit write error: {e}");
+                        }
+                    }
+                    Err(e) => eprintln!("[ferrite-session] audit log unavailable: {e}"),
+                }
+                if remember {
+                    if let (Some(origin), Ok(mut store)) =
+                        (origin.as_deref(), super::SITE_PERMISSIONS.lock())
+                    {
+                        store.remember(
+                            origin,
+                            kind,
+                            if allow {
+                                Remembered::Allow
+                            } else {
+                                Remembered::Block
+                            },
+                        );
+                    }
+                }
+                if allow {
+                    request.allow();
+                } else {
+                    request.deny();
+                }
+            }
+        }
+
+        /// Which captures the page has live right now: `(camera, microphone, screen)`.
+        /// Read from the page by `spin`; a page can end its own tracks but cannot
+        /// make this say "none" while they run (the registry is in a script of ours
+        /// that runs before the page's, and cannot be replaced).
+        pub fn capture_active(&self) -> (bool, bool, bool) {
+            let bits = self.capture_bits.get();
+            (bits & 1 != 0, bits & 2 != 0, bits & 4 != 0)
+        }
+
+        /// End every capture the page has (the "stop sharing" button).
+        pub fn stop_capture(&self) {
+            self.webview.evaluate_javascript(
+                "(function(){var c=window.__ferriteCapture;if(c)c.stopAll();})()",
+                |_| {},
+            );
+            self.capture_bits.set(0);
+        }
+
+        /// Ask the page, without waiting, which captures are live. At most once a
+        /// second and never twice at once.
+        fn poll_capture(&mut self) {
+            if self.capture_poll_pending.get()
+                || self.capture_polled.elapsed() < std::time::Duration::from_millis(1000)
+            {
+                return;
+            }
+            self.capture_polled = std::time::Instant::now();
+            self.capture_poll_pending.set(true);
+            let bits = self.capture_bits.clone();
+            let pending = self.capture_poll_pending.clone();
+            self.webview.evaluate_javascript(
+                "(function(){var c=window.__ferriteCapture;return c?c.bits():0;})()",
+                move |res| {
+                    pending.set(false);
+                    if let Ok(value) = res {
+                        // `Number(3.0)`: the page returns a small integer.
+                        let text = format!("{value:?}");
+                        let number = text
+                            .trim_start_matches("Number(")
+                            .trim_end_matches(')')
+                            .parse::<f64>()
+                            .unwrap_or(0.0);
+                        bits.set((number as u32) & 7);
+                    }
+                },
+            );
+        }
+
         /// What the page is waiting on a person for, if anything.
         pub fn page_control(&self) -> Option<crate::diag::PageControl> {
             self.shared_control
@@ -1838,8 +2620,18 @@ mod inner {
         /// Answers (or dismisses) the page's pending control.
         pub fn answer_control(&mut self, answer: crate::diag::ControlAnswer) {
             use crate::diag::ControlAnswer as A;
-            let Some((_, control)) = self.shared_control.borrow_mut().take() else {
+            let Some((_, waiting)) = self.shared_control.borrow_mut().take() else {
                 return;
+            };
+            let control = match waiting {
+                Waiting::Auth(request) => {
+                    if let A::Credentials { username, password } = answer {
+                        request.authenticate(username, password.0);
+                    }
+                    // Anything else drops the request: no credentials sent.
+                    return;
+                }
+                Waiting::Control(control) => control,
             };
             match (control, answer) {
                 (servo::EmbedderControl::SelectElement(mut select), A::Select(chosen)) => {
@@ -1920,6 +2712,11 @@ mod inner {
         /// Every request announced since the last call, oldest first.
         pub fn take_net_events(&mut self) -> Vec<crate::diag::NetEvent> {
             self.shared_net_log.borrow_mut().drain(..).collect()
+        }
+
+        /// Every request timing reported since the last call, oldest first.
+        pub fn take_net_timings(&mut self) -> Vec<crate::diag::NetTiming> {
+            self.shared_net_timings.borrow_mut().drain(..).collect()
         }
 
         /// Navigate to `url`, drive the event loop for up to `timeout_secs`, and
@@ -2025,6 +2822,13 @@ mod inner {
         /// WebView and hit-tests pointer input only against shown WebViews, so a
         /// tab that was never focused/shown does not react to input.
         pub fn set_active(&self, active: bool) {
+            // A background tab is throttled (timers slowed, animations stopped)
+            // and its document is hidden; the active one is not. Sent only when it
+            // changes, because this is called whenever tabs are re-synced.
+            if self.throttle_sent.get() != Some(!active) {
+                self.throttle_sent.set(Some(!active));
+                self.webview.set_throttled(!active);
+            }
             if active {
                 self.frame_ready.set(true);
                 self.webview.show();
@@ -2276,7 +3080,7 @@ impl HeadlessServoSession {
         None
     }
 
-    pub fn frame_shared(&self) -> Option<(u64, u32, u32, std::sync::Arc<Vec<u8>>)> {
+    pub fn frame_shared(&self) -> Option<SharedFrame> {
         None
     }
 
@@ -2327,6 +3131,10 @@ impl HeadlessServoSession {
         Vec::new()
     }
 
+    pub fn take_net_timings(&mut self) -> Vec<crate::diag::NetTiming> {
+        Vec::new()
+    }
+
     pub fn apply_display_scale(&self) {}
 
     pub fn page_control(&self) -> Option<crate::diag::PageControl> {
@@ -2334,6 +3142,20 @@ impl HeadlessServoSession {
     }
 
     pub fn answer_control(&mut self, _answer: crate::diag::ControlAnswer) {}
+
+    pub fn set_agent_active(&self, _active: bool) {}
+
+    pub fn permission_prompt(&self) -> Option<crate::permissions::PermissionPrompt> {
+        None
+    }
+
+    pub fn answer_permission(&mut self, _choice: crate::permissions::PermissionChoice) {}
+
+    pub fn capture_active(&self) -> (bool, bool, bool) {
+        (false, false, false)
+    }
+
+    pub fn stop_capture(&self) {}
 
     pub fn cursor(&self) -> crate::diag::PageCursor {
         crate::diag::PageCursor::Default
@@ -2492,16 +3314,108 @@ mod user_agent_tests {
 
 #[cfg(all(test, feature = "servo"))]
 mod svg_compat_tests {
-    use super::{SVG_COMPAT_JS, WEB_COMPAT_JS};
+    use super::{CQ_COMPAT_JS, STORAGE_COMPAT_JS, SVG_COMPAT_JS, SW_COMPAT_JS, WEB_COMPAT_JS};
 
     #[test]
     fn the_compat_scripts_parse_under_node() {
         for (name, source) in [
             ("svg_compat.js", SVG_COMPAT_JS),
-            ("web_compat.js", WEB_COMPAT_JS),
+            ("web_compat.js", WEB_COMPAT_JS.as_str()),
+            ("storage_compat.js", STORAGE_COMPAT_JS),
+            ("sw_compat.js", SW_COMPAT_JS.as_str()),
+            ("cq_compat.js", CQ_COMPAT_JS),
         ] {
             parses_under_node(name, source);
         }
+    }
+
+    /// `svg_compat.js`'s geometry (getTotalLength, getPointAtLength, getBBox), run
+    /// under node against stub SVG elements: Google Meet stopped on a missing
+    /// `getTotalLength` while starting a call.
+    #[test]
+    fn svg_geometry_measures_shapes_and_paths() {
+        let node_ok = std::process::Command::new("node")
+            .arg("--version")
+            .output()
+            .map(|o| o.status.success())
+            .unwrap_or(false);
+        if !node_ok {
+            eprintln!("SKIPPED: `node` is not installed; svg_compat.js geometry not exercised");
+            return;
+        }
+        let harness = format!(
+            "class SVGGraphicsElement {{}}\n\
+             class SVGGeometryElement extends SVGGraphicsElement {{}}\n\
+             globalThis.SVGGraphicsElement = SVGGraphicsElement;\n\
+             globalThis.SVGGeometryElement = SVGGeometryElement;\n\
+             globalThis.window = {{ addEventListener() {{}} }};\n\
+             globalThis.document = {{ addEventListener() {{}}, readyState: 'loading', querySelectorAll: () => [] }};\n\
+             globalThis.MutationObserver = class {{ observe() {{}} }};\n\
+             {source}\n\
+             const SHAPES = ['path','line','polyline','polygon','circle','ellipse','rect'];\n\
+             function el(tag, attrs, kids) {{\n\
+               const e = Object.create((SHAPES.includes(tag) ? SVGGeometryElement : SVGGraphicsElement).prototype);\n\
+               e.localName = tag; e.getAttribute = n => n in attrs ? String(attrs[n]) : null;\n\
+               e.hasAttribute = n => n in attrs; kids = kids || [];\n\
+               e.firstElementChild = kids[0] || null;\n\
+               kids.forEach((k, i) => k.nextElementSibling = kids[i + 1] || null);\n\
+               return e;\n\
+             }}\n\
+             const P = d => el('path', {{ d }});\n\
+             const pt = P('M0 0 L30 40').getPointAtLength(25);\n\
+             const box = el('g', {{}}, [el('rect', {{ x: 5, y: 5, width: 10, height: 10 }}), el('circle', {{ cx: 50, cy: 50, r: 5 }})]).getBBox();\n\
+             console.log(JSON.stringify([\n\
+               P('M0 0 L30 40').getTotalLength(),\n\
+               P('m10 10 h10 v10 h-10 z').getTotalLength(),\n\
+               el('circle', {{ r: 10 }}).getTotalLength(),\n\
+               el('rect', {{ width: 10, height: 10, rx: 5 }}).getTotalLength(),\n\
+               P('M0 0a10 10 0 0110 10').getTotalLength(),\n\
+               P('M0 0 Q5 0 10 0 T20 0').getTotalLength(),\n\
+               P('M0 0 H10 M100 100 H110').getTotalLength(),\n\
+               P('M0 0 L10 0 L foo').getTotalLength(),\n\
+               pt.x, pt.y, box.x, box.y, box.width, box.height,\n\
+             ]));\n",
+            source = SVG_COMPAT_JS
+        );
+        let dir = std::env::temp_dir().join(format!("ferrite-svg-geometry-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("svg_harness.js");
+        std::fs::write(&path, harness).unwrap();
+        let out = std::process::Command::new("node")
+            .arg(&path)
+            .output()
+            .expect("node runs");
+        let _ = std::fs::remove_dir_all(&dir);
+        assert!(
+            out.status.success(),
+            "{}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        let got: Vec<f64> = serde_json::from_slice(&out.stdout).expect("a JSON list");
+        let pi = std::f64::consts::PI;
+        let want = [
+            50.0,            // a 3-4-5 line
+            40.0,            // relative h/v and a closing z
+            2.0 * pi * 10.0, // a circle, from four arcs
+            2.0 * pi * 5.0,  // a 10x10 rect with rx 5 is a circle
+            pi * 10.0 / 2.0, // a quarter circle, flags written without separators
+            20.0,            // a quadratic and its smooth continuation
+            20.0,            // a move between subpaths is not length
+            10.0,            // bad data keeps what came before it
+            15.0,            // the point 25 along the 3-4-5 line: x
+            20.0,            // and y
+            5.0,             // a group's box (a rect and a circle): x
+            5.0,             // y
+            50.0,            // width
+            50.0,            // height
+        ];
+        for (i, (g, w)) in got.iter().zip(want.iter()).enumerate() {
+            assert!(
+                (g - w).abs() <= 0.002 * w.abs().max(1.0),
+                "value {i}: got {g}, want {w}"
+            );
+        }
+        assert_eq!(got.len(), want.len());
     }
 
     fn parses_under_node(name: &str, source: &str) {
@@ -2529,6 +3443,81 @@ mod svg_compat_tests {
             "{}",
             String::from_utf8_lossy(&out.stderr)
         );
+    }
+
+    /// Runs `cq_compat.js` under node with a stub page and returns what its
+    /// rewrite makes of each sheet, or `None` without node.
+    fn cq_rewrites(sheets: &[&str]) -> Option<Vec<String>> {
+        let node_ok = std::process::Command::new("node")
+            .arg("--version")
+            .output()
+            .map(|o| o.status.success())
+            .unwrap_or(false);
+        if !node_ok {
+            eprintln!("SKIPPED: `node` is not installed; cq_compat.js not exercised");
+            return None;
+        }
+        let body = CQ_COMPAT_JS
+            .trim_end()
+            .strip_suffix("})();")
+            .expect("the script is one IIFE");
+        let harness = format!(
+            "const el = () => ({{ sheet: {{ cssRules: [] }}, remove() {{}}, setAttribute() {{}}, \
+             hasAttribute() {{ return false; }}, style: {{ setProperty() {{}} }} }});\n\
+             globalThis.window = {{ addEventListener() {{}} }};\n\
+             globalThis.document = {{ readyState: 'complete', createElement: el, \
+             head: {{ appendChild() {{}} }}, documentElement: {{}}, querySelectorAll: () => [], \
+             addEventListener() {{}} }};\n\
+             globalThis.ResizeObserver = class {{ observe() {{}} }};\n\
+             globalThis.MutationObserver = class {{ observe() {{}} }};\n\
+             globalThis.requestAnimationFrame = () => {{}};\n\
+             {body} globalThis.__cq = transform; }})();\n\
+             console.log(JSON.stringify({sheets}.map(s => {{ try {{ return __cq(s); }} \
+             catch (e) {{ return 'THREW ' + e.message; }} }})));\n",
+            sheets = serde_json::to_string(sheets).unwrap()
+        );
+        let dir = std::env::temp_dir().join(format!("ferrite-cq-compat-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("cq_harness.js");
+        std::fs::write(&path, harness).unwrap();
+        let out = std::process::Command::new("node")
+            .arg(&path)
+            .output()
+            .expect("node runs");
+        let _ = std::fs::remove_dir_all(&dir);
+        assert!(
+            out.status.success(),
+            "{}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        Some(serde_json::from_slice(&out.stdout).expect("a JSON list"))
+    }
+
+    #[test]
+    fn declarations_directly_in_a_block_do_not_break_the_container_rewrite() {
+        // Each of these once threw "text is null" out of the rewrite, which surfaced
+        // as an unhandled promise rejection on Reddit, X, Amazon and other sites.
+        let Some(out) = cq_rewrites(&[
+            "@layer theme, base, components, utilities;",
+            ".a{color:red} trailing",
+            "@media (x){ color: red; .b{c:d} }",
+            "@scope (.a){ color:red; .b{width:3cqi} }",
+            "@container (min-width:1px){ color:red; .b{width:2cqw} }",
+            "@container (min-width:1px){ .a{ x } y }",
+        ]) else {
+            return;
+        };
+        for (i, css) in out.iter().enumerate() {
+            assert!(!css.starts_with("THREW"), "sheet {i}: {css}");
+        }
+        assert_eq!(out[0], "");
+        assert!(out[3].contains("calc(3 * var(--cq-w, 1vw))"), "{}", out[3]);
+        assert!(
+            out[4].contains(r#":where([data-cq~="1"]) .b{width:calc(2 * var(--cq-w, 1vw))}"#),
+            "{}",
+            out[4]
+        );
+        assert!(!out[4].contains("color:red"), "{}", out[4]);
     }
 
     #[test]

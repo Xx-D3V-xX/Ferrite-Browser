@@ -980,8 +980,21 @@ exits non-zero when a required check fails.
 |---|---|---|
 | `just probe-input [url]` | `cargo run -p ferrite-servo --features servo --example input_probe -- [url]` | scrolling, clicking, typing, reload and two tabs, against a built-in page (no network). A page you pass must have `#q` (a text input), `#cb` (a checkbox) and `#btn` (a button). It must also be taller than the viewport |
 | `just probe-web-api` | `... --example web_api_probe` | that the Web APIs that benchmarks and frameworks expect do exist. These are `window.crypto` (`getRandomValues`, `randomUUID`, `subtle`), observers, `fetch`, custom elements, WebGL, permissions, notifications and more. They are served from loopback (a secure context). It also checks the painted pixels for the colour of an inline SVG. Required APIs fail the run. `INFO` ones are only listed |
+| `just probe-storage` | `... --example storage_probe` | page storage in the real engine, served from loopback: IndexedDB indexes (unique ones enforced) and cursors (`get`, `getAll`, `count`, `openCursor`, `continue`, `advance`, `continuePrimaryKey`, `update`, `delete`, key cursors, multiEntry, the error cases), the Cache API (`caches`), `localStorage`, `sessionStorage`, `navigator.storage.estimate`, the screen wake lock, and the small interfaces `web_compat.js` adds (`requestIdleCallback`, `scheduler.postTask`, Web Locks, `screen.orientation`, `navigator.mediaDevices`, `startViewTransition`, `checkVisibility`, `Element.animate`) and the Popover API. Prints one `PASS` or `FAIL` line per check and exits 1 if any failed, or if the page logged a script error |
+| `just probe-media` | `cargo run -p ferrite-servo --features servo,media --example media_probe` | audio, video and WebRTC in the real engine built with GStreamer (T-313). It plays a WebM video to the end and draws a decoded frame to a canvas. It loads Ogg audio, makes an `AudioContext`, opens a WebRTC data channel between two peers in one page, and lists no devices. 13 checks. Needs the GStreamer development files and plugins (Ubuntu: `libgstreamer1.0-dev libgstreamer-plugins-base1.0-dev libgstreamer-plugins-bad1.0-dev gstreamer1.0-plugins-base gstreamer1.0-plugins-good gstreamer1.0-plugins-bad gstreamer1.0-libav gstreamer1.0-nice`; macOS: `brew install gstreamer`). Not run on macOS or Windows |
+| `just run-media` | `cargo run -p ferrite-shell --features ferrite-servo/servo,ferrite-servo/media -- ui` | the real-Servo browser with audio, video, WebRTC and Media Source Extensions. Built from source, the binary links the machine's GStreamer, so it only starts where GStreamer is installed. The `-media` release packages carry their own (`scripts/bundle-gstreamer.py`) |
+| `just probe-capture` | `cargo run -p ferrite-servo --features servo,media --example capture_probe` | camera, microphone and screen sharing in the real engine built with GStreamer (T-314): the prompt (one for camera and microphone together), a refusal as `NotAllowedError`, a grant as a labelled stream that plays, `enabled`, `stop()`, clones, a remembered allow used with no prompt, **not used while the agent is working** (the card says so), the screen asked every time and never kept as allowed, a kept block holding, the browser ending a share and showing a live capture, a page unable to hide it. 29 checks with the engine's test sources. With `FERRITE_PROBE_REAL_SCREEN=1` under a display (`xvfb-run -a -s \"-screen 0 1280x800x24\" ...`) it shares the real screen instead and checks that frames reach a `<video>`. Needs the GStreamer packages listed under `probe-media` |
+| `python3 scripts/bundle-gstreamer.py self-test` | (a script) | checks the planning code of the GStreamer bundler used for the `-media` packages (T-316, T-337 for Linux): plugin names, `otool -L` parsing, dependency lookup, a fake Windows install, `readelf`/`ldd` parsing and which Linux libraries a package leaves to the machine. Needs only Python |
+| `python3 scripts/bundle-gstreamer.py linux <stage> [--main NAME] [--extra NAME]` | (a script) | puts the machine's GStreamer (found with `pkg-config`) and every library it needs that a desktop does not always have into `<stage>/lib`, and points the programs at it (`RUNPATH $ORIGIN/lib`, needs `patchelf`). Leaves the C and C++ runtimes, GLib and the graphics, sound and session libraries to the machine (T-337) |
+| `python3 scripts/bundle-gstreamer.py check-linux <stage>` | (a script) | fails if any program or library in `<stage>` names a library that is neither in `<stage>` nor one every desktop has. `scripts/package.sh linux` runs it on every Linux package |
+| `bash scripts/linux-clean-run.sh <dir>` | (a script, needs docker) | runs an unpacked Linux package (`<dir>/package/*/`), and the media probes if `<dir>/probes` has them, in a clean Ubuntu 24.04 container with no GStreamer. CI runs it for both Linux packages |
+| `python3 scripts/windows-runtime.py bundle\|check\|self-test <stage>` | (a script) | `bundle` copies the Visual C++ runtime (`MSVCP140.dll`, `VCRUNTIME140.dll`, `VCRUNTIME140_1.dll`...) from the Visual Studio that built the app next to `ferrite.exe`; `check` reads the import tables of every `.exe` and `.dll` in the folder and fails if one needs a DLL that is neither there nor part of Windows. `scripts/package.sh windows` runs both (T-336). `self-test` needs only Python |
+| `bash scripts/ci-annotate.sh <title> <log> [regex]` | (a script) | prints a log's failure lines as one GitHub error annotation, so a CI failure can be read from the run's summary and the API |
+| `just probe-mse` | `cargo run -p ferrite-servo --features servo,media --example mse_probe` | Media Source Extensions in the real engine built with GStreamer (T-315): a page builds a stream out of `SourceBuffer`s and it plays, seeks, stalls and recovers, and ends. 56 checks with H.264, AAC, VP9 and Opus files from `crates/ferrite-mse/tests/fixtures`. Needs the GStreamer packages listed under `probe-media` |
+| `just probe-mse-libs [hls\|dash\|shaka]` | `scripts/mse-libs/run.sh` | the same with the libraries pages use (T-315): makes a 12 s fragmented MP4 stream with GStreamer (`openh264enc`, `avenc_aac`), fetches hls.js, dash.js and Shaka Player with npm (pinned versions), and plays it in each under a virtual display: manifest, playback, a seek, the end. 29 checks. Needs the GStreamer tools, npm, xvfb and about 1 GB of disk under `target/mse-libs` |
+| `just probe-sw` | `cargo run -p ferrite-servo --features servo --example sw_probe` | service workers (T-314): register, install, activate, `ready`, `controller`, `controllerchange`, `postMessage` both ways, `clients`, `fetch` events (answered, passed through, a POST body, the Cache API inside the worker), a remembered registration starting on the next page, `unregister`, the refusals. 31 checks |
 | `just probe-engine` | `cargo run -p ferrite-engine-servo --features engine-servo --example digest_probe` | the real page script. It reads the numbered element table of a loopback form. It hides the password value. It drives `type`, `tick`, `select`, `click` and `scroll` by `@ref` |
-| `just probe-profile` | removes `target/profile-probe`, then runs `profile_probe -- set` and `-- get` with `FERRITE_HOME=<repo>/target/profile-probe` | that a cookie and `localStorage` survive a restart. The first process sets them and shuts down cleanly. A fresh process must find them |
+| `just probe-profile` | removes `target/profile-probe`, then runs `profile_probe -- set` and `-- get` with `FERRITE_HOME=<repo>/target/profile-probe` | that a cookie, `localStorage`, an IndexedDB record (read back through an index) and a Cache API entry survive a restart. The first process sets them and shuts down cleanly. A fresh process must find them |
 | `just probe-controls` | `... --example controls_probe` | that `<select>`, `confirm()`, `prompt()` and a colour input reach the embedder, and that the answers take effect |
 
 ### `page_shot`: does this page work in Ferrite?
@@ -1003,6 +1016,10 @@ positional:
 - the viewport size in device pixels (1280 x 800);
 - the display scale (1.0). A scale of `2` renders as a Retina screen would. Then a
   1280-pixel frame is a 640 CSS-pixel viewport.
+
+Set `PAGE_SHOT_BACKGROUND=1` to load the page as a background tab (the engine
+throttles it: timers run about once a second, animation frames stop, and
+`document.visibilityState` is `hidden`). Without it the page is the active tab.
 
 It prints these lines:
 
@@ -1125,6 +1142,15 @@ behind lazy-loaded images and infinite scroll, and it makes the engine run the
 containing-block walk on every frame. Use `off` as a quick test when a page sticks. A page
 that checks for the feature then skips it; a page that calls it without checking shows a
 script error.
+
+The page script also writes warnings to the Console tab for things the engine does not
+say on its own: `Ferrite: img failed to load: <address>` (also `script`, `link`, `source`,
+`video`, `audio`, `iframe`, `object`, `embed`), and `Ferrite: unhandled promise rejection:
+<reason>`. An image that loads but cannot be decoded is reported the same way. Use them when
+icons show as empty or `?` boxes, or a page's app never starts. A font that fails to load is
+not reported, because the engine does not raise that event. Long script addresses in console
+messages are shortened before they are stored, so the error text after the address is kept
+in the DevTools copy (Google's addresses are thousands of characters long).
 
 Related engine settings:
 

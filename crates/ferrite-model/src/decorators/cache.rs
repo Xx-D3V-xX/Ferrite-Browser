@@ -29,7 +29,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::cache_key::CacheKey;
 use crate::error::ModelError;
-use crate::provider::{ModelProvider, ProviderCapabilities, ProviderId};
+use crate::provider::{ModelProvider, ProviderCapabilities, ProviderId, TextSink};
 use crate::request::CompletionRequest;
 use crate::response::CompletionResponse;
 
@@ -282,6 +282,29 @@ impl<P: ModelProvider> ModelProvider for Cache<P> {
         Ok(response)
     }
 
+    async fn complete_streaming(
+        &self,
+        req: CompletionRequest,
+        sink: &TextSink<'_>,
+    ) -> Result<CompletionResponse, ModelError> {
+        if !req.is_cacheable() {
+            self.stats.uncacheable.fetch_add(1, Ordering::Relaxed);
+            return self.inner.complete_streaming(req, sink).await;
+        }
+        let key = CacheKey::compute(self.inner.id(), &req);
+        if let Some(mut hit) = self.read(&key) {
+            self.stats.hits.fetch_add(1, Ordering::Relaxed);
+            hit.provenance.cache_hit = true;
+            // Already written: shown whole, at once.
+            sink(&hit.content);
+            return Ok(hit);
+        }
+        self.stats.misses.fetch_add(1, Ordering::Relaxed);
+        let response = self.inner.complete_streaming(req, sink).await?;
+        let _ = self.write(&key, &response);
+        Ok(response)
+    }
+
     fn capabilities(&self) -> ProviderCapabilities {
         self.inner.capabilities()
     }
@@ -512,5 +535,19 @@ mod tests {
             ..CacheStatsSnapshot::default()
         };
         assert_eq!(half.hit_rate(), Some(0.75));
+    }
+
+    #[tokio::test]
+    async fn a_streamed_hit_is_shown_whole_once_without_a_call() {
+        let dir = TempDir::new("cache-stream");
+        let inner = Arc::new(MockProvider::new().always_content("the answer"));
+        let cache = Cache::new(Arc::clone(&inner), dir.path(), clock());
+        let shown = std::sync::Mutex::new(Vec::new());
+        let sink = |t: &str| shown.lock().unwrap().push(t.to_string());
+        cache.complete_streaming(req(), &sink).await.expect("miss");
+        let hit = cache.complete_streaming(req(), &sink).await.expect("hit");
+        assert!(hit.provenance.cache_hit);
+        assert_eq!(inner.call_count(), 1);
+        assert_eq!(*shown.lock().unwrap(), vec!["the answer", "the answer"]);
     }
 }

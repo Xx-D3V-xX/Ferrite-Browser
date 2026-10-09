@@ -38,7 +38,7 @@ use net_traits::request::Referrer;
 use script_bindings::cell::DomRefCell;
 use script_bindings::codegen::GenericBindings::WindowBinding::{GetProtoObject, WindowMethods};
 use script_bindings::proxyhandler::{
-    is_extensible, maybe_cross_origin_get_prototype,
+    is_extensible, is_platform_object_same_origin, maybe_cross_origin_get_prototype,
     maybe_cross_origin_get_prototype_if_ordinary_rawcx, maybe_cross_origin_set_prototype_rawcx,
     prevent_extensions, set_property_descriptor,
 };
@@ -1199,6 +1199,66 @@ unsafe fn GetSubframeWindowProxy(
     None
 }
 
+// What a script may do with a window of another origin that lives in its own
+// script thread (two origins of one site, e.g. `a.example.com` and
+// `b.example.com`, or two ports of one host). These traps once checked no origin
+// at all: such a page could read the other's `document` (servo/servo#44669).
+// <https://html.spec.whatwg.org/multipage/#crossoriginproperties-(-o-)>
+
+/// The window properties another origin may use.
+const CROSS_ORIGIN_WINDOW_PROPERTIES: &[&str] = &[
+    "window", "self", "location", "close", "closed", "focus", "blur", "frames", "length", "top",
+    "opener", "parent", "postMessage",
+];
+
+/// How a script of another origin may use a window property.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum CrossOriginUse {
+    /// One of the cross-origin properties (or a child frame by index).
+    Allowed,
+    /// `then` and symbols: read as `undefined`, so a cross-origin window can be
+    /// awaited and printed without throwing.
+    Undefined,
+    /// Anything else: a SecurityError.
+    Denied,
+}
+
+#[expect(unsafe_code)]
+fn cross_origin_use(cx: &mut JSContext, id: RawHandleId) -> CrossOriginUse {
+    let id = unsafe { Handle::from_raw(id) };
+    if get_array_index_from_id(id).is_some() {
+        return CrossOriginUse::Allowed;
+    }
+    if id.get().is_symbol() {
+        return CrossOriginUse::Undefined;
+    }
+    match script_bindings::conversions::jsid_to_string(cx, id) {
+        Some(name) if CROSS_ORIGIN_WINDOW_PROPERTIES.contains(&&*name.str()) => CrossOriginUse::Allowed,
+        Some(name) if &*name.str() == "then" => CrossOriginUse::Undefined,
+        _ => CrossOriginUse::Denied,
+    }
+}
+
+/// Whether the running script may use this window fully: no script is running
+/// (the engine itself), or the script's realm is the window's or of the same
+/// origin-domain.
+#[expect(unsafe_code)]
+fn window_is_same_origin(cx: &mut JSContext, proxy: RawHandleObject) -> bool {
+    if unsafe { js::rust::wrappers2::GetCurrentRealmOrNull(cx) }.is_null() {
+        return true;
+    }
+    let mut slot = UndefinedValue();
+    unsafe { GetProxyPrivate(*proxy.ptr, &mut slot) };
+    if !slot.is_object() {
+        return true;
+    }
+    let target = slot.to_object();
+    let realm = CurrentRealm::assert(cx);
+    // The window is reachable from the proxy, so it stays alive (and in place)
+    // for this check, which allocates nothing.
+    is_platform_object_same_origin(&realm, unsafe { js::rust::HandleObject::from_marked_location(&target) })
+}
+
 #[expect(unsafe_code)]
 unsafe extern "C" fn get_own_property_descriptor(
     cx: *mut RawJSContext,
@@ -1219,6 +1279,19 @@ unsafe extern "C" fn get_own_property_descriptor(
         window.to_jsval(cx, val.handle_mut());
         set_property_descriptor(desc, val.handle(), attrs, unsafe { &mut *is_none });
         return true;
+    }
+    if !window_is_same_origin(cx, proxy) {
+        match cross_origin_use(cx, id) {
+            CrossOriginUse::Allowed => {},
+            CrossOriginUse::Undefined => {
+                unsafe { *is_none = true };
+                return true;
+            },
+            CrossOriginUse::Denied => {
+                let mut realm = CurrentRealm::assert(cx);
+                return throw_security_error(&mut realm, "get", Some(id));
+            },
+        }
     }
 
     let mut slot = UndefinedValue();
@@ -1247,6 +1320,16 @@ unsafe extern "C" fn define_property(
         }
         return true;
     }
+    {
+        let mut js_cx = unsafe {
+            // SAFETY: We are in SM hook
+            JSContext::from_ptr(NonNull::new(cx).expect("JSContext should not be null in SM hook"))
+        };
+        if !window_is_same_origin(&mut js_cx, proxy) {
+            let mut realm = CurrentRealm::assert(&mut js_cx);
+            return throw_security_error(&mut realm, "define", Some(id));
+        }
+    }
 
     let mut slot = UndefinedValue();
     unsafe { GetProxyPrivate(*proxy.ptr, &mut slot) };
@@ -1270,6 +1353,19 @@ unsafe extern "C" fn has(
     if window.is_some() {
         unsafe { *bp = true };
         return true;
+    }
+    if !window_is_same_origin(cx, proxy) {
+        match cross_origin_use(cx, id) {
+            CrossOriginUse::Allowed => {},
+            CrossOriginUse::Undefined => {
+                unsafe { *bp = false };
+                return true;
+            },
+            CrossOriginUse::Denied => {
+                let mut realm = CurrentRealm::assert(cx);
+                return throw_security_error(&mut realm, "access", Some(id));
+            },
+        }
     }
 
     let mut slot = UndefinedValue();
@@ -1303,6 +1399,20 @@ unsafe extern "C" fn get(
         window.to_jsval(cx, vp);
         return true;
     }
+    if !window_is_same_origin(cx, proxy) {
+        match cross_origin_use(cx, id) {
+            CrossOriginUse::Allowed => {},
+            CrossOriginUse::Undefined => {
+                let mut vp = vp;
+                vp.set(UndefinedValue());
+                return true;
+            },
+            CrossOriginUse::Denied => {
+                let mut realm = CurrentRealm::assert(cx);
+                return throw_security_error(&mut realm, "get", Some(id));
+            },
+        }
+    }
 
     let mut slot = UndefinedValue();
     unsafe { GetProxyPrivate(*proxy.ptr, &mut slot) };
@@ -1331,6 +1441,23 @@ unsafe extern "C" fn set(
         // Reject (which means throw if and only if strict) the set.
         unsafe { (*res).code_ = JSErrNum::JSMSG_READ_ONLY as ::libc::uintptr_t };
         return true;
+    }
+    {
+        let mut js_cx = unsafe {
+            // SAFETY: We are in SM hook
+            JSContext::from_ptr(NonNull::new(cx).expect("JSContext should not be null in SM hook"))
+        };
+        // Another origin may only navigate the window, through `location`.
+        if !window_is_same_origin(&mut js_cx, proxy) {
+            let is_location = script_bindings::conversions::jsid_to_string(&js_cx, unsafe {
+                Handle::from_raw(id)
+            })
+            .is_some_and(|name| &*name.str() == "location");
+            if !is_location {
+                let mut realm = CurrentRealm::assert(&mut js_cx);
+                return throw_security_error(&mut realm, "set", Some(id));
+            }
+        }
     }
 
     let mut slot = UndefinedValue();
@@ -1380,9 +1507,10 @@ unsafe extern "C" fn maybe_cross_origin_get_prototype_wrapper_rawcx(
     )
 }
 
-// TODO: These traps should change their behavior depending on
-// `IsPlatformObjectSameOrigin(this.[[Window]])`
-// See <https://github.com/servo/servo/issues/44669>
+// Each trap checks `IsPlatformObjectSameOrigin(this.[[Window]])` (see
+// `window_is_same_origin`; servo/servo#44669). Not yet: `ownPropertyKeys` and
+// `delete` (left to the engine's default), and named child frames, which another
+// origin may read but which these traps refuse.
 static PROXY_TRAPS: ProxyTraps = ProxyTraps {
     enter: None,
     getOwnPropertyDescriptor: Some(get_own_property_descriptor),
@@ -1498,11 +1626,21 @@ impl Drop for WindowProxyHandler {
 // TODO: reuse the infrastructure in `proxyhandler.rs`. For starters, the calls
 //       to this function should be replaced with those to
 //       `report_cross_origin_denial`.
+//
+// The message names the access and, when there is one, the property: a page's
+// author (and a browser's) needs to know which read a cross-origin check refused.
 #[expect(unsafe_code)]
-fn throw_security_error(realm: &mut CurrentRealm) -> bool {
+fn throw_security_error(realm: &mut CurrentRealm, access: &str, id: Option<RawHandleId>) -> bool {
     if !unsafe { JS_IsExceptionPending(realm) } {
+        let property = id.and_then(|id| {
+            script_bindings::conversions::jsid_to_string(realm, unsafe { Handle::from_raw(id) })
+        });
+        let message = match property {
+            Some(name) => format!("Blocked {access} of property \"{name}\" on a cross-origin window"),
+            None => format!("Blocked {access} on a cross-origin window"),
+        };
         let global = GlobalScope::from_current_realm(realm);
-        throw_dom_exception(realm, &global, Error::Security(None));
+        throw_dom_exception(realm, &global, Error::Security(Some(message.into())));
     }
     false
 }
@@ -1528,7 +1666,7 @@ unsafe extern "C" fn cross_origin_has(
         true
     } else {
         let mut realm = CurrentRealm::assert(&mut cx);
-        throw_security_error(&mut realm)
+        throw_security_error(&mut realm, "get", Some(id))
     }
 }
 
@@ -1549,7 +1687,7 @@ unsafe extern "C" fn cross_origin_get(
 unsafe extern "C" fn cross_origin_set(
     cx: *mut RawJSContext,
     _: RawHandleObject,
-    _: RawHandleId,
+    id: RawHandleId,
     _: RawHandleValue,
     _: RawHandleValue,
     _: *mut ObjectOpResult,
@@ -1559,14 +1697,14 @@ unsafe extern "C" fn cross_origin_set(
         JSContext::from_ptr(NonNull::new(cx).expect("JSContext should not be null in SM hook"))
     };
     let mut realm = CurrentRealm::assert(&mut cx);
-    throw_security_error(&mut realm)
+    throw_security_error(&mut realm, "set", Some(id))
 }
 
 #[expect(unsafe_code)]
 unsafe extern "C" fn delete_xorigin(
     cx: *mut RawJSContext,
     _: RawHandleObject,
-    _: RawHandleId,
+    id: RawHandleId,
     _: *mut ObjectOpResult,
 ) -> bool {
     let mut cx = unsafe {
@@ -1574,7 +1712,7 @@ unsafe extern "C" fn delete_xorigin(
         JSContext::from_ptr(NonNull::new(cx).expect("JSContext should not be null in SM hook"))
     };
     let mut realm = CurrentRealm::assert(&mut cx);
-    throw_security_error(&mut realm)
+    throw_security_error(&mut realm, "delete", Some(id))
 }
 
 #[expect(unsafe_code)]
@@ -1594,7 +1732,7 @@ unsafe extern "C" fn cross_origin_get_own_property_descriptor(
 unsafe extern "C" fn cross_origin_define_property(
     cx: *mut RawJSContext,
     _: RawHandleObject,
-    _: RawHandleId,
+    id: RawHandleId,
     _: RawHandle<PropertyDescriptor>,
     _: *mut ObjectOpResult,
 ) -> bool {
@@ -1603,7 +1741,7 @@ unsafe extern "C" fn cross_origin_define_property(
         JSContext::from_ptr(NonNull::new(cx).expect("JSContext should not be null in SM hook"))
     };
     let mut realm = CurrentRealm::assert(&mut cx);
-    throw_security_error(&mut realm)
+    throw_security_error(&mut realm, "define", Some(id))
 }
 
 // TODO: Some of these callbacks need proper support for handling cross-origin

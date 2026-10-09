@@ -1,4 +1,5 @@
 name: CI
+run-name: CI${{ inputs.only_sites && ' (real-site check; media builds only, no release)' || inputs.only_media && ' (media builds only, no release)' || inputs.only_tests && ' (lint and tests only; no release, as for media builds only)' || '' }}
 
 # Manual trigger only — no automatic run on push or pull_request, and no
 # schedule. A project-owner decision (docs/TO-DO.md T-210), not the rebuild's
@@ -6,7 +7,28 @@ name: CI
 # end to end (every job, on every OS) triggers release.yml, which publishes
 # the packages this run built.
 on:
-  workflow_dispatch: {}
+  workflow_dispatch:
+    inputs:
+      only_media:
+        description: "Run only the media packaging jobs (to test them quickly). Never publishes a release."
+        type: boolean
+        default: false
+      only_smoke:
+        description: "With only_media: run only the two quick bundle smoke tests, not the Servo builds."
+        type: boolean
+        default: false
+      only_sites:
+        description: "Run only the real-site check: load real websites in the engine and report (never publishes a release)."
+        type: boolean
+        default: false
+      sites:
+        description: "With only_sites: site names from scripts/site-check/sites.txt, space-separated (empty: all)."
+        type: string
+        default: ""
+      only_tests:
+        description: "Run only lint and tests on Linux, Windows and macOS (no Servo or media builds). Never publishes a release: release.yml skips a title that says 'media builds only'."
+        type: boolean
+        default: false
 
 jobs:
   # ─────────────────────────────────────────────────────────────
@@ -17,12 +39,13 @@ jobs:
   ci:
     name: Build, Lint & Test (${{ matrix.name }})
     runs-on: ${{ matrix.os }}
+    if: ${{ !inputs.only_media && !inputs.only_sites }}
 
     strategy:
       fail-fast: false
       matrix:
         include:
-          - os: ubuntu-latest
+          - os: ubuntu-24.04
             platform: linux
             name: Linux
           - os: windows-latest
@@ -45,6 +68,18 @@ jobs:
             libfontconfig1-dev libfreetype-dev libxkbcommon-dev \
             libx11-dev libxcb-render0-dev libxcb-shape0-dev libxcb-xfixes0-dev \
             libwayland-dev libegl1-mesa-dev libgl1-mesa-dev libvulkan-dev libudev-dev
+
+      # Every shell step of every workflow parses, and the packaging scripts' own tests
+      # pass: a broken step otherwise fails only when its job reaches it, an hour into a
+      # release build (a step cut in half did, in the run before this check).
+      - name: Workflow steps parse; packaging script self-tests (Linux)
+        if: matrix.platform == 'linux'
+        run: |
+          python3 -c "import yaml" 2>/dev/null || pip install --quiet pyyaml
+          python3 scripts/check-workflow-shell.py
+          python3 scripts/windows-runtime.py self-test
+          python3 scripts/bundle-gstreamer.py self-test
+          bash -n scripts/package.sh scripts/linux-clean-run.sh scripts/ci-annotate.sh
 
       - name: Install system dependencies (macOS)
         if: matrix.platform == 'macos'
@@ -120,16 +155,71 @@ jobs:
   # uploaded as artifacts; release.yml publishes them once this whole run
   # has succeeded.
   # ─────────────────────────────────────────────────────────────
+  # Audio, video and WebRTC through GStreamer (the `media` feature). Linux only, and
+  # informational: it does not hold up a release, because the release builds do not
+  # include GStreamer (it must be installed next to the app to use it).
+  check-media-linux:
+    name: Media probe (Linux, GStreamer)
+    runs-on: ubuntu-24.04
+    needs: ci
+    if: ${{ !inputs.only_media && !inputs.only_sites && !inputs.only_tests }}
+    continue-on-error: true
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install system dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            build-essential clang cmake ninja-build pkg-config gperf python3 m4 \
+            libssl-dev libsqlite3-dev libfontconfig1-dev libfreetype-dev \
+            libharfbuzz-dev liblzma-dev libxkbcommon-dev libx11-dev \
+            libxcb-render0-dev libxcb-shape0-dev libxcb-xfixes0-dev \
+            libwayland-dev libegl1-mesa-dev libgl1-mesa-dev libgles2-mesa-dev \
+            libvulkan-dev libudev-dev libdbus-1-dev libglib2.0-dev libunwind-dev \
+            libgstreamer1.0-dev libgstreamer-plugins-base1.0-dev \
+            libgstreamer-plugins-bad1.0-dev gstreamer1.0-plugins-base \
+            gstreamer1.0-plugins-good gstreamer1.0-plugins-bad gstreamer1.0-libav \
+            gstreamer1.0-nice
+
+      - name: Install Rust stable
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache dependencies
+        uses: Swatinem/rust-cache@v2
+        with:
+          key: servo-media-linux
+
+      - name: Run the media probe
+        run: cargo run -p ferrite-servo --features servo,media --example media_probe
+
+      - name: Run the capture probe (camera, microphone, screen sharing)
+        run: cargo run -p ferrite-servo --features servo,media --example capture_probe
+
+      - name: Run the Media Source Extensions probe
+        run: |
+          sudo apt-get install -y --no-install-recommends xvfb
+          xvfb-run -a cargo run -p ferrite-servo --features servo,media --example mse_probe
+
+      - name: Run the capture probe against a real screen (X11)
+        run: |
+          sudo apt-get install -y --no-install-recommends xvfb
+          FERRITE_PROBE_REAL_SCREEN=1 xvfb-run -a -s "-screen 0 1280x800x24" \
+            cargo run -p ferrite-servo --features servo,media --example capture_probe
+
   build-servo-release:
     name: Build Servo release (${{ matrix.name }})
     runs-on: ${{ matrix.os }}
     needs: ci
+    if: ${{ !inputs.only_media && !inputs.only_sites && !inputs.only_tests }}
 
     strategy:
       fail-fast: false
       matrix:
         include:
-          - os: ubuntu-latest
+          - os: ubuntu-24.04
             platform: linux
             name: Linux
             binary: ferrite-shell
@@ -191,8 +281,13 @@ jobs:
       - name: Package
         shell: bash
         run: |
-          bash scripts/package.sh "${{ matrix.platform }}" "${{ steps.label.outputs.label }}" \
-            "target/release/${{ matrix.binary }}" dist
+          if ! bash scripts/package.sh "${{ matrix.platform }}" "${{ steps.label.outputs.label }}" \
+            "target/release/${{ matrix.binary }}" dist > "$RUNNER_TEMP/package.log" 2>&1; then
+            cat "$RUNNER_TEMP/package.log"
+            bash scripts/ci-annotate.sh "Package (${{ matrix.name }})" "$RUNNER_TEMP/package.log" 'needs|not found|outside|problems|Error|error|refus|no '
+            exit 1
+          fi
+          cat "$RUNNER_TEMP/package.log"
 
       - name: Upload package
         uses: actions/upload-artifact@v4
@@ -201,3 +296,484 @@ jobs:
           path: dist/*
           if-no-files-found: error
           retention-days: 90
+
+      # Every library the packaged app names, found on a clean Ubuntu with only what every
+      # desktop has (scripts/linux-clean-run.sh).
+      - name: Run the package on a clean Linux (Linux)
+        if: matrix.platform == 'linux'
+        run: |
+          e2e="$RUNNER_TEMP/e2e"; rm -rf "$e2e"; mkdir -p "$e2e/package"
+          tar -C "$e2e/package" -xzf dist/*-linux-x64.tar.gz
+          if ! bash scripts/linux-clean-run.sh "$e2e" > "$RUNNER_TEMP/clean.log" 2>&1; then
+            cat "$RUNNER_TEMP/clean.log"
+            bash scripts/ci-annotate.sh "Linux package on a clean Linux" "$RUNNER_TEMP/clean.log"
+            exit 1
+          fi
+          cat "$RUNNER_TEMP/clean.log"
+
+  # The same release with video and audio (the `media` feature): every package carries
+  # its own GStreamer (scripts/bundle-gstreamer.py). Experimental and unable to hold up the release: if this job fails, the
+  # normal packages above are published without it. release.yml attaches whichever
+  # `ferrite-media-*` artifacts exist.
+  build-servo-media-release:
+    name: Build Servo media release (${{ matrix.name }})
+    runs-on: ${{ matrix.os }}
+    needs: ci
+    # `ci` is skipped in a media-only run; a real failure of it still stops this job.
+    if: ${{ !inputs.only_smoke && !inputs.only_sites && !inputs.only_tests && !cancelled() && (needs.ci.result == 'success' || needs.ci.result == 'skipped') }}
+    continue-on-error: true
+
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-24.04
+            platform: linux
+            name: Linux
+            binary: ferrite-shell
+          - os: windows-latest
+            platform: windows
+            name: Windows
+            binary: ferrite-shell.exe
+          - os: macos-latest
+            platform: macos
+            name: macOS
+            binary: ferrite-shell
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install system dependencies (Linux)
+        if: matrix.platform == 'linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            build-essential clang cmake ninja-build pkg-config gperf python3 m4 \
+            libssl-dev libsqlite3-dev libfontconfig1-dev libfreetype-dev \
+            libharfbuzz-dev liblzma-dev libxkbcommon-dev libx11-dev \
+            libxcb-render0-dev libxcb-shape0-dev libxcb-xfixes0-dev \
+            libwayland-dev libegl1-mesa-dev libgl1-mesa-dev libgles2-mesa-dev \
+            libvulkan-dev libudev-dev libdbus-1-dev libglib2.0-dev libunwind-dev \
+            libgstreamer1.0-dev libgstreamer-plugins-base1.0-dev \
+            libgstreamer-plugins-bad1.0-dev patchelf \
+            gstreamer1.0-plugins-base gstreamer1.0-plugins-good gstreamer1.0-plugins-bad \
+            gstreamer1.0-libav gstreamer1.0-nice gstreamer1.0-gl gstreamer1.0-alsa \
+            gstreamer1.0-pulseaudio gstreamer1.0-pipewire
+
+      - name: Install system dependencies (macOS)
+        id: brew
+        if: matrix.platform == 'macos'
+        run: |
+          brew update
+          brew install cmake pkg-config openssl gstreamer sqlite
+          # The ICE plugin WebRTC needs; not part of the gstreamer formula.
+          brew install libnice-gstreamer || echo "no libnice-gstreamer formula: WebRTC will lack ICE"
+          # Part of the cache key: the build scripts of the GLib and GStreamer crates record
+          # Homebrew's versioned library folders, and a cache from before an upgrade links
+          # against a folder that is gone ("ld: library 'gobject-2.0' not found").
+          echo "versions=$(brew list --versions glib gstreamer libnice-gstreamer openssl@3 2>/dev/null | shasum | cut -c1-12)" >> "$GITHUB_OUTPUT"
+
+      - name: Install system dependencies (Windows)
+        if: matrix.platform == 'windows'
+        shell: pwsh
+        run: |
+          choco install -y cmake sqlite pkgconfiglite gstreamer gstreamer-devel
+          # The package installs under Program Files, not C:\gstreamer; the installer
+          # records where in a machine-wide variable.
+          $root = [Environment]::GetEnvironmentVariable('GSTREAMER_1_0_ROOT_MSVC_X86_64','Machine')
+          if (-not $root) { $root = 'C:\Program Files\gstreamer\1.0\msvc_x86_64' }
+          $root = $root.TrimEnd('\')
+          if (-not (Test-Path "$root\lib\pkgconfig\glib-2.0.pc")) { throw "GStreamer's pkg-config files are not under $root" }
+          "GSTREAMER_1_0_ROOT_MSVC_X86_64=$root" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+          "PKG_CONFIG_PATH=$root\lib\pkgconfig" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+          "$root\bin" | Out-File -FilePath $env:GITHUB_PATH -Append -Encoding utf8
+          # Fail here, in a minute, not an hour into the build.
+          $env:PKG_CONFIG_PATH = "$root\lib\pkgconfig"
+          pkg-config --print-errors --modversion glib-2.0
+          if ($LASTEXITCODE -ne 0) { throw "pkg-config cannot find GLib" }
+          pkg-config --libs gstreamer-1.0
+
+      - name: Install Rust stable
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache dependencies
+        uses: Swatinem/rust-cache@v2
+        with:
+          key: servo-media-${{ matrix.platform }}-${{ steps.brew.outputs.versions }}
+
+      - name: Build release binary (with Servo and media)
+        run: cargo build --release -p ferrite-shell --features ferrite-servo/servo,ferrite-servo/media
+
+      - name: Derive label
+        id: label
+        shell: bash
+        run: |
+          SHA="${{ github.sha }}"
+          echo "label=${SHA:0:7}" >> "$GITHUB_OUTPUT"
+
+      - name: Package
+        shell: bash
+        run: |
+          if ! bash scripts/package.sh "${{ matrix.platform }}" "${{ steps.label.outputs.label }}" \
+            "target/release/${{ matrix.binary }}" dist media > "$RUNNER_TEMP/package.log" 2>&1; then
+            cat "$RUNNER_TEMP/package.log"
+            bash scripts/ci-annotate.sh "Package (${{ matrix.name }} media)" "$RUNNER_TEMP/package.log" 'needs|not found|outside|problems|Error|error|refus|no '
+            exit 1
+          fi
+          cat "$RUNNER_TEMP/package.log"
+
+      # The Linux package on a Linux that has no GStreamer at all: a clean Ubuntu container
+      # with only what every desktop has (the libraries bundle-gstreamer.py leaves to the
+      # machine). The packaged app must find every library it names, and the engine's media
+      # probes, bundled the same way, must pass. The first Linux media release needed the
+      # machine's GStreamer and did not start without it ("libgstplay-1.0.so.0: cannot open
+      # shared object file"). It runs before the upload: a package that fails it is never
+      # published (this job may fail without holding up the release).
+      - name: Run the package and the media probes on a clean Linux (Linux)
+        if: matrix.platform == 'linux'
+        run: |
+          cargo build --release -p ferrite-servo --features servo,media --example media_probe --example mse_probe
+          e2e="$RUNNER_TEMP/e2e"; rm -rf "$e2e"; mkdir -p "$e2e/probes" "$e2e/package"
+          cp target/release/examples/media_probe target/release/examples/mse_probe "$e2e/probes/"
+          python3 scripts/bundle-gstreamer.py linux "$e2e/probes" --main media_probe --extra mse_probe
+          python3 scripts/bundle-gstreamer.py check-linux "$e2e/probes"
+          tar -C "$e2e/package" -xzf dist/*-linux-x64-media.tar.gz
+          if ! bash scripts/linux-clean-run.sh "$e2e" > "$RUNNER_TEMP/clean.log" 2>&1; then
+            cat "$RUNNER_TEMP/clean.log"
+            bash scripts/ci-annotate.sh "Linux media package on a clean Linux" "$RUNNER_TEMP/clean.log"
+            exit 1
+          fi
+          cat "$RUNNER_TEMP/clean.log"
+
+      - name: Upload package
+        uses: actions/upload-artifact@v4
+        with:
+          name: ferrite-media-${{ matrix.platform }}
+          path: dist/*
+          if-no-files-found: error
+          retention-days: 90
+
+      # The real engine, from a real bundle, on a Mac: the media and MSE probes (video,
+      # audio, a WebRTC data channel, Media Source Extensions) are bundled the way the app
+      # is and run twice, with Homebrew installed (as on a developer's Mac) and moved away.
+      # A second GLib in the process ("implemented in both"), a panic or a failed check
+      # fails the step. This is what the smoke test (GStreamer's own tool) cannot see.
+      - name: Run the engine's media probes from a bundle (macOS)
+        if: matrix.platform == 'macos'
+        run: |
+          cargo build --release -p ferrite-servo --features servo,media --example media_probe --example mse_probe --example page_shot
+          app="$RUNNER_TEMP/e2e/Ferrite.app"
+          rm -rf "$RUNNER_TEMP/e2e"; mkdir -p "$app/Contents/MacOS" "$app/Contents/Resources"
+          cp target/release/examples/media_probe target/release/examples/mse_probe target/release/examples/page_shot "$app/Contents/MacOS/"
+          python3 scripts/bundle-gstreamer.py macos "$app" --main media_probe --extra mse_probe --extra page_shot
+          bad=""
+          # What failed, also kept for the step's error annotation (readable without the log).
+          summary="$RUNNER_TEMP/probe-failures.log"; : > "$summary"
+          run_probe() {   # $1 = label, $2 = probe
+            set +e
+            "$app/Contents/MacOS/$2" > "$RUNNER_TEMP/$2.log" 2>&1
+            local code=$?
+            set -e
+            grep -E "^(PASS|FAIL)|passed, |panicked|PANIC|GStreamer bundle|implemented in both" "$RUNNER_TEMP/$2.log" | tail -60
+            if grep -q "implemented in both" "$RUNNER_TEMP/$2.log"; then echo "$1: TWO COPIES OF A LIBRARY IN ONE PROCESS" | tee -a "$summary"; bad=1; fi
+            if grep -qE "panicked|PANIC" "$RUNNER_TEMP/$2.log"; then echo "$1: A PANIC" | tee -a "$summary"; grep -E -m3 "panicked|PANIC" "$RUNNER_TEMP/$2.log" >> "$summary"; bad=1; fi
+            if [ "$code" -ne 0 ]; then
+              echo "$1: $2 exited with $code" | tee -a "$summary"
+              grep -E "^FAIL" "$RUNNER_TEMP/$2.log" >> "$summary" || true
+              tail -20 "$RUNNER_TEMP/$2.log"; tail -8 "$RUNNER_TEMP/$2.log" >> "$summary"; bad=1
+            fi
+            echo "=== $1: $2 exit $code"
+          }
+          # Every library the engine loads, and any loaded twice (two copies of a GObject
+          # library give "expected X, got X" type errors, as WebRTC data channels did).
+          DYLD_PRINT_LIBRARIES=1 "$app/Contents/MacOS/media_probe" > /dev/null 2> "$RUNNER_TEMP/dyld-media.txt" || true
+          grep -oE "/[^ ]+\.dylib" "$RUNNER_TEMP/dyld-media.txt" | grep -iE "gst|glib|gobject|gio|nice|srtp|ssl|crypto" | sort -u > "$RUNNER_TEMP/gst-images.txt"
+          echo "--- GStreamer/GLib images loaded: $(wc -l < "$RUNNER_TEMP/gst-images.txt")"
+          cat "$RUNNER_TEMP/gst-images.txt"
+          echo "--- loaded more than once (same file name, different path):"
+          sed 's#.*/##' "$RUNNER_TEMP/gst-images.txt" | sort | uniq -d
+          run_probe "Homebrew present" media_probe
+          run_probe "Homebrew present" mse_probe
+          # The page as the app reads it back (BGRA on macOS, T-320): a page red at the
+          # top and blue at the bottom must come out that way, not flipped or swapped.
+          shot="$("$app/Contents/MacOS/page_shot" 'data:text/html,<body style="margin:0"><div style="height:50vh;background:%23f00"></div><div style="height:50vh;background:%2300f"></div>' 3000 "$RUNNER_TEMP/orient.png" 400 300 2>&1 || true)"
+          echo "$shot" | grep -E "^(FRAME|PIXELS)" || true
+          if ! echo "$shot" | grep -q "^PIXELS  top 255,0,0 bottom 0,0,255"; then echo "page readback: colours or orientation wrong" | tee -a "$summary"; echo "$shot" | tail -20; echo "$shot" | tail -5 >> "$summary"; bad=1; fi
+          sudo mv /opt/homebrew /opt/homebrew.hidden
+          run_probe "Homebrew hidden" media_probe
+          run_probe "Homebrew hidden" mse_probe
+          sudo mv /opt/homebrew.hidden /opt/homebrew
+          if [ -n "$bad" ]; then bash scripts/ci-annotate.sh "media probes from a bundle (macOS)" "$summary" '.'; exit 1; fi
+
+  # Tests scripts/bundle-gstreamer.py without building Servo (which takes an hour). It
+  # bundles GStreamer's own gst-inspect-1.0 the way a release bundles the app, then does
+  # what Servo does at start-up (`media_platform::init`): loads EVERY plugin on Servo's list,
+  # by file path, from the bundle's directory, with nothing scanned. If one will not load
+  # Servo ends the app with exit(1) and says nothing, which is how the first -media macOS
+  # build failed. It does this twice: with Homebrew still installed (as on a developer's
+  # Mac: nothing may load from it) and with Homebrew moved away.
+  bundle-smoke-macos:
+    name: GStreamer bundle smoke test (macOS)
+    if: ${{ !inputs.only_sites && !inputs.only_tests }}
+    runs-on: macos-latest
+    continue-on-error: true
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install GStreamer
+        run: |
+          brew update
+          brew install gstreamer
+          brew install libnice-gstreamer || echo "no libnice-gstreamer formula"
+
+      - name: Install Rust stable
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Bundle, load Servo's plugins from it, with and without Homebrew
+        run: |
+          python3 scripts/bundle-gstreamer.py self-test
+          app="$PWD/smoke/Ferrite.app"
+          mkdir -p "$app/Contents/MacOS" "$app/Contents/Resources"
+          cp "$(brew --prefix)/bin/gst-inspect-1.0" "$app/Contents/MacOS/gst-inspect"
+          python3 scripts/bundle-gstreamer.py macos "$app" --main gst-inspect
+          libdir="$app/Contents/MacOS/lib"
+          python3 scripts/bundle-gstreamer.py list macos > "$RUNNER_TEMP/plugins.txt"
+          echo "--- size"; du -sh "$app"
+          echo "--- Servo lists $(wc -l < "$RUNNER_TEMP/plugins.txt") plugins; $(ls "$libdir" | wc -l) files are in the bundle's lib folder"
+
+          echo "--- a library's first line is its own name, which is not a dependency"
+          leak=""
+          for f in "$app/Contents/MacOS/gst-inspect" "$app"/Contents/Frameworks/*.dylib "$app"/Contents/MacOS/lib/*.dylib; do
+            [ -f "$f" ] || continue
+            if otool -L "$f" | tail -n +2 | grep -v "$(basename "$f")" | grep -E "/opt/homebrew|/usr/local|/Users/"; then echo "LEAK in $f"; leak=1; fi
+            # (an old search path is searched first, so it makes the app load the machine's own copy)
+            if otool -l "$f" | awk '/cmd LC_RPATH/{r=1} r&&/ path /{print $2; r=0}' | grep -v '^@'; then echo "OUTSIDE RPATH in $f"; leak=1; fi
+          done
+          [ -z "$leak" ] || exit 1
+
+          # What Ferrite's bundle.rs sets: scan nothing (a path that does not exist), private registry.
+          export GST_PLUGIN_SYSTEM_PATH_1_0="$libdir/no-plugin-scan" GST_PLUGIN_PATH_1_0="$libdir/no-plugin-scan"
+          export GST_REGISTRY_1_0="$RUNNER_TEMP/gst-registry.bin"
+          load_all() {   # $1 = label; loads each listed plugin the way Servo does, by path
+            local bad="" n=0
+            : > "$RUNNER_TEMP/dyld.txt"
+            while read -r f; do
+              n=$((n+1))
+              if DYLD_PRINT_LIBRARIES=1 "$app/Contents/MacOS/gst-inspect" "$libdir/$f" >"$RUNNER_TEMP/one.txt" 2>&1; then
+                cat "$RUNNER_TEMP/one.txt" >> "$RUNNER_TEMP/dyld.txt"
+              else
+                echo "WILL NOT LOAD: $f"; head -5 "$RUNNER_TEMP/one.txt"; bad=1
+              fi
+            done < "$RUNNER_TEMP/plugins.txt"
+            [ -z "$bad" ] || { echo "$1: Servo would call exit(1)"; return 1; }
+            echo "$1: all $n plugins load by path"
+          }
+
+          echo "--- with Homebrew installed (as on a developer's Mac), nothing may load from it"
+          load_all "Homebrew present" || exit 1
+          from_brew="$(grep -E "/opt/homebrew|/usr/local/(Cellar|opt|lib)" "$RUNNER_TEMP/dyld.txt" || true)"
+          if [ -n "$from_brew" ]; then echo "$from_brew" | sort -u | head -20; echo "LOADED FROM HOMEBREW"; exit 1; fi
+          echo "nothing loaded from Homebrew"
+
+          echo "--- Homebrew moved away"
+          sudo mv /opt/homebrew /opt/homebrew.hidden
+          load_all "Homebrew hidden" || exit 1
+
+          echo "--- elements an app needs (this scans the bundle's folder, which the app itself does not)"
+          export GST_PLUGIN_SYSTEM_PATH_1_0="$libdir"; rm -f "$GST_REGISTRY_1_0"
+          missing=""
+          for el in qtdemux matroskademux playbin3 appsrc avdec_h264 opusdec opusparse vp9dec webrtcbin sctpenc sctpdec srtpenc srtpdec dtlsenc nicesink; do
+            if "$app/Contents/MacOS/gst-inspect" "$el" >/dev/null 2>&1; then echo "ok   $el"; else echo "MISSING $el"; missing=1; fi
+          done
+          [ -z "$missing" ]
+
+  bundle-smoke-windows:
+    name: GStreamer bundle smoke test (Windows)
+    if: ${{ !inputs.only_sites && !inputs.only_tests }}
+    runs-on: windows-latest
+    timeout-minutes: 45
+    continue-on-error: true
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install GStreamer and find it
+        shell: pwsh
+        run: |
+          choco install -y pkgconfiglite gstreamer gstreamer-devel
+          # The package installs under Program Files, not C:\gstreamer; the installer
+          # records where in a machine-wide variable.
+          $root = [Environment]::GetEnvironmentVariable('GSTREAMER_1_0_ROOT_MSVC_X86_64','Machine')
+          if (-not $root) { $root = 'C:\Program Files\gstreamer\1.0\msvc_x86_64' }
+          $root = $root.TrimEnd('\')
+          if (-not (Test-Path "$root\lib\pkgconfig\glib-2.0.pc")) { throw "GStreamer's pkg-config files are not under $root" }
+          "GSTREAMER_1_0_ROOT_MSVC_X86_64=$root" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+          "PKG_CONFIG_PATH=$root\lib\pkgconfig" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+          "$root\bin" | Out-File -FilePath $env:GITHUB_PATH -Append -Encoding utf8
+          # Fail here, in a minute, not an hour into the build.
+          $env:PKG_CONFIG_PATH = "$root\lib\pkgconfig"
+          pkg-config --print-errors --modversion glib-2.0
+          if ($LASTEXITCODE -ne 0) { throw "pkg-config cannot find GLib" }
+          pkg-config --libs gstreamer-1.0
+
+      - name: pkg-config finds every library the binding crates look for
+        shell: pwsh
+        run: |
+          $root = $env:GSTREAMER_1_0_ROOT_MSVC_X86_64
+          $bad = $false
+          foreach ($lib in 'glib-2.0','gobject-2.0','gio-2.0','gstreamer-1.0','gstreamer-app-1.0','gstreamer-audio-1.0','gstreamer-base-1.0','gstreamer-play-1.0','gstreamer-sdp-1.0','gstreamer-video-1.0','gstreamer-webrtc-1.0') {
+            $out = pkg-config --libs $lib 2>&1 | Out-String
+            if ($LASTEXITCODE -ne 0) { "MISSING $lib : $out"; $bad = $true; continue }
+            # The .pc files must point into the install, not at the machine that built it.
+            # pkg-config writes a space in a path as "\ ", so a path may span several words.
+            $dirs = [regex]::Matches($out, '-L((?:\\ |\S)+)') | ForEach-Object { $_.Groups[1].Value -replace '\\ ', ' ' }
+            $outside = $dirs | Where-Object { ($_ -replace '/','\') -notlike "$root*" }
+            if ($outside) { "OUTSIDE $lib : $($outside -join ' ')"; $bad = $true } else { "ok      $lib" }
+          }
+          if ($bad) { throw "pkg-config output is wrong" }
+
+      - name: Install Rust stable
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Bundle, load Servo's plugins from it, with the installed GStreamer gone
+        shell: pwsh
+        run: |
+          $root = $env:GSTREAMER_1_0_ROOT_MSVC_X86_64
+          $stage = Join-Path $PWD 'smoke'
+          New-Item -ItemType Directory -Force $stage | Out-Null
+          Copy-Item "$root\bin\gst-inspect-1.0.exe" "$stage\gst-inspect.exe"
+          python scripts/bundle-gstreamer.py self-test
+          python scripts/bundle-gstreamer.py windows $stage --root $root
+          if ($LASTEXITCODE -ne 0) { throw "bundling failed" }
+          $plugins = python scripts/bundle-gstreamer.py list windows
+          "Servo lists $($plugins.Count) plugins"
+          "size: {0:N0} MB" -f ((Get-ChildItem $stage -Recurse -File | Measure-Object Length -Sum).Sum / 1MB)
+          # Take the installed copy out of reach.
+          Rename-Item (Split-Path (Split-Path $root)) 'gstreamer.hidden'
+          $env:PATH = ($env:PATH -split ';' | Where-Object { $_ -notlike '*gstreamer*' }) -join ';'
+          Remove-Item Env:GSTREAMER_1_0_ROOT_MSVC_X86_64, Env:PKG_CONFIG_PATH -ErrorAction SilentlyContinue
+          # What Ferrite's bundle.rs sets: scan nothing (a path that does not exist), private registry.
+          $env:GST_PLUGIN_SYSTEM_PATH_1_0 = "$stage\no-plugin-scan"
+          $env:GST_PLUGIN_PATH_1_0 = "$stage\no-plugin-scan"
+          $env:GST_REGISTRY_1_0 = "$env:RUNNER_TEMP\gst-registry.bin"
+          # Servo loads each listed plugin by file path from the folder of the exe. If one will
+          # not load it calls exit(1) and says nothing.
+          $bad = $false
+          foreach ($f in $plugins) {
+            & "$stage\gst-inspect.exe" "$stage\$f" *> "$env:RUNNER_TEMP\one.txt"
+            if ($LASTEXITCODE -ne 0) { "WILL NOT LOAD: $f"; Get-Content "$env:RUNNER_TEMP\one.txt" -TotalCount 5; $bad = $true }
+          }
+          if ($bad) { throw "Servo would call exit(1)" }
+          "all $($plugins.Count) plugins load by path"
+          # Elements an app needs (this scans the folder, which the app itself does not).
+          $env:GST_PLUGIN_SYSTEM_PATH_1_0 = $stage
+          Remove-Item $env:GST_REGISTRY_1_0 -ErrorAction SilentlyContinue
+          $missing = $false
+          foreach ($el in 'qtdemux','matroskademux','playbin3','appsrc','avdec_h264','opusdec','opusparse','vp9dec','webrtcbin','sctpenc','sctpdec','srtpenc','srtpdec','dtlsenc','nicesink') {
+            & "$stage\gst-inspect.exe" $el *> $null
+            if ($LASTEXITCODE -eq 0) { "ok      $el" } else { "MISSING $el"; $missing = $true }
+          }
+          if ($missing) { throw "the bundle is missing elements" }
+
+      # The Visual C++ runtime (scripts/windows-runtime.py), which a clean Windows lacks: the
+      # first Windows releases stopped at start-up with "VCRUNTIME140.dll was not found",
+      # because every CI machine has it installed. The bundle gets it, and every DLL that
+      # anything in the bundle loads must then be in the bundle or part of Windows. Then the
+      # proof: a Windows container that has no runtime runs a program from the bundle,
+      # which must fail without the runtime's DLLs beside it and work with them.
+      - name: Visual C++ runtime in the bundle, checked on a clean Windows
+        shell: pwsh
+        run: |
+          $stage = Join-Path $PWD 'smoke'
+          python scripts/windows-runtime.py self-test
+          if ($LASTEXITCODE -ne 0) { throw "self-test failed" }
+          python scripts/windows-runtime.py bundle $stage
+          if ($LASTEXITCODE -ne 0) { throw "could not bundle the runtime" }
+          python scripts/windows-runtime.py check $stage *> "$env:RUNNER_TEMP\check.log"
+          $checked = $LASTEXITCODE
+          Get-Content "$env:RUNNER_TEMP\check.log"
+          if ($checked -ne 0) {
+            $lines = (Get-Content "$env:RUNNER_TEMP\check.log" | Select-String 'needs|unreadable|problems' | Select-Object -Last 40 | ForEach-Object { $_.Line }) -join '%0A'
+            "::error title=Windows bundle imports::$lines"
+            throw "the bundle needs DLLs it does not carry"
+          }
+          if (-not (Get-Command docker -ErrorAction SilentlyContinue)) {
+            "::warning title=Clean Windows run skipped::this runner has no docker; only the import check ran"
+            exit 0
+          }
+          $build = [System.Environment]::OSVersion.Version.Build
+          $tag = if ($build -ge 26100) { 'ltsc2025' } elseif ($build -ge 20348) { 'ltsc2022' } else { 'ltsc2019' }
+          docker pull "mcr.microsoft.com/windows/servercore:$tag" | Select-Object -Last 1
+          if ($LASTEXITCODE -ne 0) { "::warning title=Clean Windows run skipped::could not pull servercore:$tag"; exit 0 }
+          # Without the runtime: must fail (else the container has one, and proves nothing).
+          $bare = Join-Path $env:RUNNER_TEMP 'bare'
+          New-Item -ItemType Directory -Force $bare | Out-Null
+          Get-ChildItem $stage -File | Where-Object { $_.Name -notmatch '^(vcruntime|msvcp|concrt|vccorlib)' } | Copy-Item -Destination $bare
+          docker run --rm -v "${bare}:C:\app" "mcr.microsoft.com/windows/servercore:$tag" C:\app\gst-inspect.exe --version
+          $without = $LASTEXITCODE
+          docker run --rm -v "${stage}:C:\app" "mcr.microsoft.com/windows/servercore:$tag" C:\app\gst-inspect.exe --version
+          $with = $LASTEXITCODE
+          "exit code without the runtime: $without; with it: $with"
+          if ($without -eq 0) { "::warning title=Clean Windows run inconclusive::the container ran the program without the runtime's DLLs" }
+          if ($with -ne 0) {
+            "::error title=Clean Windows run::gst-inspect from the bundle exited with $with in a clean Windows container (without the runtime: $without)"
+            throw "the bundle does not run on a clean Windows"
+          }
+
+  # ─────────────────────────────────────────────────────────────
+  # The real-site check (only with `only_sites`): loads real websites in the
+  # engine and reports, per site, the title, load time, console errors, a crash
+  # and a screenshot. The machines Ferrite is developed on cannot reach the web;
+  # these can. A report, not a gate: it fails only if the loader cannot be built.
+  # ─────────────────────────────────────────────────────────────
+  site-check:
+    name: Real-site check (Linux)
+    runs-on: ubuntu-24.04
+    if: ${{ inputs.only_sites }}
+    timeout-minutes: 150
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install system dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            build-essential clang cmake ninja-build pkg-config gperf python3 m4 \
+            libssl-dev libsqlite3-dev libfontconfig1-dev libfreetype-dev \
+            libharfbuzz-dev liblzma-dev libxkbcommon-dev libx11-dev \
+            libxcb-render0-dev libxcb-shape0-dev libxcb-xfixes0-dev \
+            libwayland-dev libegl1-mesa-dev libgl1-mesa-dev libgles2-mesa-dev \
+            libvulkan-dev libudev-dev libdbus-1-dev libglib2.0-dev libunwind-dev \
+            libgstreamer1.0-dev libgstreamer-plugins-base1.0-dev \
+            libgstreamer-plugins-bad1.0-dev \
+            gstreamer1.0-plugins-good gstreamer1.0-plugins-bad gstreamer1.0-libav \
+            xvfb gdb fonts-noto-core fonts-noto-color-emoji
+
+      - name: Install Rust stable
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache dependencies
+        uses: Swatinem/rust-cache@v2
+        with:
+          key: servo-media-linux
+
+      - name: Build the page loader
+        run: cargo build --release -p ferrite-servo --features servo,media --example page_shot
+
+      - name: Load the sites
+        run: |
+          xvfb-run -a scripts/site-check/run.sh target/release/examples/page_shot site-check ${{ inputs.sites }}
+          cat site-check/summary.md >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Upload logs and screenshots
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: site-check
+          path: site-check/
+          retention-days: 30

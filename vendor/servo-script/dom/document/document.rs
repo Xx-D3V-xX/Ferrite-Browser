@@ -2451,6 +2451,8 @@ impl Document {
 
                 // Step 9.10. Set the Document's page showing to true.
                 document.page_showing.set(true);
+                // Ferrite: a page that is showing and not throttled is visible.
+                document.apply_throttle_visibility(cx, window.throttled());
 
                 // Step 9.11. Fire a page transition event named pageshow at window with false.
                 let page_show_event = PageTransitionEvent::new(
@@ -3312,7 +3314,20 @@ impl Document {
         depth: &ResizeObservationDepth,
     ) -> bool {
         let mut has_active_resize_observations = false;
-        for observer in self.resize_observers.borrow_mut().iter_mut() {
+        // Ferrite: do not hold `resize_observers` borrowed while observers
+        // measure boxes. Measuring runs a reflow, which can clone an inline
+        // SVG and allocate, and an allocation can start a garbage collection
+        // that traces this very field (`Document::trace` borrows it) and
+        // panics with "already mutably borrowed". See FERRITE-PATCHES.md.
+        #[expect(clippy::redundant_iter_cloned)]
+        let observers: Vec<DomRoot<ResizeObserver>> = self
+            .resize_observers
+            .borrow()
+            .iter()
+            .cloned()
+            .map(|obs| DomRoot::from_ref(&*obs))
+            .collect();
+        for observer in observers {
             observer.gather_active_resize_observations_at_depth(
                 no_gc,
                 depth,
@@ -5009,6 +5024,24 @@ impl Document {
         *self.declarative_refresh.borrow_mut() = Some(refresh);
     }
 
+    /// Ferrite: makes the visibility state follow the throttle state. A document
+    /// the embedder is showing is "visible", one it has throttled (a background
+    /// tab) is "hidden". Only once the page is showing: before that the load path
+    /// decides. The engine never did this on an ordinary load, so every page saw
+    /// `document.visibilityState == "hidden"` and the wake-lock API refused it as
+    /// "not visible" (see FERRITE-PATCHES.md).
+    pub(crate) fn apply_throttle_visibility(&self, cx: &mut JSContext, throttled: bool) {
+        if !self.page_showing.get() {
+            return;
+        }
+        let state = if throttled {
+            DocumentVisibilityState::Hidden
+        } else {
+            DocumentVisibilityState::Visible
+        };
+        self.update_visibility_state(cx, state);
+    }
+
     /// <https://html.spec.whatwg.org/multipage/#visibility-state>
     fn update_visibility_state(
         &self,
@@ -5454,7 +5487,7 @@ impl DocumentMethods<crate::DomTypeHolder> for Document {
     fn SetDomain(&self, value: DOMString) -> ErrorResult {
         // Step 1. If this's browsing context is null, then throw a "SecurityError" DOMException.
         if !self.has_browsing_context {
-            return Err(Error::Security(None));
+            return Err(Error::Security(Some("document.domain: this document has no browsing context".into())));
         }
 
         // Step 2. If this Document object's active sandboxing flag set has its sandboxed
@@ -5462,29 +5495,31 @@ impl DocumentMethods<crate::DomTypeHolder> for Document {
         if self.has_active_sandboxing_flag(
             SandboxingFlagSet::SANDBOXED_DOCUMENT_DOMAIN_BROWSING_CONTEXT_FLAG,
         ) {
-            return Err(Error::Security(None));
+            return Err(Error::Security(Some("document.domain: the document is sandboxed against setting it".into())));
         }
 
         // Step 3. Let effectiveDomain be this's origin's effective domain.
         let effective_domain = match self.origin().effective_domain() {
             Some(effective_domain) => effective_domain,
             // Step 4. If effectiveDomain is null, then throw a "SecurityError" DOMException.
-            None => return Err(Error::Security(None)),
+            None => return Err(Error::Security(Some("document.domain: this document's origin has no domain".into()))),
         };
 
         // Step 5. If the given value is not a registrable domain suffix of and is not equal to effectiveDomain, then throw a "SecurityError" DOMException.
         let host =
             match get_registrable_domain_suffix_of_or_is_equal_to(&value.str(), effective_domain) {
-                None => return Err(Error::Security(None)),
+                None => return Err(Error::Security(Some("document.domain: the new value is not a suffix of the current domain".into()))),
                 Some(host) => host,
             };
 
         // Step 6. If the surrounding agent's agent cluster's is origin-keyed is true, then return.
-        // TODO
-
-        // Step 7. Set this's origin's domain to the result of parsing the given value.
-        self.origin().set_domain(host);
-
+        //
+        // Every agent cluster here is origin-keyed, as in Chrome since version 115:
+        // setting `document.domain` checks the value (steps 1-5) and changes nothing.
+        // Setting it for real made a page that sets it (Google's) cross-origin with
+        // its own same-origin frames, which had not: reading their `location` threw
+        // a SecurityError, which Chrome never does.
+        let _ = host;
         Ok(())
     }
 
@@ -6321,7 +6356,7 @@ impl DocumentMethods<crate::DomTypeHolder> for Document {
         }
 
         if !self.origin().is_tuple() {
-            return Err(Error::Security(None));
+            return Err(Error::Security(Some("document.cookie: this document's origin is opaque".into())));
         }
 
         let url = self.url();
@@ -6343,7 +6378,7 @@ impl DocumentMethods<crate::DomTypeHolder> for Document {
         }
 
         if !self.origin().is_tuple() {
-            return Err(Error::Security(None));
+            return Err(Error::Security(Some("document.cookie: this document's origin is opaque".into())));
         }
 
         if !cookie.is_valid_for_cookie() {
@@ -6612,7 +6647,7 @@ impl DocumentMethods<crate::DomTypeHolder> for Document {
             .origin()
             .same_origin(&entry_responsible_document.origin())
         {
-            return Err(Error::Security(None));
+            return Err(Error::Security(Some("document.open: called from a script of a different origin".into())));
         }
 
         // Step 5. If document has an active parser whose script nesting level is greater than 0,

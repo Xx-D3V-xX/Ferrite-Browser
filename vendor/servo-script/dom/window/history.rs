@@ -73,7 +73,7 @@ impl History {
 impl History {
     fn traverse_history(&self, direction: TraversalDirection) -> ErrorResult {
         if !self.window.Document().is_fully_active() {
-            return Err(Error::Security(None));
+            return Err(Error::Security(Some("history: this document is not fully active".into())));
         }
         let _ = self
             .window
@@ -202,7 +202,7 @@ impl History {
 
         // Step 2
         if !document.is_fully_active() {
-            return Err(Error::Security(None));
+            return Err(Error::Security(Some("history.pushState/replaceState: this document is not fully active".into())));
         }
 
         // TODO: Step 3 Optionally abort these steps
@@ -221,13 +221,13 @@ impl History {
                 // relative to the relevant settings object of history.
                 let Ok(url) = ServoUrl::parse_with_base(Some(&document_url), &urlstring.0) else {
                     // Step 6.2 If newURL is failure, then throw a "SecurityError" DOMException.
-                    return Err(Error::Security(None));
+                    return Err(Error::Security(Some("history.pushState/replaceState: the URL could not be parsed".into())));
                 };
 
                 // Step 6.3 If document cannot have its URL rewritten to newURL,
                 // then throw a "SecurityError" DOMException.
                 if !Self::can_have_url_rewritten(&document_url, &url) {
-                    return Err(Error::Security(None));
+                    return Err(Error::Security(Some("history.pushState/replaceState: the URL's origin differs from the document's".into())));
                 }
 
                 url
@@ -341,7 +341,7 @@ impl HistoryMethods<crate::DomTypeHolder> for History {
     /// <https://html.spec.whatwg.org/multipage/#dom-history-state>
     fn GetState(&self, _cx: &mut JSContext, mut retval: MutableHandleValue) -> Fallible<()> {
         if !self.window.Document().is_fully_active() {
-            return Err(Error::Security(None));
+            return Err(Error::Security(Some("history.state: this document is not fully active".into())));
         }
         retval.set(self.state.get());
         Ok(())
@@ -350,7 +350,7 @@ impl HistoryMethods<crate::DomTypeHolder> for History {
     /// <https://html.spec.whatwg.org/multipage/#dom-history-length>
     fn GetLength(&self) -> Fallible<u32> {
         if !self.window.Document().is_fully_active() {
-            return Err(Error::Security(None));
+            return Err(Error::Security(Some("history.length: this document is not fully active".into())));
         }
 
         let Some((sender, recv)) =

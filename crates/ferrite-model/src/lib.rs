@@ -10,8 +10,9 @@
 //! Backends speak one wire format each and do nothing else:
 //! [`MockProvider`] (scripted, for unit tests), [`ReplayProvider`]
 //! (committed fixtures, for integration tests and CI), [`OllamaProvider`]
-//! (cloud *and* local — one struct, one wire protocol, two base URLs) and
-//! [`GeminiProvider`].
+//! (cloud *and* local — one struct, one wire protocol, two base URLs),
+//! [`GeminiProvider`], [`AnthropicProvider`] and [`OpenAiProvider`] (OpenAI and
+//! every server that speaks its chat-completions format).
 //!
 //! Everything cross-cutting is a decorator wrapping any provider, so a new
 //! backend inherits all of it:
@@ -70,13 +71,16 @@ pub mod settings;
 pub mod testing;
 pub mod trace;
 
-pub use backends::{GeminiProvider, MockProvider, MockStep, OllamaProvider, ReplayProvider};
+pub use backends::{
+    AnthropicProvider, GeminiProvider, MockProvider, MockStep, OllamaProvider, OpenAiProvider,
+    ReplayProvider,
+};
 pub use cache_key::CacheKey;
 pub use config::{EnvSource, MapEnv, ModelConfig, SystemEnv};
 pub use decorators::{Budget, Cache, Throttle, ThrottleConfig, Trace};
 pub use error::ModelError;
 pub use laya_governor::{Gate, LaneGovernor, Paused};
-pub use provider::{ModelProvider, ModelTier, ProviderCapabilities, ProviderId};
+pub use provider::{ModelProvider, ModelTier, ProviderCapabilities, ProviderId, TextSink};
 pub use request::{CompletionRequest, Message, Role, SamplingOptions};
 pub use response::{CompletionResponse, Provenance, TokenUsage};
 pub use secret::{MemoryVault, OsKeyring, SecretStore, SecretVault, Token};

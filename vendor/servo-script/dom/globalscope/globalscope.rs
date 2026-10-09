@@ -119,6 +119,7 @@ use crate::dom::file::File;
 use crate::dom::globalscope::broadcastchannel::BroadcastChannel;
 use crate::dom::globalscope::script_execution::{evaluate_script, fill_compile_options};
 use crate::dom::idbfactory::IDBFactory;
+use crate::dom::mediasource::MediaSource;
 use crate::dom::messageport::MessagePort;
 use crate::dom::paintworkletglobalscope::PaintWorkletGlobalScope;
 use crate::dom::performance::performance::Performance;
@@ -244,6 +245,10 @@ pub(crate) struct GlobalScope {
 
     /// <https://w3c.github.io/ServiceWorker/#environment-settings-object-service-worker-object-map>
     worker_map: DomRefCell<HashMapTracedValues<ServiceWorkerId, Dom<ServiceWorker>, FxBuildHasher>>,
+
+    /// Ferrite: the object URLs made for `MediaSource`s (`URL.createObjectURL`), which
+    /// the media element looks up when it loads one.
+    media_source_urls: DomRefCell<HashMapTracedValues<String, Dom<MediaSource>, FxBuildHasher>>,
 
     /// Timers (milliseconds) used by the Console API.
     console_timers: DomRefCell<HashMap<DOMString, Instant>>,
@@ -792,6 +797,7 @@ impl GlobalScope {
             registration_map: DomRefCell::new(HashMapTracedValues::new_fx()),
             indexeddb: Default::default(),
             worker_map: DomRefCell::new(HashMapTracedValues::new_fx()),
+            media_source_urls: DomRefCell::new(HashMapTracedValues::new_fx()),
             console_timers: DomRefCell::new(Default::default()),
             module_map: DomRefCell::new(Default::default()),
             devtools_chan,
@@ -910,6 +916,34 @@ impl GlobalScope {
 
         // Step 3
         new_registration
+    }
+
+    /// Ferrite: `URL.createObjectURL(mediaSource)` made `url` for `source`.
+    pub(crate) fn register_media_source_url(&self, url: &str, source: &MediaSource) {
+        self.media_source_urls
+            .borrow_mut()
+            .insert(Self::media_source_key(url), Dom::from_ref(source));
+    }
+
+    /// Ferrite: `URL.revokeObjectURL(url)`.
+    pub(crate) fn revoke_media_source_url(&self, url: &str) {
+        self.media_source_urls
+            .borrow_mut()
+            .remove(&Self::media_source_key(url));
+    }
+
+    /// Ferrite: the `MediaSource` an object URL was made for, if it was made for one.
+    pub(crate) fn media_source_for_url(&self, url: &str) -> Option<DomRoot<MediaSource>> {
+        self.media_source_urls
+            .borrow()
+            .get(&Self::media_source_key(url))
+            .map(|source| DomRoot::from_ref(&**source))
+    }
+
+    /// An object URL as the key of `media_source_urls`: parsed, so the form the page
+    /// got and the form a media element resolves its `src` to are the same.
+    fn media_source_key(url: &str) -> String {
+        ServoUrl::parse(url).map_or_else(|_| url.to_owned(), |parsed| parsed.into_string())
     }
 
     /// <https://w3c.github.io/ServiceWorker/#get-the-service-worker-object>
@@ -2936,7 +2970,6 @@ impl GlobalScope {
     }
 
     /// Evaluate JS code on this global scope.
-    #[expect(unsafe_code)]
     pub(crate) fn evaluate_js_on_global(
         &self,
         cx: &mut CurrentRealm,
@@ -2945,8 +2978,48 @@ impl GlobalScope {
         introduction_type: Option<&'static CStr>,
         rval: Option<MutableHandleValue>,
     ) -> Result<(), JavaScriptEvaluationError> {
-        assert!(self.can_run_script());
+        // Ferrite (servo/servo#47331): a document that cannot run script right now
+        // (not fully active while it is changing, or sandboxed by a
+        // `Content-Security-Policy: sandbox` header) is an error for the caller,
+        // not a reason to panic the script thread. The assertion killed the page,
+        // and the embedder's callback never ran.
+        if !self.can_run_script() {
+            return Err(JavaScriptEvaluationError::WebViewNotReady);
+        }
+        self.evaluate_js_on_global_unchecked(cx, code, filename, introduction_type, rval)
+    }
 
+    /// Ferrite: evaluates one of the embedder's user scripts (the compatibility scripts)
+    /// on this global. Like [`Self::evaluate_js_on_global`], but a document sandboxed
+    /// without `allow-scripts` still gets them: they stand in for interfaces other
+    /// browsers build in (`requestIdleCallback`, `Element.animate`...), which a sandboxed
+    /// frame's window has there, and a page may call them on that window from outside.
+    /// youtube.com's scheduler did, on its `sandbox="allow-same-origin"` frame:
+    /// "window.cancelIdleCallback is not a function". The page's own scripts in such a
+    /// frame still do not run; only a document that is not fully active is refused.
+    pub(crate) fn evaluate_user_script_on_global(
+        &self,
+        cx: &mut CurrentRealm,
+        code: Cow<'_, str>,
+        filename: &str,
+    ) -> Result<(), JavaScriptEvaluationError> {
+        if let Some(window) = self.downcast::<Window>() &&
+            !window.Document().is_fully_active()
+        {
+            return Err(JavaScriptEvaluationError::WebViewNotReady);
+        }
+        self.evaluate_js_on_global_unchecked(cx, code, filename, None, None)
+    }
+
+    #[expect(unsafe_code)]
+    fn evaluate_js_on_global_unchecked(
+        &self,
+        cx: &mut CurrentRealm,
+        code: Cow<'_, str>,
+        filename: &str,
+        introduction_type: Option<&'static CStr>,
+        rval: Option<MutableHandleValue>,
+    ) -> Result<(), JavaScriptEvaluationError> {
         run_a_script::<DomTypeHolder, _, _>(cx, self, |cx| {
             let url = self.api_base_url();
             let fetch_options = ScriptFetchOptions::default_classic_script();

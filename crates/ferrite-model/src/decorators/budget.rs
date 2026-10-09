@@ -22,7 +22,7 @@ use ferrite_core::Clock;
 use serde::{Deserialize, Serialize};
 
 use crate::error::ModelError;
-use crate::provider::{ModelProvider, ModelTier, ProviderCapabilities, ProviderId};
+use crate::provider::{ModelProvider, ModelTier, ProviderCapabilities, ProviderId, TextSink};
 use crate::request::CompletionRequest;
 use crate::response::{CompletionResponse, TokenUsage};
 
@@ -222,6 +222,31 @@ impl<P: ModelProvider> ModelProvider for Budget<P> {
     }
 
     async fn complete(&self, req: CompletionRequest) -> Result<CompletionResponse, ModelError> {
+        let seq = self.reserve()?;
+        let outcome = self.inner.complete(req.clone()).await;
+        self.record(seq, &req, &outcome);
+        outcome
+    }
+
+    async fn complete_streaming(
+        &self,
+        req: CompletionRequest,
+        sink: &TextSink<'_>,
+    ) -> Result<CompletionResponse, ModelError> {
+        let seq = self.reserve()?;
+        let outcome = self.inner.complete_streaming(req.clone(), sink).await;
+        self.record(seq, &req, &outcome);
+        outcome
+    }
+
+    fn capabilities(&self) -> ProviderCapabilities {
+        self.inner.capabilities()
+    }
+}
+
+impl<P: ModelProvider> Budget<P> {
+    /// Takes one call from the budget, or says it is spent.
+    fn reserve(&self) -> Result<u32, ModelError> {
         // Reserved before the call, not after: two concurrent calls must not
         // both see 499 used and both proceed.
         let seq = self.used.fetch_add(1, Ordering::SeqCst) + 1;
@@ -238,14 +263,7 @@ impl<P: ModelProvider> ModelProvider for Budget<P> {
                 partial_results_path: self.partial_results_path.clone(),
             });
         }
-
-        let outcome = self.inner.complete(req.clone()).await;
-        self.record(seq, &req, &outcome);
-        outcome
-    }
-
-    fn capabilities(&self) -> ProviderCapabilities {
-        self.inner.capabilities()
+        Ok(seq)
     }
 }
 

@@ -1,6 +1,7 @@
 //! Loads a page in the real engine and reports what happened: a PNG of the
 //! rendered frame, the title, how long the load took, every console message,
-//! and a summary of the requests made. The quickest way to answer "does this
+//! a summary of the requests made, a crash if the page's engine crashed, and the
+//! answer to `PAGE_SHOT_JS` if set. The quickest way to answer "does this
 //! page work in Ferrite?" without the app.
 //!
 //!   cargo run -p ferrite-servo --features servo --example page_shot -- \
@@ -26,17 +27,40 @@ fn main() {
     ferrite_servo::session::set_display_scale(scale);
 
     let mut session = HeadlessServoSession::new(width, height).expect("engine starts");
-    session.set_active(true);
+    // PAGE_SHOT_BACKGROUND=1 loads the page as a background tab (throttled, hidden).
+    let background = std::env::var_os("PAGE_SHOT_BACKGROUND").is_some();
+    session.set_active(!background);
+    if background {
+        // Let the engine apply the throttle to the blank page first; a page
+        // loaded afterwards in the same tab inherits it.
+        let settle = Instant::now() + Duration::from_millis(700);
+        while Instant::now() < settle {
+            session.spin();
+            std::thread::sleep(Duration::from_millis(8));
+        }
+    }
     let started = Instant::now();
     session.navigate(&url);
 
+    // The load counts once the new page has started loading and then completed:
+    // the blank page the tab starts on is complete before the navigation begins.
+    let mut started_loading = false;
+    let blank_url = session.current_url().to_string();
     let mut complete_at = None;
     let deadline = started + Duration::from_millis(wait_ms);
     while Instant::now() < deadline {
         session.spin();
         std::thread::sleep(Duration::from_millis(8));
-        if complete_at.is_none() && *session.load_status() == LoadStatus::Complete {
-            complete_at = Some(started.elapsed());
+        // A page that loads between two polls is only seen as a new URL.
+        if session.current_url() != blank_url {
+            started_loading = true;
+        }
+        match *session.load_status() {
+            LoadStatus::Complete if started_loading && complete_at.is_none() => {
+                complete_at = Some(started.elapsed());
+            }
+            LoadStatus::Complete => {}
+            _ => started_loading = true,
         }
     }
 
@@ -55,6 +79,14 @@ fn main() {
         *kinds.entry(event.kind).or_default() += 1;
     }
     println!("REQUESTS {kinds:?}");
+    // PAGE_SHOT_JS: an expression to ask the page once it has loaded (the real-site
+    // check asks a video page whether its video plays).
+    if let Ok(expression) = std::env::var("PAGE_SHOT_JS") {
+        println!("JS      {:?}", session.execute_js(&expression));
+    }
+    if let Some(crash) = session.take_crash() {
+        println!("CRASH   {crash:?}");
+    }
     for entry in session.take_console_entries() {
         println!(
             "CONSOLE {:<5} {}",
@@ -73,6 +105,36 @@ fn main() {
                 .and_then(|mut writer| writer.write_image_data(&rgba))
                 .expect("write png");
             println!("FRAME   {w}x{h} -> {out}");
+            // The colour a few rows from the top and the bottom, in the middle:
+            // CI loads a page that is red at the top and blue at the bottom and
+            // checks the picture is neither upside down nor red/blue swapped.
+            let at = |y: u32| {
+                let i = ((y * w + w / 2) * 4) as usize;
+                rgba.get(i..i + 3).map_or_else(
+                    || "?".to_string(),
+                    |p| format!("{},{},{}", p[0], p[1], p[2]),
+                )
+            };
+            if h > 10 {
+                println!("PIXELS  top {} bottom {}", at(5), at(h - 5));
+            }
+            // How much of the picture is not its most common colour: about 0% is
+            // a blank page (the real-site check reads this, not the picture).
+            let mut counts = std::collections::HashMap::<[u8; 3], usize>::new();
+            for pixel in rgba.as_chunks::<4>().0.iter().step_by(7) {
+                *counts.entry([pixel[0], pixel[1], pixel[2]]).or_default() += 1;
+            }
+            let total: usize = counts.values().sum();
+            if let Some((colour, most)) = counts.iter().max_by_key(|(_, n)| **n) {
+                println!(
+                    "PAINT   {:.1}% painted over the background rgb({},{},{}), {} colours",
+                    100.0 * (total - most) as f64 / total.max(1) as f64,
+                    colour[0],
+                    colour[1],
+                    colour[2],
+                    counts.len()
+                );
+            }
         }
         None => println!("FRAME   none rendered"),
     }

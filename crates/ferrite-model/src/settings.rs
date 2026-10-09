@@ -33,10 +33,14 @@ use std::time::Duration;
 
 use serde::{Deserialize, Serialize};
 
-use crate::backends::{GEMINI_API_KEY_VAR, GeminiProvider, OLLAMA_API_KEY_VAR, OllamaProvider};
+use crate::backends::{
+    ANTHROPIC_API_KEY_VAR, AnthropicProvider, GEMINI_API_KEY_VAR, GeminiProvider,
+    OLLAMA_API_KEY_VAR, OPENAI_API_KEY_VAR, OllamaProvider, OpenAiProvider,
+};
 use crate::config::{
-    DEFAULT_GEMINI_BASE_URL, DEFAULT_MAX_RESPONSE_BYTES, DEFAULT_OLLAMA_BASE_URL, EnvSource,
-    LOCAL_OLLAMA_BASE_URL, MapEnv, ModelConfig, is_local_url,
+    DEFAULT_ANTHROPIC_BASE_URL, DEFAULT_GEMINI_BASE_URL, DEFAULT_MAX_RESPONSE_BYTES,
+    DEFAULT_OLLAMA_BASE_URL, DEFAULT_OPENAI_BASE_URL, EnvSource, LOCAL_OLLAMA_BASE_URL, MapEnv,
+    ModelConfig, is_local_url,
 };
 use crate::decorators::Trace;
 use crate::error::ModelError;
@@ -65,11 +69,23 @@ pub enum ProviderChoice {
     OllamaLocal,
     /// Google's Gemini API. Needs an API key.
     Gemini,
+    /// Anthropic's Claude models. Needs an API key.
+    Anthropic,
+    /// OpenAI, or any server that speaks its chat-completions format
+    /// (OpenRouter, Groq, vLLM, LM Studio, ...). Needs a key unless the
+    /// server is on this computer.
+    OpenAiCompatible,
 }
 
 impl ProviderChoice {
     /// Every choice, in the order the Settings screen lists them.
-    pub const ALL: [Self; 3] = [Self::OllamaCloud, Self::OllamaLocal, Self::Gemini];
+    pub const ALL: [Self; 5] = [
+        Self::OllamaCloud,
+        Self::OllamaLocal,
+        Self::Gemini,
+        Self::Anthropic,
+        Self::OpenAiCompatible,
+    ];
 
     /// The name shown to a person.
     #[must_use]
@@ -78,6 +94,8 @@ impl ProviderChoice {
             Self::OllamaCloud => "Ollama Cloud",
             Self::OllamaLocal => "Ollama (this computer)",
             Self::Gemini => "Google Gemini",
+            Self::Anthropic => "Anthropic Claude",
+            Self::OpenAiCompatible => "OpenAI or compatible",
         }
     }
 
@@ -90,6 +108,11 @@ impl ProviderChoice {
                 "Models running on your own machine through Ollama. No key, and nothing leaves your computer."
             }
             Self::Gemini => "Models hosted by Google. Needs a Gemini API key.",
+            Self::Anthropic => "Claude models hosted by Anthropic. Needs an Anthropic API key.",
+            Self::OpenAiCompatible => {
+                "OpenAI, or any server with the same API (OpenRouter, Groq, vLLM, LM Studio). \
+                 Needs a key unless the server is on this computer."
+            }
         }
     }
 
@@ -101,6 +124,8 @@ impl ProviderChoice {
             Self::OllamaCloud => Some(OLLAMA_API_KEY_VAR),
             Self::OllamaLocal => None,
             Self::Gemini => Some(GEMINI_API_KEY_VAR),
+            Self::Anthropic => Some(ANTHROPIC_API_KEY_VAR),
+            Self::OpenAiCompatible => Some(OPENAI_API_KEY_VAR),
         }
     }
 
@@ -110,6 +135,8 @@ impl ProviderChoice {
         match self {
             Self::OllamaCloud | Self::OllamaLocal => ProviderId::Ollama,
             Self::Gemini => ProviderId::Gemini,
+            Self::Anthropic => ProviderId::Anthropic,
+            Self::OpenAiCompatible => ProviderId::OpenAi,
         }
     }
 }
@@ -160,8 +187,15 @@ pub struct ModelSettings {
     pub ollama_local: ModelPair,
     /// Models chosen for [`ProviderChoice::Gemini`].
     pub gemini: ModelPair,
+    /// Models chosen for [`ProviderChoice::Anthropic`].
+    pub anthropic: ModelPair,
+    /// Models chosen for [`ProviderChoice::OpenAiCompatible`].
+    pub openai: ModelPair,
     /// The local Ollama server's address.
     pub ollama_local_url: String,
+    /// The OpenAI-compatible server's API root, version included
+    /// (`https://api.openai.com/v1`, `http://localhost:1234/v1`).
+    pub openai_url: String,
 }
 
 impl Default for ModelSettings {
@@ -172,7 +206,10 @@ impl Default for ModelSettings {
             ollama_cloud: ModelPair::default(),
             ollama_local: ModelPair::default(),
             gemini: ModelPair::default(),
+            anthropic: ModelPair::default(),
+            openai: ModelPair::default(),
             ollama_local_url: LOCAL_OLLAMA_BASE_URL.to_string(),
+            openai_url: DEFAULT_OPENAI_BASE_URL.to_string(),
         }
     }
 }
@@ -185,6 +222,8 @@ impl ModelSettings {
             ProviderChoice::OllamaCloud => &self.ollama_cloud,
             ProviderChoice::OllamaLocal => &self.ollama_local,
             ProviderChoice::Gemini => &self.gemini,
+            ProviderChoice::Anthropic => &self.anthropic,
+            ProviderChoice::OpenAiCompatible => &self.openai,
         }
     }
 
@@ -194,6 +233,8 @@ impl ModelSettings {
             ProviderChoice::OllamaCloud => &mut self.ollama_cloud,
             ProviderChoice::OllamaLocal => &mut self.ollama_local,
             ProviderChoice::Gemini => &mut self.gemini,
+            ProviderChoice::Anthropic => &mut self.anthropic,
+            ProviderChoice::OpenAiCompatible => &mut self.openai,
         }
     }
 
@@ -212,6 +253,30 @@ impl ModelSettings {
             ProviderChoice::Gemini => env
                 .get("FERRITE_GEMINI_BASE_URL")
                 .unwrap_or_else(|| DEFAULT_GEMINI_BASE_URL.to_string()),
+            ProviderChoice::Anthropic => env
+                .get("FERRITE_ANTHROPIC_BASE_URL")
+                .unwrap_or_else(|| DEFAULT_ANTHROPIC_BASE_URL.to_string()),
+            ProviderChoice::OpenAiCompatible => env
+                .get("FERRITE_OPENAI_BASE_URL")
+                .unwrap_or_else(|| self.openai_root()),
+        }
+    }
+
+    /// Whether `choice` needs a key with these settings: every provider that
+    /// takes one does, except an OpenAI-compatible server on this computer.
+    #[must_use]
+    pub fn key_required(&self, choice: ProviderChoice, env: &dyn EnvSource) -> bool {
+        choice.key_var().is_some()
+            && !(choice == ProviderChoice::OpenAiCompatible
+                && is_local_url(&self.base_url(choice, env)))
+    }
+
+    fn openai_root(&self) -> String {
+        let url = self.openai_url.trim().trim_end_matches('/');
+        if url.is_empty() {
+            DEFAULT_OPENAI_BASE_URL.to_string()
+        } else {
+            url.to_string()
         }
     }
 
@@ -237,6 +302,11 @@ impl ModelSettings {
             if let Some(why) = bad_model_name(name) {
                 return Some(format!("The {what} model name {why}."));
             }
+        }
+        if choice == ProviderChoice::OpenAiCompatible && !is_http_url(&self.openai_root()) {
+            return Some(
+                "The server address must be a web address like https://api.openai.com/v1.".into(),
+            );
         }
         if choice == ProviderChoice::OllamaLocal {
             let url = self.local_url();
@@ -277,6 +347,12 @@ impl ModelSettings {
             ProviderChoice::Gemini => {
                 env = env.with("FERRITE_GEMINI_BASE_URL", DEFAULT_GEMINI_BASE_URL);
             }
+            ProviderChoice::Anthropic => {
+                env = env.with("FERRITE_ANTHROPIC_BASE_URL", DEFAULT_ANTHROPIC_BASE_URL);
+            }
+            ProviderChoice::OpenAiCompatible => {
+                env = env.with("FERRITE_OPENAI_BASE_URL", self.openai_root());
+            }
         }
         env
     }
@@ -291,6 +367,8 @@ impl ModelSettings {
             ModelTier::Main.env_var(),
             "FERRITE_OLLAMA_BASE_URL",
             "FERRITE_GEMINI_BASE_URL",
+            "FERRITE_ANTHROPIC_BASE_URL",
+            "FERRITE_OPENAI_BASE_URL",
         ]
         .into_iter()
         .filter(|var| own.get(var).is_some() && env.get(var).is_some())
@@ -470,7 +548,20 @@ pub fn connect(
         Ok(Arc::new(Trace::new(provider, crate::trace::global())))
     };
 
+    let build_anthropic = |config: &ModelConfig| -> Result<Arc<dyn ModelProvider>, ModelError> {
+        let provider = AnthropicProvider::from_config(config, ModelTier::Small, env, store)?;
+        Ok(Arc::new(Trace::new(provider, crate::trace::global())))
+    };
+    let build_openai = |config: &ModelConfig| -> Result<Arc<dyn ModelProvider>, ModelError> {
+        let provider = OpenAiProvider::from_config(config, ModelTier::Small, env, store)?;
+        Ok(Arc::new(Trace::new(provider, crate::trace::global())))
+    };
+
     let (provider, choice) = match settings.provider {
+        Some(ProviderChoice::Anthropic) => (build_anthropic(&config)?, ProviderChoice::Anthropic),
+        Some(ProviderChoice::OpenAiCompatible) => {
+            (build_openai(&config)?, ProviderChoice::OpenAiCompatible)
+        }
         Some(choice @ (ProviderChoice::OllamaCloud | ProviderChoice::OllamaLocal)) => {
             (build_ollama(&config)?, choice)
         }
@@ -546,6 +637,21 @@ async fn list_models_within(
             ProviderChoice::Gemini => {
                 let key = key.ok_or_else(|| missing_key(choice))?;
                 GeminiProvider::new(base_url, key, ModelTier::Small, DEFAULT_MAX_RESPONSE_BYTES)
+                    .list_models()
+                    .await
+            }
+            ProviderChoice::Anthropic => {
+                let key = key.ok_or_else(|| missing_key(choice))?;
+                AnthropicProvider::new(base_url, key, ModelTier::Small, DEFAULT_MAX_RESPONSE_BYTES)
+                    .list_models()
+                    .await
+            }
+            ProviderChoice::OpenAiCompatible => {
+                // A server on this computer may take no key.
+                if key.is_none() && !is_local_url(base_url) {
+                    return Err(missing_key(choice));
+                }
+                OpenAiProvider::new(base_url, key, ModelTier::Small, DEFAULT_MAX_RESPONSE_BYTES)
                     .list_models()
                     .await
             }

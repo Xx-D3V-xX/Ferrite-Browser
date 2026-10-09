@@ -322,6 +322,11 @@ fn tab_row(state: &FerriteBrowser, width: f32) -> Element<'_, Msg> {
             } else {
                 other_w
             };
+            // A tab that just opened grows to its width.
+            let w = match state.tab_open_anim {
+                Some((tab, t)) if tab == i => (w * crate::ease_out_cubic(t)).max(24.0),
+                _ => w,
+            };
             tab_view(state, i, w, can_close)
         })
         .collect();
@@ -1030,9 +1035,16 @@ fn zoom_row(state: &FerriteBrowser) -> Element<'_, Msg> {
             .on_press(Msg::Menu(command))
     };
     row![
-        // Lines up with the icon column of the rows around it.
-        container(text("")).width(Length::Fixed(14.0)),
-        text("Zoom").size(TEXT_BODY).width(Length::Fill),
+        // Lines up with the rows around it: an empty icon column and the same gap
+        // to the label as `menu_item` (the outer row's narrower gap left "Zoom" 4 px
+        // to the left of every other label).
+        row![
+            container(text("")).width(Length::Fixed(14.0)),
+            text("Zoom").size(TEXT_BODY),
+        ]
+        .spacing(SP_MD)
+        .align_y(Alignment::Center)
+        .width(Length::Fill),
         step(Icon::Minus, MenuCommand::ZoomOut),
         button(
             container(

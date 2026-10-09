@@ -6,13 +6,19 @@
 //! backend gets all three for free and cannot accidentally implement one of
 //! them slightly differently.
 
+mod anthropic;
+#[cfg(test)]
+mod fake_server;
 mod gemini;
 mod http;
 mod mock;
 mod ollama;
+mod openai;
 mod replay;
 
+pub use anthropic::{ANTHROPIC_API_KEY_VAR, AnthropicProvider};
 pub use gemini::{GEMINI_API_KEY_VAR, GeminiProvider};
 pub use mock::{MockProvider, MockStep};
 pub use ollama::{OLLAMA_API_KEY_VAR, OllamaProvider, shared as shared_ollama, validate_tag};
+pub use openai::{OPENAI_API_KEY_VAR, OpenAiProvider};
 pub use replay::ReplayProvider;

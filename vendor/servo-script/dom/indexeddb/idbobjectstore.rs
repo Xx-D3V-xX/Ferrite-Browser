@@ -40,11 +40,11 @@ use crate::dom::globalscope::GlobalScope;
 use crate::dom::indexeddb::idbcursor::{IDBCursor, IterationParam, ObjectStoreOrIndex};
 use crate::dom::indexeddb::idbcursorwithvalue::IDBCursorWithValue;
 use crate::dom::indexeddb::idbindex::IDBIndex;
-use crate::dom::indexeddb::idbrequest::IDBRequest;
+use crate::dom::indexeddb::idbrequest::{IDBRequest, RequestJob};
 use crate::dom::indexeddb::idbtransaction::IDBTransaction;
 use crate::dom::indexeddb::key::{
     ExtractionResult, can_inject_key_into_value, convert_value_to_key, convert_value_to_key_range,
-    extract_key, inject_key_into_value, is_valid_key_path,
+    extract_index_keys, extract_key, inject_key_into_value, is_valid_key_path,
 };
 
 #[derive(Clone, JSTraceable, MallocSizeOf)]
@@ -233,7 +233,7 @@ impl IDBObjectStore {
     }
 
     /// <https://www.w3.org/TR/IndexedDB-3/#clone>
-    fn clone_value_in_target_realm(
+    pub(crate) fn clone_value_in_target_realm(
         &self,
         cx: &mut JSContext,
         value: HandleValue,
@@ -318,11 +318,15 @@ impl IDBObjectStore {
     }
 
     /// <https://www.w3.org/TR/IndexedDB-3/#object-store-in-line-keys>
-    fn uses_inline_keys(&self) -> bool {
+    pub(crate) fn store_key_path(&self) -> Option<&KeyPath> {
+        self.key_path.as_ref()
+    }
+
+    pub(crate) fn uses_inline_keys(&self) -> bool {
         self.key_path.is_some()
     }
 
-    fn verify_not_deleted(&self) -> ErrorResult {
+    pub(crate) fn verify_not_deleted(&self) -> ErrorResult {
         let db = self.transaction.Db();
         if !db.object_store_exists(&self.name.borrow()) {
             return Err(Error::InvalidState(None));
@@ -331,7 +335,7 @@ impl IDBObjectStore {
     }
 
     /// Checks if the transaction is active, throwing a "TransactionInactiveError" DOMException if not.
-    fn check_transaction_active(&self) -> Fallible<()> {
+    pub(crate) fn check_transaction_active(&self) -> Fallible<()> {
         // Let transaction be this object store handle's transaction.
         let transaction = &self.transaction;
 
@@ -348,7 +352,7 @@ impl IDBObjectStore {
 
     /// Checks if the transaction is active, throwing a "TransactionInactiveError" DOMException if not.
     /// it then checks if the transaction is a read-only transaction, throwing a "ReadOnlyError" DOMException if so.
-    fn check_readwrite_transaction_active(&self) -> Fallible<()> {
+    pub(crate) fn check_readwrite_transaction_active(&self) -> Fallible<()> {
         // Let transaction be this object store handle's transaction.
         let transaction = &self.transaction;
 
@@ -466,6 +470,8 @@ impl IDBObjectStore {
         let Ok(serialized_value) = postcard::to_stdvec(&cloned_value) else {
             return Err(Error::InvalidState(None));
         };
+        // Ferrite: the keys the record has in the store's unique indexes.
+        let unique_index_keys = self.unique_index_keys(cx, cloned_js_value.handle())?;
         // Step 12. Let operation be an algorithm to run store a record into an object store with
         // store, clone, key, and no-overwrite flag.
         let request = IDBRequest::execute_async(
@@ -478,6 +484,7 @@ impl IDBObjectStore {
                     value: serialized_value,
                     should_overwrite: !no_overwrite,
                     key_generator_current_number: key_generator_current_number_for_put,
+                    unique_index_keys,
                 })
             },
             None,
@@ -569,7 +576,7 @@ impl IDBObjectStore {
                 })
             },
             None,
-            Some(iteration_param),
+            Some(RequestJob::Cursor(iteration_param)),
         )
         .inspect(|request| cursor.set_request(request))
     }
@@ -594,6 +601,31 @@ impl IDBObjectStore {
             .borrow_mut()
             .insert(name, Dom::from_ref(&index));
         index
+    }
+
+    /// For a record about to be stored: the keys it has in each *unique* index of this
+    /// store, by index name (empty when its value gives no valid key). The storage
+    /// backend refuses the put when another record already holds one of them.
+    pub(crate) fn unique_index_keys(
+        &self,
+        cx: &mut JSContext,
+        value: HandleValue,
+    ) -> Fallible<Vec<(String, Vec<IndexedDBKeyType>)>> {
+        let indexes: Vec<(String, DomRoot<IDBIndex>)> = self
+            .index_set
+            .borrow()
+            .iter()
+            .filter(|(_, index)| index.is_unique())
+            .map(|(name, index)| (name.to_string(), index.as_rooted()))
+            .collect();
+        let mut keys = Vec::with_capacity(indexes.len());
+        for (name, index) in indexes {
+            keys.push((
+                name,
+                extract_index_keys(cx, value, index.key_path(), index.multi_entry())?,
+            ));
+        }
+        Ok(keys)
     }
 
     pub(crate) fn has_index(&self, name: &DOMString) -> bool {

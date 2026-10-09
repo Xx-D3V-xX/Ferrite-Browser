@@ -193,7 +193,7 @@ impl CookieStoreMethods<crate::DomTypeHolder> for CookieStore {
 
         // 3. If origin is an opaque origin, then return a promise rejected with a "SecurityError" DOMException.
         if !origin.is_tuple() {
-            p.reject_error(cx, Error::Security(None));
+            p.reject_error(cx, Error::Security(Some("cookieStore: this document's origin is opaque".into())));
             return p;
         }
 
@@ -236,7 +236,7 @@ impl CookieStoreMethods<crate::DomTypeHolder> for CookieStore {
 
         // 3. If origin is an opaque origin, then return a promise rejected with a "SecurityError" DOMException.
         if !origin.is_tuple() {
-            p.reject_error(cx, Error::Security(None));
+            p.reject_error(cx, Error::Security(Some("cookieStore: this document's origin is opaque".into())));
             return p;
         }
 
@@ -317,7 +317,7 @@ impl CookieStoreMethods<crate::DomTypeHolder> for CookieStore {
 
         // 3. If origin is an opaque origin, then return a promise rejected with a "SecurityError" DOMException.
         if !origin.is_tuple() {
-            p.reject_error(cx, Error::Security(None));
+            p.reject_error(cx, Error::Security(Some("cookieStore: this document's origin is opaque".into())));
             return p;
         }
         // 4. Let url be settings’s creation URL.
@@ -360,7 +360,7 @@ impl CookieStoreMethods<crate::DomTypeHolder> for CookieStore {
 
         // 3. If origin is an opaque origin, then return a promise rejected with a "SecurityError" DOMException.
         if !origin.is_tuple() {
-            p.reject_error(cx, Error::Security(None));
+            p.reject_error(cx, Error::Security(Some("cookieStore: this document's origin is opaque".into())));
             return p;
         }
 
@@ -435,7 +435,7 @@ impl CookieStoreMethods<crate::DomTypeHolder> for CookieStore {
 
         // 3. If origin is an opaque origin, then return a promise rejected with a "SecurityError" DOMException.
         if !origin.is_tuple() {
-            p.reject_error(cx, Error::Security(None));
+            p.reject_error(cx, Error::Security(Some("cookieStore: this document's origin is opaque".into())));
             return p;
         }
 
@@ -491,7 +491,7 @@ impl CookieStoreMethods<crate::DomTypeHolder> for CookieStore {
 
         // 3. If origin is an opaque origin, then return a promise rejected with a "SecurityError" DOMException.
         if !origin.is_tuple() {
-            p.reject_error(cx, Error::Security(None));
+            p.reject_error(cx, Error::Security(Some("cookieStore: this document's origin is opaque".into())));
             return p;
         }
 
@@ -540,7 +540,7 @@ impl CookieStoreMethods<crate::DomTypeHolder> for CookieStore {
 
         // 3. If origin is an opaque origin, then return a promise rejected with a "SecurityError" DOMException.
         if !origin.is_tuple() {
-            p.reject_error(cx, Error::Security(None));
+            p.reject_error(cx, Error::Security(Some("cookieStore: this document's origin is opaque".into())));
             return p;
         }
 
@@ -578,7 +578,7 @@ impl CookieStoreMethods<crate::DomTypeHolder> for CookieStore {
 
         // 3. If origin is an opaque origin, then return a promise rejected with a "SecurityError" DOMException.
         if !origin.is_tuple() {
-            p.reject_error(cx, Error::Security(None));
+            p.reject_error(cx, Error::Security(Some("cookieStore: this document's origin is opaque".into())));
             return p;
         }
 

@@ -569,3 +569,47 @@ fn opening_the_menu_restarts_its_slide_and_ticks_finish_it() {
     // About 140 ms of 16 ms ticks: a quick settle, not a slow reveal.
     assert!((7..=12).contains(&ticks), "{ticks} ticks");
 }
+
+#[test]
+fn a_panel_that_appears_eases_in_and_ticks_finish_it() {
+    let mut state = FerriteBrowser::default();
+    let _ = update_app(&mut state, FerriteBrowserMessage::ToggleAgentSidebar);
+    assert_eq!(state.panels_shown.0, Some(PanelKind::Agent));
+    assert_eq!(state.drawer_anim, 0.0);
+    let _ = view(&state);
+    let mut ticks = 0;
+    while state.drawer_anim < 1.0 {
+        let _ = update_app(&mut state, FerriteBrowserMessage::PanelAnimTick);
+        ticks += 1;
+        assert!(ticks < 60, "the entrance must finish");
+    }
+    // About 200 ms of 16 ms ticks: quick, not a slow reveal.
+    assert!((11..=14).contains(&ticks), "{ticks} ticks");
+    // An unrelated message does not restart the entrance of a panel already open.
+    let _ = update_app(&mut state, FerriteBrowserMessage::MenuAnimTick);
+    assert_eq!(state.drawer_anim, 1.0);
+}
+
+#[test]
+fn swapping_drawers_restarts_the_entrance_and_closing_does_not() {
+    let mut state = FerriteBrowser::default();
+    let _ = update_app(&mut state, FerriteBrowserMessage::ToggleAgentSidebar);
+    state.drawer_anim = 1.0;
+    let _ = update_app(&mut state, FerriteBrowserMessage::ToggleSettingsPanel);
+    assert_eq!(state.panels_shown.0, Some(PanelKind::Settings));
+    assert_eq!(state.drawer_anim, 0.0);
+    state.drawer_anim = 1.0;
+    let _ = update_app(&mut state, FerriteBrowserMessage::ToggleSettingsPanel);
+    assert_eq!(state.panels_shown.0, None);
+    assert_eq!(state.drawer_anim, 1.0, "closing is instant");
+}
+
+#[test]
+fn the_bottom_panel_eases_in_on_its_own() {
+    let mut state = FerriteBrowser::default();
+    let _ = update_app(&mut state, FerriteBrowserMessage::ToggleAuditPanel);
+    assert_eq!(state.panels_shown.1, Some(PanelKind::Audit));
+    assert_eq!(state.bottom_anim, 0.0);
+    assert_eq!(state.drawer_anim, 1.0, "no drawer opened");
+    let _ = view(&state);
+}

@@ -116,6 +116,8 @@ impl ModelProvider for ReplayProvider {
         let raw = match fixture.provider {
             ProviderId::Ollama => super::ollama::parse_chat_response(&body)?,
             ProviderId::Gemini => super::gemini::parse_generate_response(&body)?,
+            ProviderId::Anthropic => super::anthropic::parse_messages_response(&body)?,
+            ProviderId::OpenAi => super::openai::parse_chat_response(&body)?,
             other => {
                 return Err(ModelError::Config(format!(
                     "fixture {key} records provider '{other}', which has no wire format to replay; \

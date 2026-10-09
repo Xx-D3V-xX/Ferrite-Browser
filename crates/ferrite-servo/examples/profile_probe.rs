@@ -1,5 +1,6 @@
 //! Checks that a login-style state survives a restart: a cookie set by a
-//! server response and a `localStorage` value written by the page.
+//! server response, a `localStorage` value written by the page, a record in
+//! IndexedDB (read back through an index), and an entry in the Cache API.
 //!
 //! Run it twice with the same `FERRITE_HOME`:
 //!
@@ -9,7 +10,7 @@
 //! ```
 //!
 //! `set` visits a loopback page that sets a persistent cookie and writes
-//! `localStorage`, then shuts the engine down cleanly (which is when Servo
+//! `localStorage`, IndexedDB and a cache entry, then shuts the engine down cleanly (which is when Servo
 //! writes the profile). `get` starts a fresh process and reports what it still
 //! has. Exits non-zero when `get` finds nothing.
 
@@ -19,6 +20,21 @@ use std::net::TcpListener;
 use std::time::{Duration, Instant};
 
 const PORT: u16 = 8123;
+
+/// Writes (the first time) and reads (every time) one IndexedDB record, found
+/// through an index, and one cache entry; publishes what it found as
+/// `window.__persist`.
+const PERSIST_SCRIPT: &str = "(async function(){var out={};\
+try{var db=await new Promise(function(res,rej){var r=indexedDB.open('ferrite_db',1);\
+r.onupgradeneeded=function(){r.result.createObjectStore('k',{keyPath:'id'}).createIndex('by_v','v')};\
+r.onsuccess=function(){res(r.result)};r.onerror=function(){rej(r.error)}});\
+var tx=db.transaction('k','readwrite');var st=tx.objectStore('k');\
+var found=await new Promise(function(res){var q=st.index('by_v').get('idb-stored');q.onsuccess=function(){res(q.result)}});\
+if(!found)st.put({id:1,v:'idb-stored'});\
+await new Promise(function(res){tx.oncomplete=res});out.idb=found?found.v:'new'}catch(e){out.idb='err '+e}\
+try{var c=await caches.open('persist');var hit=await c.match('/persisted.txt');\
+if(!hit)await c.put('/persisted.txt',new Response('cached'));out.cache=hit?await hit.text():'new'}catch(e){out.cache='err '+e}\
+window.__persist=JSON.stringify(out)})();";
 
 fn serve() {
     let listener = TcpListener::bind(("127.0.0.1", PORT)).expect("bind loopback");
@@ -32,7 +48,7 @@ fn serve() {
             let body = format!(
                 "<!doctype html><title>profile</title><body>\
                  <script>if(!localStorage.getItem('ferrite_ls')){{localStorage.setItem('ferrite_ls','stored');}}\
-                 window.__server_saw_cookie={saw_cookie};</script>ok</body>"
+                 window.__server_saw_cookie={saw_cookie};{PERSIST_SCRIPT}</script>ok</body>"
             );
             let head = format!(
                 "HTTP/1.1 200 OK\r\nContent-Type: text/html\r\nSet-Cookie: ferrite_sid=abc123; Max-Age=3600; Path=/\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
@@ -63,16 +79,18 @@ fn main() {
         session.spin();
         std::thread::sleep(Duration::from_millis(16));
     }
-    let end = Instant::now() + Duration::from_millis(500);
+    let end = Instant::now() + Duration::from_millis(3000);
     while Instant::now() < end {
         session.spin();
         std::thread::sleep(Duration::from_millis(16));
     }
     let seen = session
-        .execute_js("JSON.stringify({ls: localStorage.getItem('ferrite_ls'), server_saw_cookie: window.__server_saw_cookie})")
+        .execute_js("JSON.stringify({ls: localStorage.getItem('ferrite_ls'), server_saw_cookie: window.__server_saw_cookie, persist: window.__persist})")
         .unwrap_or_default();
     println!("INFO {mode}: {seen}");
     let ok = seen.contains("stored") && seen.contains("true");
+    // On the second run IndexedDB and the cache must hand back what the first wrote.
+    let stores_ok = seen.contains("idb-stored") && seen.contains("cached");
     drop(session);
     shutdown_engine();
     if mode == "get" {
@@ -81,7 +99,16 @@ fn main() {
             if ok { "PASS" } else { "FAIL" },
             if ok { "survived" } else { "did not survive" }
         );
-        std::process::exit(if ok { 0 } else { 1 });
+        println!(
+            "{} restart: IndexedDB (through an index) and the cache {}",
+            if stores_ok { "PASS" } else { "FAIL" },
+            if stores_ok {
+                "survived"
+            } else {
+                "did not survive"
+            }
+        );
+        std::process::exit(if ok && stores_ok { 0 } else { 1 });
     }
     println!("INFO profile written; now run with `get`");
     std::process::exit(0);

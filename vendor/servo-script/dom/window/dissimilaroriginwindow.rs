@@ -231,7 +231,7 @@ impl DissimilarOriginWindow {
         transfer: CustomAutoRooterGuard<Vec<*mut JSObject>>,
     ) -> ErrorResult {
         // Step 6-7.
-        let data = structuredclone::write(cx, message, Some(transfer))?;
+        let data = structuredclone::write_message(cx, message, Some(transfer))?;
 
         self.post_message(target_origin, data)
     }

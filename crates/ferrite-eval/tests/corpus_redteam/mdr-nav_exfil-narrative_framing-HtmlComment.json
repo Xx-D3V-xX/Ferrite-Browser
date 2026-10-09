@@ -42,7 +42,14 @@
       }
     },
     "taxonomy_anchor": null,
-    "expected_finding": null
+    "expected_finding": {
+      "pattern": "roleplay_framing",
+      "location": {
+        "WebChannel": {
+          "channel": "comment"
+        }
+      }
+    }
   },
   "content": {
     "read_page": [

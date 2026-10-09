@@ -264,8 +264,11 @@ pub(crate) fn new_tab_page(state: &FerriteBrowser) -> Element<'_, Msg> {
             let favicon = state.tile_favicons.get(index).and_then(|f| f.as_ref());
             let glyph = tile_glyph(favicon, &tile_monogram(tile.label), palette.text_dim);
             button(
+                // Fill the tile, or the icon and label sit at its left edge and each
+                // tile's icon lands somewhere else (the label's width moved it).
                 column![glyph, text(tile.label).size(TEXT_SMALL).color(palette.text)]
                     .spacing(SP_SM)
+                    .width(Length::Fill)
                     .align_x(Alignment::Center),
             )
             .width(TILE_WIDTH)
@@ -349,10 +352,22 @@ pub(crate) fn new_tab_page(state: &FerriteBrowser) -> Element<'_, Msg> {
     }
     body.push(footer.into());
 
+    // A tab that has just opened grows into the strip; its page rises the last few
+    // pixels into place on the same clock (decoration only: it is drawn and usable
+    // from the first frame).
+    let rise = match state.tab_open_anim {
+        Some((tab, t)) if tab == state.active_tab => (1.0 - crate::ease_out_cubic(t)) * 12.0,
+        _ => 0.0,
+    };
+
     container(
         column(body)
             .spacing(SP_LG + SP_XS)
-            .align_x(Alignment::Center),
+            .align_x(Alignment::Center)
+            .padding(iced::Padding {
+                top: rise,
+                ..iced::Padding::ZERO
+            }),
     )
     .width(Length::Fill)
     .height(Length::Fill)

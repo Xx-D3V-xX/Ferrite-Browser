@@ -158,17 +158,30 @@ impl PerformanceObserverMethods<crate::DomTypeHolder> for PerformanceObserver {
         }
 
         // The entryTypes and type paths diverge here
-        const NO_VALID_ENTRY_TYPE: &str = "No valid entry type provided to observe().";
-        if let Some(entry_types) = &options.entryTypes {
+        // Ferrite: the warning names what the page asked for, as other browsers' do; a
+        // bare "no valid entry type" left a reader guessing which one this engine lacks.
+        let no_valid_entry_type = |requested: Vec<String>| {
+            format!(
+                "No valid entry type provided to observe(): {} {} not recorded by this browser.",
+                requested
+                    .iter()
+                    .map(|t| format!("\u{201c}{t}\u{201d}"))
+                    .collect::<Vec<_>>()
+                    .join(", "),
+                if requested.len() == 1 { "is" } else { "are" }
+            )
+        };
+        if let Some(requested) = &options.entryTypes {
             // Steps 6.1 - 6.2
-            let entry_types = entry_types
+            let entry_types = requested
                 .iter()
                 .filter_map(|e| EntryType::try_from(&*e.str()).ok())
                 .collect::<Vec<EntryType>>();
 
             // Step 6.3
             if entry_types.is_empty() {
-                Console::internal_warn(cx, &self.global(), NO_VALID_ENTRY_TYPE.to_string());
+                let requested = requested.iter().map(|e| e.str().to_string()).collect();
+                Console::internal_warn(cx, &self.global(), no_valid_entry_type(requested));
                 return Ok(());
             }
 
@@ -182,7 +195,8 @@ impl PerformanceObserverMethods<crate::DomTypeHolder> for PerformanceObserver {
         } else if let Some(entry_type) = &options.type_ {
             // Step 7.2
             let Ok(entry_type) = EntryType::try_from(&*entry_type.str()) else {
-                Console::internal_warn(cx, &self.global(), NO_VALID_ENTRY_TYPE.to_string());
+                let requested = vec![entry_type.str().to_string()];
+                Console::internal_warn(cx, &self.global(), no_valid_entry_type(requested));
                 return Ok(());
             };
 

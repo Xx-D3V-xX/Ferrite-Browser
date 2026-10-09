@@ -64,6 +64,8 @@ pub enum SettingsMessage {
     KeyChanged(String),
     /// The local server's address changed.
     LocalUrlChanged(String),
+    /// The OpenAI-compatible server's address changed.
+    OpenAiUrlChanged(String),
     /// "Load models" (also sent for you when a provider with a key is chosen).
     LoadModels,
     /// A listing came back. `request` discards a stale one.
@@ -85,6 +87,8 @@ pub enum SettingsMessage {
     Save,
     /// A browser identity was chosen (see the `identity` module).
     SetIdentity(BrowserIdentity),
+    /// Forget a remembered camera, microphone or screen decision for a site.
+    ForgetSitePermission(String, ferrite_servo::permissions::CapabilityKind),
 }
 
 impl std::fmt::Debug for SettingsMessage {
@@ -94,6 +98,7 @@ impl std::fmt::Debug for SettingsMessage {
             Self::KeyChanged(_) => f.write_str("KeyChanged(<redacted>)"),
             Self::SelectProvider(c) => write!(f, "SelectProvider({c:?})"),
             Self::LocalUrlChanged(u) => write!(f, "LocalUrlChanged({u:?})"),
+            Self::OpenAiUrlChanged(u) => write!(f, "OpenAiUrlChanged({u:?})"),
             Self::LoadModels => f.write_str("LoadModels"),
             Self::ModelsLoaded { request, result } => write!(
                 f,
@@ -109,6 +114,7 @@ impl std::fmt::Debug for SettingsMessage {
             Self::RemoveKey => f.write_str("RemoveKey"),
             Self::Save => f.write_str("Save"),
             Self::SetIdentity(i) => write!(f, "SetIdentity({i:?})"),
+            Self::ForgetSitePermission(o, k) => write!(f, "ForgetSitePermission({o:?}, {k:?})"),
         }
     }
 }
@@ -342,6 +348,14 @@ pub fn describe_list_error(choice: ProviderChoice, url: &str, err: &ModelError) 
         ModelError::ClientError { status: 404, .. } if choice == ProviderChoice::OllamaLocal => {
             "That address answered, but it does not look like an Ollama server.".into()
         }
+        ModelError::Transport { .. } if choice == ProviderChoice::OpenAiCompatible => {
+            format!("Could not reach {url}. Check the address and that the server is running.")
+        }
+        ModelError::ClientError { status: 404, .. }
+            if choice == ProviderChoice::OpenAiCompatible =>
+        {
+            format!("{url} answered, but has no /models list. Check the address ends with its version, like /v1.")
+        }
         ModelError::Transport { .. } if choice == ProviderChoice::OllamaLocal => {
             format!("Could not reach Ollama at {url}. Is it running? Start it, then try again.")
         }
@@ -361,7 +375,7 @@ pub fn describe_list_error(choice: ProviderChoice, url: &str, err: &ModelError) 
 #[must_use]
 pub fn save_blocker(s: &SettingsState) -> Option<String> {
     let choice = s.draft.provider?;
-    if choice.key_var().is_some()
+    if s.draft.key_required(choice, &*s.env)
         && s.key_input.trim().is_empty()
         && s.key_source == KeySource::Missing
     {
@@ -433,7 +447,7 @@ fn auto_load(state: &mut FerriteBrowser) {
     let Some(choice) = s.draft.provider else {
         return;
     };
-    let usable = choice.key_var().is_none() || s.key_source != KeySource::Missing;
+    let usable = !s.draft.key_required(choice, &*s.env) || s.key_source != KeySource::Missing;
     if usable && s.models.is_empty() && !s.loading {
         start_loading(state);
     }
@@ -445,7 +459,7 @@ fn start_loading(state: &mut FerriteBrowser) {
     };
     let s = &mut state.settings;
     let key = settings::resolve_key(choice, &s.key_input, &*s.env, &*s.vault);
-    if choice.key_var().is_some() && key.is_none() {
+    if s.draft.key_required(choice, &*s.env) && key.is_none() {
         s.notice = Some(Notice::new(NoticeKind::Error, "Enter your API key first."));
         return;
     }
@@ -472,6 +486,9 @@ fn start_loading(state: &mut FerriteBrowser) {
 /// Applies one drawer message.
 pub(crate) fn update(state: &mut FerriteBrowser, message: SettingsMessage) {
     match message {
+        SettingsMessage::ForgetSitePermission(origin, kind) => {
+            ferrite_servo::session::forget_site_permission(&origin, kind);
+        }
         SettingsMessage::SelectProvider(choice) => {
             let s = &mut state.settings;
             s.draft.provider = Some(choice);
@@ -493,6 +510,11 @@ pub(crate) fn update(state: &mut FerriteBrowser, message: SettingsMessage) {
         }
         SettingsMessage::LocalUrlChanged(value) => {
             state.settings.draft.ollama_local_url = value;
+            state.settings.models.clear();
+            state.settings.notice = None;
+        }
+        SettingsMessage::OpenAiUrlChanged(value) => {
+            state.settings.draft.openai_url = value;
             state.settings.models.clear();
             state.settings.notice = None;
         }
@@ -921,6 +943,7 @@ pub(crate) fn view(state: &FerriteBrowser) -> Element<'_, FerriteBrowserMessage>
         model_card(state, palette),
         appearance_card(state, palette),
         identity_card(state, palette),
+        site_permissions_card(palette),
         footer(state, palette),
     ]
     .spacing(12)
@@ -1039,6 +1062,24 @@ fn model_card<'a>(
         );
     };
 
+    // An OpenAI-compatible provider is wherever its address says.
+    if choice == ProviderChoice::OpenAiCompatible {
+        body.push(label(palette, "Server address"));
+        body.push(
+            text_input("https://api.openai.com/v1", &s.draft.openai_url)
+                .on_input(|v| FerriteBrowserMessage::Settings(SettingsMessage::OpenAiUrlChanged(v)))
+                .padding(FIELD_PADDING)
+                .size(13)
+                .style(field_style(palette))
+                .into(),
+        );
+        body.push(hint(
+            palette,
+            "The API root with its version, like https://openrouter.ai/api/v1 or \
+             http://localhost:1234/v1. A server on this computer may need no key.",
+        ));
+    }
+
     // API key (or server address).
     match choice.key_var() {
         None => {
@@ -1108,7 +1149,15 @@ fn model_card<'a>(
                     palette,
                     match choice {
                         ProviderChoice::Gemini => "Get one at aistudio.google.com/apikey",
-                        _ => "Get one at ollama.com/settings/keys",
+                        ProviderChoice::Anthropic => {
+                            "Get one at console.anthropic.com/settings/keys"
+                        }
+                        ProviderChoice::OpenAiCompatible => {
+                            "From your provider; for OpenAI, platform.openai.com/api-keys"
+                        }
+                        ProviderChoice::OllamaCloud | ProviderChoice::OllamaLocal => {
+                            "Get one at ollama.com/settings/keys"
+                        }
                     },
                 ));
             }
@@ -1353,6 +1402,59 @@ fn identity_card<'a>(
             column(rows).spacing(6).into(),
             hint(palette, "Applies the next time you open Ferrite."),
         ],
+    )
+}
+
+/// The camera, microphone and screen decisions Ferrite remembers, one row each, with a
+/// button to forget it. (Screen sharing is never remembered as allowed, so only blocks
+/// show for it.)
+fn site_permissions_card(palette: &'static Palette) -> Element<'static, FerriteBrowserMessage> {
+    use ferrite_servo::permissions::Remembered;
+    let entries = ferrite_servo::session::site_permissions();
+    let rows: Vec<Element<FerriteBrowserMessage>> = if entries.is_empty() {
+        vec![hint(
+            palette,
+            "None yet. When a site asks for your camera, microphone or screen you are asked, \
+             and \"Always allow\" or a kept \"Block\" appears here.",
+        )]
+    } else {
+        entries
+            .into_iter()
+            .map(|(origin, kind, decision)| {
+                let verdict = match decision {
+                    Remembered::Allow => "allowed",
+                    Remembered::Block => "blocked",
+                };
+                row![
+                    column![
+                        text(origin.clone())
+                            .size(13)
+                            .color(palette.text)
+                            .wrapping(iced::widget::text::Wrapping::None),
+                        text(format!("{}: {verdict}", kind.name()))
+                            .size(HINT_SIZE)
+                            .color(palette.text_dim),
+                    ]
+                    .spacing(2)
+                    .width(Length::Fill),
+                    button(text("Forget").size(12))
+                        .padding([4, 10])
+                        .style(crate::tokens::outline_btn_style)
+                        .on_press(FerriteBrowserMessage::Settings(
+                            SettingsMessage::ForgetSitePermission(origin, kind),
+                        )),
+                ]
+                .spacing(8)
+                .align_y(iced::Alignment::Center)
+                .into()
+            })
+            .collect()
+    };
+    card(
+        palette,
+        "Site permissions",
+        "What sites may use on your computer. A permission you gave a site is not used while the AI agent is working in the tab.",
+        vec![column(rows).spacing(8).into()],
     )
 }
 
@@ -1836,6 +1938,62 @@ mod tests {
         connect_saved(&mut second);
         assert_eq!(second.settings.active, Some(ProviderChoice::OllamaLocal));
         assert_eq!(second.model_tag_main, "local-m");
+    }
+
+    #[tokio::test]
+    async fn a_local_openai_compatible_server_saves_and_connects_without_a_key() {
+        let dir = ferrite_model::testing::TempDir::new("settings-ui-openai-local");
+        let (mut state, _) = browser(lister_returning(Ok(vec!["local-llm".into()])));
+        state.settings.path = Some(dir.path().join("settings.json"));
+        msg(
+            &mut state,
+            SettingsMessage::SelectProvider(ProviderChoice::OpenAiCompatible),
+        );
+        // The default address is OpenAI's, which needs a key.
+        assert_eq!(
+            save_blocker(&state.settings).as_deref(),
+            Some("Enter your API key.")
+        );
+        msg(
+            &mut state,
+            SettingsMessage::OpenAiUrlChanged("http://localhost:1234/v1".into()),
+        );
+        assert_eq!(
+            save_blocker(&state.settings).as_deref(),
+            Some("Choose a model for the fast role.")
+        );
+        msg(&mut state, SettingsMessage::PickSmall("local-llm".into()));
+        msg(&mut state, SettingsMessage::Save);
+        assert!(state.settings.is_connected(), "{:?}", state.settings.notice);
+        assert_eq!(
+            state.settings.active,
+            Some(ProviderChoice::OpenAiCompatible)
+        );
+        assert_eq!(state.model_tag_main, "local-llm");
+    }
+
+    #[tokio::test]
+    async fn anthropic_needs_a_key_and_says_where_to_get_one() {
+        let (mut state, _) = browser(lister_returning(Ok(Vec::new())));
+        msg(
+            &mut state,
+            SettingsMessage::SelectProvider(ProviderChoice::Anthropic),
+        );
+        assert_eq!(
+            save_blocker(&state.settings).as_deref(),
+            Some("Enter your API key.")
+        );
+        assert_eq!(
+            describe_list_error(
+                ProviderChoice::OpenAiCompatible,
+                "http://localhost:1234/v1",
+                &ModelError::Transport {
+                    provider: ferrite_model::ProviderId::OpenAi,
+                    detail: "refused".into()
+                }
+            ),
+            "Could not reach http://localhost:1234/v1. Check the address and that the server is running."
+        );
     }
 
     #[tokio::test]

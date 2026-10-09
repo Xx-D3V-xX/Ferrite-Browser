@@ -464,6 +464,13 @@ impl IDBTransaction {
             .set(self.pending_request_count.get() + 1);
     }
 
+    /// A request that is already in the request list is being run again (a cursor
+    /// asked to move on): it counts as outstanding once more.
+    pub(crate) fn mark_request_pending_again(&self) {
+        self.pending_request_count
+            .set(self.pending_request_count.get() + 1);
+    }
+
     pub fn request_finished(&self) {
         // https://w3c.github.io/IndexedDB/#transaction-lifecycle
         // finished

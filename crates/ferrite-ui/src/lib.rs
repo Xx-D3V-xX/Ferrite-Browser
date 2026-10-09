@@ -229,8 +229,12 @@ mod identity;
 mod layout;
 mod lifecycle;
 mod markdown;
+mod native_picker;
 mod page_input;
+mod page_view;
 mod pages;
+mod perf;
+mod permission;
 mod runtime_guard;
 mod scroll;
 mod settings_panel;
@@ -489,8 +493,21 @@ fn is_action_rejected(
     if rejected.contains(&action_tool_id(action)) {
         return true;
     }
-    if let Some(origin) = action_url(action).and_then(origin_of_url) {
-        if rejected_origins.contains(&origin) {
+    if let Some(url) = action_url(action) {
+        // A URL with no scheme (`attacker.example/x`) has no origin of its own,
+        // but the engine may still load it as `https://` or `http://`: either
+        // origin, if rejected, blocks it (T-237).
+        let candidates = match origin_of_url(url) {
+            Some(origin) => vec![origin],
+            None => ["https://", "http://"]
+                .iter()
+                .filter_map(|scheme| origin_of_url(&format!("{scheme}{}", url.trim())))
+                .collect(),
+        };
+        if candidates
+            .iter()
+            .any(|origin| rejected_origins.contains(origin))
+        {
             return true;
         }
     }
@@ -784,8 +801,9 @@ const ICON_SIZE_SM: f32 = 12.0;
 
 /// The engine tick while the page is busy (one display frame at 60 Hz)...
 const ACTIVE_TICK: std::time::Duration = std::time::Duration::from_millis(16);
-/// ...and while it is sitting still.
-const IDLE_TICK: std::time::Duration = std::time::Duration::from_millis(50);
+/// ...and, while it is sitting still, the longest wait for a tick when the
+/// engine has not asked for one (see `engine_wakes`).
+const IDLE_TICK: std::time::Duration = std::time::Duration::from_millis(1000);
 /// Ticks without a new picture before the page counts as idle (about half a
 /// second at the active rate).
 const BUSY_TICKS: u8 = 30;
@@ -805,8 +823,14 @@ const PROGRESS_PER_SECOND: f32 = 1.2;
 /// the 150-250ms range typical for this kind of UI entrance transition.
 const CONSENT_ANIM_STEP: f32 = 16.0 / 200.0;
 
+/// Advance per `TabAnimTick`: a new tab grows to its width in ~160 ms.
+const TAB_ANIM_STEP: f32 = 16.0 / 160.0;
 /// Advance per `MenuAnimTick`: the menu settles in ~140 ms.
 const MENU_ANIM_STEP: f32 = 16.0 / 140.0;
+/// Advance per `PanelAnimTick`: a side drawer or bottom panel settles in ~200 ms.
+const PANEL_ANIM_STEP: f32 = 16.0 / 200.0;
+/// How far a panel's contents travel as it eases in, in logical pixels.
+const PANEL_SLIDE: f32 = 18.0;
 
 /// Advance per `ThreadAnimTick` for each entering thread item's progress —
 /// ticks fire every 16ms, so an entrance takes ~220ms.
@@ -1355,11 +1379,13 @@ pub struct FerriteBrowser {
     pub show_js_console: bool,
     pub audit_entries: Vec<AuditEntry>,
     pub servo_sessions: HashMap<usize, HeadlessServoSession>,
-    /// The picture each tab last showed, as a ready-to-draw handle, keyed by
-    /// tab and tagged with the engine's frame number. A handle is built once
-    /// per *new* picture; building one per redraw (what this replaced) copied
-    /// and re-uploaded the whole page sixty times a second.
-    frame_cache: HashMap<usize, (u64, ImageHandle)>,
+    /// The picture each tab last showed, keyed by tab, shared with the engine
+    /// (no copy) and tagged with its frame number, so the GPU texture is
+    /// written once per *new* picture. The image handle is there only when the
+    /// page is drawn with iced's image widget (`FERRITE_PAGE_DRAW=image`).
+    frame_cache: HashMap<usize, (page_view::PageFrame, Option<ImageHandle>)>,
+    /// `FERRITE_PERF=1`'s counters (see `perf.rs`); `None` when it is off.
+    perf: Option<perf::PerfStats>,
     pub is_loading: bool,
     pub can_go_back: bool,
     pub can_go_forward: bool,
@@ -1503,6 +1529,10 @@ pub struct FerriteBrowser {
     pub agent_log: Vec<AgentLogEntry>,
     pub agent_response: Option<String>,
     pub agent_is_running: bool,
+    /// The reply the model is writing in the current step, as far as it has
+    /// written it (`ferrite_agent::streaming::reply_so_far`). Display only:
+    /// the step acts on the complete response, never on this.
+    pub agent_stream: Option<String>,
     /// Sender used by spawned agent task to emit progress messages.
     pub agent_event_tx: Option<tokio::sync::mpsc::UnboundedSender<FerriteBrowserMessage>>,
     /// Receiver drained by the agent_event_sub subscription.
@@ -1604,6 +1634,17 @@ pub struct FerriteBrowser {
     /// Slide-in progress of the overflow menu, `0.0` (just opened) to `1.0`;
     /// advanced by `MenuAnimTick` while it is below `1.0`. Decoration only.
     pub menu_anim: f32,
+    /// The tab that is opening and how far it has grown, `0.0` to `1.0`;
+    /// advanced by `TabAnimTick` and cleared when it is done or a tab closes.
+    /// Decoration only.
+    pub tab_open_anim: Option<(usize, f32)>,
+    /// Which side drawer and bottom panel were showing after the last message, so
+    /// one that has just appeared can ease in (`note_panel_changes`).
+    pub panels_shown: (Option<PanelKind>, Option<PanelKind>),
+    /// Entrance progress of the side drawer and of the bottom panel, `0.0` (just
+    /// opened) to `1.0`; advanced by `PanelAnimTick`. Decoration only.
+    pub drawer_anim: f32,
+    pub bottom_anim: f32,
     /// When the tab strip's empty area was last pressed (double-click =
     /// maximize).
     last_titlebar_press: Option<std::time::Instant>,
@@ -1742,6 +1783,11 @@ pub struct FerriteBrowser {
     /// sign-in or another secret): the run is stopped before any model call and
     /// the agent panel shows a card with *Continue*. See `signin`.
     pub signin_handoff: Option<signin::SignInWall>,
+    /// An agent step that came in while a camera, microphone or screen request was
+    /// waiting on the person. It is held (the loop stays as it was) and sent again once
+    /// the request is answered or gone: the agent does not act on a page that is asking
+    /// for something on the person's machine until the person has decided.
+    pub deferred_agent_step: Option<FerriteBrowserMessage>,
     /// An action the guard stopped, put to the person. The run waits here;
     /// nothing outside the prediction runs until they say so. See
     /// `PendingRuntimeConsent`.
@@ -1804,6 +1850,7 @@ impl Default for FerriteBrowser {
             audit_entries: vec![],
             servo_sessions: HashMap::new(),
             frame_cache: HashMap::new(),
+            perf: perf::PerfStats::from_env(),
             is_loading: false,
             can_go_back: false,
             can_go_forward: false,
@@ -1836,6 +1883,7 @@ impl Default for FerriteBrowser {
             agent_log: Vec::new(),
             agent_response: None,
             agent_is_running: false,
+            agent_stream: None,
             agent_event_tx: Some(agent_event_tx),
             agent_event_rx: Some(std::sync::Arc::new(tokio::sync::Mutex::new(agent_event_rx))),
             // Test-safe by construction: no chat store (so nothing is read or
@@ -1861,6 +1909,10 @@ impl Default for FerriteBrowser {
             hovered_tab: None,
             show_menu: false,
             menu_anim: 1.0,
+            panels_shown: (None, None),
+            drawer_anim: 1.0,
+            bottom_anim: 1.0,
+            tab_open_anim: None,
             last_titlebar_press: None,
             scroll_queue: scroll::ScrollQueue::default(),
             pointer_moved: false,
@@ -1885,6 +1937,7 @@ impl Default for FerriteBrowser {
             show_settings_panel: false,
             settings: settings_panel::SettingsState::default(),
             signin_handoff: None,
+            deferred_agent_step: None,
             pending_runtime: None,
             tile_favicons: vec![None; QUICK_ACCESS_TILES.len()],
             favicons_cache_dir: None,
@@ -1945,6 +1998,9 @@ pub enum FerriteBrowserMessage {
     DevTools(devtools::Msg),
     /// A reply to the control a page is waiting on (see `controls`).
     Control(controls::Msg),
+    /// The answer to a camera, microphone or screen request, or "Stop sharing"
+    /// (see `permission`).
+    Permission(permission::Msg),
     /// The page-crash banner's buttons (see `crash`).
     Crash(crash::Msg),
     /// A press, move or release on a panel splitter (see `layout`).
@@ -1997,6 +2053,11 @@ pub enum FerriteBrowserMessage {
         run_id: u64,
         action: Result<AgentAction, StepFailure>,
     },
+    /// The reply the current step's model call has written so far.
+    AgentReplyStreaming {
+        run_id: u64,
+        text: String,
+    },
     /// The Laya fast lane chose this step (no LLM call). Handled by exactly
     /// the same code as `AgentStepReady` — the same consent check, execution,
     /// logging and loop-safety bookkeeping — plus the fast-lane bookkeeping
@@ -2012,8 +2073,11 @@ pub enum FerriteBrowserMessage {
     AgentTaskInputChanged(String),
     AgentTaskSubmitted,
     AgentToolLogged(String),
-    AgentCompleted(String),
-    AgentFailed(String),
+    /// The run (`run_id`) ended with an answer. A message from a run that is
+    /// no longer the current one is ignored (T-237).
+    AgentCompleted(u64, String),
+    /// The run (`run_id`) failed; ignored from an earlier run, as above.
+    AgentFailed(u64, String),
     StopAgent,
     /// The person pressed *Continue* on the sign-in handoff card: the agent
     /// picks up from the page as it is now.
@@ -2091,6 +2155,12 @@ pub enum FerriteBrowserMessage {
     CloseMenu,
     /// One animation tick of the overflow menu's slide-in.
     MenuAnimTick,
+    /// A side drawer or bottom panel easing in.
+    PanelAnimTick,
+    /// Advances `tab_open_anim`.
+    TabAnimTick,
+    /// Advances the active tab's page-control overlay entrance.
+    ControlAnimTick,
     /// A row of the overflow menu was picked: close the menu, then do it.
     Menu(chrome::MenuCommand),
     /// Open the library drawer on a given tab (from the overflow menu).
@@ -2435,7 +2505,12 @@ pub fn update(
             // that function's own doc comment), so both cases route through
             // this one `EscapePressed` message and are told apart here,
             // where `state` is actually available.
-            if controls::active_control(state).is_some() {
+            if let Some(prompt) = permission::active_prompt(state) {
+                // A request for the camera, microphone or screen is on top of
+                // everything; Escape is "block this time".
+                let answer = permission::choice(prompt, false, false);
+                return permission::update(state, permission::Msg::Answer(answer));
+            } else if controls::active_control(state).is_some() {
                 // A control the page is waiting on is the topmost thing there
                 // is; Escape is "dismiss" (cancel, for a dialog).
                 return controls::update(state, controls::Msg::Dismiss);
@@ -2482,6 +2557,7 @@ pub fn update(
         }
         FerriteBrowserMessage::DevTools(msg) => return devtools::update(state, msg),
         FerriteBrowserMessage::Control(msg) => return controls::update(state, msg),
+        FerriteBrowserMessage::Permission(msg) => return permission::update(state, msg),
         FerriteBrowserMessage::Crash(msg) => return crash::update(state, msg),
         FerriteBrowserMessage::Panels(msg) => layout::update(state, msg),
         FerriteBrowserMessage::WindowResized(size) => {
@@ -2533,8 +2609,12 @@ pub fn update(
             }
         }
         FerriteBrowserMessage::PageKey(event) => {
-            // A control the page is waiting on takes the keyboard; the page
-            // gets none of it until the control is answered.
+            // A request for the camera, microphone or screen takes the keyboard (the
+            // page must not be able to type at, or click through, a card meant for the
+            // person); so does a control the page is waiting on.
+            if permission::active_prompt(state).is_some() {
+                return iced::Task::none();
+            }
             if controls::active_control(state).is_some() {
                 return controls::on_page_key(state, &event);
             }
@@ -2619,11 +2699,15 @@ pub fn update(
         FerriteBrowserMessage::AgentToolLogged(s) => {
             state.agent_log.push(AgentLogEntry::Note(s));
         }
-        FerriteBrowserMessage::AgentCompleted(s) => {
-            return conclude_run(state, Outcome::Answered(s));
+        FerriteBrowserMessage::AgentCompleted(run_id, s) => {
+            if run_id == state.run_id {
+                return conclude_run(state, Outcome::Answered(s));
+            }
         }
-        FerriteBrowserMessage::AgentFailed(s) => {
-            return conclude_run(state, Outcome::Failed(s));
+        FerriteBrowserMessage::AgentFailed(run_id, s) => {
+            if run_id == state.run_id {
+                return conclude_run(state, Outcome::Failed(s));
+            }
         }
         FerriteBrowserMessage::SigninContinue => {
             let (Some(wall), Some(mut live)) =
@@ -2893,6 +2977,22 @@ pub fn update(
         FerriteBrowserMessage::AgentStepReady { run_id, action } => {
             return handle_agent_step(state, run_id, action, None);
         }
+        FerriteBrowserMessage::AgentReplyStreaming { run_id, text } => {
+            if run_id != state.run_id || !state.agent_is_running {
+                return Task::none();
+            }
+            let first = state.agent_stream.is_none();
+            state.agent_stream = Some(text);
+            // Keep the reply in view as it grows (new lines push it down).
+            if first
+                || state
+                    .agent_stream
+                    .as_deref()
+                    .is_some_and(|t| t.ends_with('\n'))
+            {
+                return scroll_to_latest(state);
+            }
+        }
         FerriteBrowserMessage::FastStepReady {
             run_id,
             action,
@@ -2991,9 +3091,11 @@ pub fn update(
             // have finished reallocating yet. The previous frame stays
             // displayed in the meantime — a few tens of ms of an unchanged
             // image, not a black/corrupted one.
+            let pump_started = std::time::Instant::now();
             if let Some(first) = state.servo_sessions.values().next() {
                 first.pump_engine();
             }
+            let read_started = std::time::Instant::now();
             if state.resize_settle_ticks > 0 {
                 state.resize_settle_ticks -= 1;
             } else {
@@ -3010,11 +3112,29 @@ pub fn update(
             // Console messages, requests, crashes and page controls: emptied
             // from every session into the tabs' logs (and warnings and errors
             // to the log file, where the first clue to a misbehaving site is).
+            let read_done = std::time::Instant::now();
             tasks.push(tab_diag::drain_all(state));
-            if refresh_frame_cache(state) {
+            let new_picture = refresh_frame_cache(state);
+            if new_picture {
                 state.busy_ticks = BUSY_TICKS;
             } else {
                 state.busy_ticks = state.busy_ticks.saturating_sub(1);
+            }
+            if let Some(stats) = state.perf.as_mut() {
+                let size = new_picture
+                    .then(|| state.frame_cache.get(&state.active_tab))
+                    .flatten()
+                    .map(|(frame, _)| (frame.width, frame.height));
+                let done = std::time::Instant::now();
+                if let Some(line) = stats.record(
+                    done,
+                    read_started - pump_started,
+                    read_done - read_started,
+                    done - now,
+                    size,
+                ) {
+                    eprintln!("{line}");
+                }
             }
             let active = state.active_tab;
             if let Some(session) = state.servo_sessions.get(&active) {
@@ -3076,6 +3196,17 @@ pub fn update(
         }
         FerriteBrowserMessage::MenuAnimTick => {
             state.menu_anim = (state.menu_anim + MENU_ANIM_STEP).min(1.0);
+        }
+        FerriteBrowserMessage::PanelAnimTick => {
+            state.drawer_anim = (state.drawer_anim + PANEL_ANIM_STEP).min(1.0);
+            state.bottom_anim = (state.bottom_anim + PANEL_ANIM_STEP).min(1.0);
+        }
+        FerriteBrowserMessage::ControlAnimTick => controls::advance_entrance(state),
+        FerriteBrowserMessage::TabAnimTick => {
+            state.tab_open_anim = state
+                .tab_open_anim
+                .map(|(tab, t)| (tab, t + TAB_ANIM_STEP))
+                .filter(|(_, t)| *t < 1.0);
         }
         FerriteBrowserMessage::CloseMenu => {
             state.show_menu = false;
@@ -3401,6 +3532,7 @@ fn conclude_run(state: &mut FerriteBrowser, outcome: Outcome) -> Task<FerriteBro
         state.agent_response = Some(text);
     }
     state.agent_is_running = false;
+    state.agent_stream = None;
     state.live_loop = None;
     state.signin_handoff = None;
     state.pending_runtime = None;
@@ -3676,10 +3808,10 @@ fn submit_task(state: &mut FerriteBrowser) -> Task<FerriteBrowserMessage> {
         let dry_record = match orch.run(&ipi_task, &driver).await {
             Ok(r) => r,
             Err(e) => {
-                let _ = event_tx.send(FerriteBrowserMessage::AgentFailed(format!(
-                    "dry run failed: {}",
-                    e
-                )));
+                let _ = event_tx.send(FerriteBrowserMessage::AgentFailed(
+                    run_id,
+                    format!("dry run failed: {}", e),
+                ));
                 return;
             }
         };
@@ -3736,6 +3868,24 @@ fn handle_agent_step(
     fast: Option<(FastAction, HistoryItem)>,
 ) -> Task<FerriteBrowserMessage> {
     if run_id != state.run_id {
+        return Task::none();
+    }
+    // The step's response is complete: its reply, if any, is shown from the
+    // outcome now, not from the stream.
+    state.agent_stream = None;
+    // Rule: the agent does not act while the page's request for the camera, the
+    // microphone or the screen waits on the person. Hold the step; `tab_diag` sends it
+    // again when the request is answered or withdrawn.
+    if permission::active_prompt(state).is_some() {
+        state.deferred_agent_step = Some(match (fast, action) {
+            (Some((fast, history)), Ok(action)) => FerriteBrowserMessage::FastStepReady {
+                run_id,
+                action,
+                fast,
+                history,
+            },
+            (_, action) => FerriteBrowserMessage::AgentStepReady { run_id, action },
+        });
         return Task::none();
     }
     let Some(mut live) = state.live_loop.take() else {
@@ -4136,6 +4286,7 @@ fn push_tab_state(state: &mut FerriteBrowser) -> usize {
     state.tab_diag.push(tab_diag::TabDiag::default());
     let new_idx = state.tabs.len() - 1;
     state.active_tab = new_idx;
+    state.tab_open_anim = Some((new_idx, 0.0));
     state.address_bar_input = String::new();
     state.is_loading = false;
     state.can_go_back = false;
@@ -4166,41 +4317,30 @@ fn add_tab(state: &mut FerriteBrowser) -> (usize, Option<String>) {
 /// starts at its creation size, not at the size the previous tab was last
 /// resized to, and treating them as equal left every tab after the first
 /// displayed at the wrong size with pointer input landing in the wrong place.
-/// Keeps `frame_cache` current for the active tab (returns whether it changed): a new handle only when the
-/// engine produced a new picture, and none kept for tabs that are gone.
+/// Keeps `frame_cache` current for the active tab (returns whether it changed):
+/// a new entry only when the engine produced a new picture, and none kept for
+/// tabs that are gone.
 fn refresh_frame_cache(state: &mut FerriteBrowser) -> bool {
     state
         .frame_cache
         .retain(|index, _| state.servo_sessions.contains_key(index));
     let active = state.active_tab;
-    let Some((seq, width, height, pixels)) = state
+    let Some(frame) = state
         .servo_sessions
         .get(&active)
         .and_then(HeadlessServoSession::frame_shared)
     else {
         return false;
     };
-    if state.frame_cache.get(&active).map(|(s, _)| *s) == Some(seq) {
+    if state.frame_cache.get(&active).map(|(f, _)| f.seq) == Some(frame.seq) {
         return false;
     }
-    // The pixels are shared with the session, not copied into the handle.
-    let handle = ImageHandle::from_rgba(
-        width,
-        height,
-        iced_widget::core::image::Bytes::from_owner(SharedPixels(pixels)),
-    );
-    state.frame_cache.insert(active, (seq, handle));
+    // The image widget wants top-row-first RGBA in its own bytes: a copy per
+    // picture, paid only on the fallback path.
+    let handle = page_view::use_image_widget()
+        .then(|| ImageHandle::from_rgba(frame.width, frame.height, frame.to_rgba_top_down()));
+    state.frame_cache.insert(active, (frame, handle));
     true
-}
-
-/// A shared RGBA buffer as `Bytes`, so the image handle borrows the engine's
-/// frame instead of owning a copy of it.
-struct SharedPixels(std::sync::Arc<Vec<u8>>);
-
-impl AsRef<[u8]> for SharedPixels {
-    fn as_ref(&self) -> &[u8] {
-        self.0.as_slice()
-    }
 }
 
 fn sync_active_webview(state: &mut FerriteBrowser) {
@@ -4242,6 +4382,8 @@ fn select_tab_at(state: &mut FerriteBrowser, i: usize) -> bool {
 /// one and keeping the *same tab* active when an earlier one closes. The last
 /// remaining tab is never closed. Returns whether a tab was removed.
 fn close_tab_at(state: &mut FerriteBrowser, i: usize) -> bool {
+    // Indices shift when a tab closes: an opening animation just ends.
+    state.tab_open_anim = None;
     // Every later tab's index shifts by one — a stale hovered index would
     // otherwise show the close-on-hover button on the wrong tab until the
     // next real hover event.
@@ -4591,6 +4733,121 @@ fn dry_run_evidence_lines(record: &DryRunRecord) -> Vec<String> {
 /// transition. Used by `view_agent_sidebar`'s consent panel to turn
 /// `FerriteBrowser::consent_panel_anim`'s linear tick-driven progress into
 /// the panel's actual background-alpha/slide-offset animation.
+/// The side drawers and bottom panels, for knowing when one has just appeared.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PanelKind {
+    Library,
+    Settings,
+    Agent,
+    Audit,
+    DevTools,
+}
+
+/// The drawer the view shows (same precedence as `view`) and the bottom panel.
+fn panels_showing(state: &FerriteBrowser) -> (Option<PanelKind>, Option<PanelKind>) {
+    let drawer = if state.show_library_panel {
+        Some(PanelKind::Library)
+    } else if state.show_settings_panel {
+        Some(PanelKind::Settings)
+    } else if state.show_agent_sidebar {
+        Some(PanelKind::Agent)
+    } else {
+        None
+    };
+    let bottom = if state.show_audit_panel {
+        Some(PanelKind::Audit)
+    } else if state.show_js_console {
+        Some(PanelKind::DevTools)
+    } else {
+        None
+    };
+    (drawer, bottom)
+}
+
+/// After each message: a drawer or bottom panel that has just appeared (or been
+/// swapped for another) starts its entrance. Panels open from buttons, shortcuts,
+/// menu items and the agent, so this looks at the outcome, not at each message.
+fn note_panel_changes(state: &mut FerriteBrowser) {
+    let now = panels_showing(state);
+    if now.0.is_some() && now.0 != state.panels_shown.0 {
+        state.drawer_anim = 0.0;
+    }
+    if now.1.is_some() && now.1 != state.panels_shown.1 {
+        state.bottom_anim = 0.0;
+    }
+    state.panels_shown = now;
+}
+
+/// The application's update: `update`, then the panel entrance check.
+fn update_app(
+    state: &mut FerriteBrowser,
+    message: FerriteBrowserMessage,
+) -> Task<FerriteBrowserMessage> {
+    let task = update(state, message);
+    note_panel_changes(state);
+    task
+}
+
+/// A panel easing in: its contents slide `PANEL_SLIDE` px into place (from the
+/// right for a drawer, from below for a bottom panel) under a veil of the panel's
+/// own colour that clears. The panel keeps its exact size throughout, so the page
+/// beside it is not re-laid out each frame, and the veil takes no input, so the
+/// panel works from the first frame.
+fn panel_entrance<'a>(
+    panel: Element<'a, FerriteBrowserMessage>,
+    t: f32,
+    from_side: bool,
+    size: f32,
+    veil: Color,
+) -> Element<'a, FerriteBrowserMessage> {
+    if t >= 1.0 {
+        return panel;
+    }
+    let eased = ease_out_cubic(t);
+    let offset = (1.0 - eased) * PANEL_SLIDE;
+    let moved = if from_side {
+        container(panel)
+            .width(Length::Fixed(size))
+            .height(Length::Fill)
+            .padding(Padding {
+                left: offset,
+                ..Padding::ZERO
+            })
+    } else {
+        container(panel)
+            .width(Length::Fill)
+            .height(Length::Fixed(size))
+            .padding(Padding {
+                top: offset,
+                ..Padding::ZERO
+            })
+    }
+    .clip(true);
+    let veil = Color {
+        a: (1.0 - eased) * 0.9,
+        ..veil
+    };
+    let cover = container(text(""))
+        .width(Length::Fill)
+        .height(Length::Fill)
+        .style(move |_: &Theme| container::Style {
+            background: Some(Background::Color(veil)),
+            ..container::Style::default()
+        });
+    let layered = stack([moved.into(), cover.into()]);
+    if from_side {
+        container(layered)
+            .width(Length::Fixed(size))
+            .height(Length::Fill)
+            .into()
+    } else {
+        container(layered)
+            .width(Length::Fill)
+            .height(Length::Fixed(size))
+            .into()
+    }
+}
+
 fn ease_out_cubic(t: f32) -> f32 {
     let t = t.clamp(0.0, 1.0);
     1.0 - (1.0 - t).powi(3)
@@ -4660,7 +4917,7 @@ fn kind_label(kind: &AuditEventKind, palette: &Palette, is_light: bool) -> (&'st
 /// Shortens every long URL in a page's console message to its start and end,
 /// so a message full of script addresses (Google's are hundreds of characters)
 /// still shows the part that matters, the error itself, after `truncate`.
-fn shorten_urls(message: &str) -> String {
+pub(crate) fn shorten_urls(message: &str) -> String {
     const KEEP_HEAD: usize = 56;
     const KEEP_TAIL: usize = 28;
     message
@@ -5584,7 +5841,26 @@ fn spawn_next_step(
             .with_system_prompt(SYSTEM_PROMPT, SYSTEM_PROMPT_VERSION)
             .with_options(SamplingOptions::default().with_num_predict(AGENT_LOOP_NUM_PREDICT));
         let llm_started = std::time::Instant::now();
-        let completion = provider.complete(request).await;
+        // The reply is shown as it is written; nothing acts on it until the
+        // whole response is in and parsed below.
+        let shown = std::sync::Mutex::new(None::<String>);
+        let stream_tx = event_tx.clone();
+        let sink = move |so_far: &str| {
+            let Some(reply) = ferrite_agent::streaming::reply_so_far(so_far) else {
+                return;
+            };
+            let mut last = shown
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            if last.as_deref() != Some(reply.as_str()) {
+                *last = Some(reply.clone());
+                let _ = stream_tx.send(FerriteBrowserMessage::AgentReplyStreaming {
+                    run_id,
+                    text: reply,
+                });
+            }
+        };
+        let completion = provider.complete_streaming(request, &sink).await;
         if let Some(decider) = &laya_timing {
             // What the fast lane competes with; it decides whether asking
             // Laya first is worth it (`LaneGovernor`).
@@ -6064,17 +6340,24 @@ pub fn view(state: &FerriteBrowser) -> Element<'_, FerriteBrowserMessage> {
             // Home / new-tab page — always shown for about:blank, even if Servo
             // has produced a blank white frame for that URL.
             new_tab_page(state)
-        } else if let Some((_, handle)) = state.frame_cache.get(&active) {
-            // Live Servo frame — interactive via mouse_area. The handle is
-            // cached per picture (`refresh_frame_cache`), so a redraw that
-            // changes nothing re-uploads nothing. Pointer moves and wheel
-            // input only record intent here; `ServoFrame` forwards them once
-            // per tick (see `update`).
-            let img = ServoImage::new(handle.clone())
-                .width(Length::Fill)
-                .height(Length::Fill);
+        } else if let Some((frame, handle)) = state.frame_cache.get(&active) {
+            // Live Servo frame — interactive via mouse_area. The picture is
+            // cached per frame (`refresh_frame_cache`), so a redraw that
+            // changes nothing uploads nothing. Pointer moves and wheel input
+            // only record intent here; `ServoFrame` forwards them once per
+            // tick (see `update`).
+            let picture: Element<FerriteBrowserMessage> = match handle {
+                Some(handle) => ServoImage::new(handle.clone())
+                    .width(Length::Fill)
+                    .height(Length::Fill)
+                    .into(),
+                None => iced::widget::shader(page_view::PageView::new(frame.clone()))
+                    .width(Length::Fill)
+                    .height(Length::Fill)
+                    .into(),
+            };
 
-            mouse_area(container(img).width(Length::Fill).height(Length::Fill))
+            mouse_area(container(picture).width(Length::Fill).height(Length::Fill))
                 .interaction(page_interaction(state))
                 .on_move(|pos| FerriteBrowserMessage::ServoMouseMove { x: pos.x, y: pos.y })
                 .on_press(FerriteBrowserMessage::ServoMousePress)
@@ -6097,6 +6380,10 @@ pub fn view(state: &FerriteBrowser) -> Element<'_, FerriteBrowserMessage> {
         let mut layers = vec![page];
         layers.extend(controls::overlay(state, size));
         layers.extend(crash::banner(state));
+        // The "this page is capturing" bar, and (on top of everything) a request the
+        // page is waiting on a person for.
+        layers.extend(permission::bar(state));
+        layers.extend(permission::overlay(state));
         if layers.len() == 1 {
             layers.remove(0)
         } else {
@@ -6142,6 +6429,15 @@ pub fn view(state: &FerriteBrowser) -> Element<'_, FerriteBrowserMessage> {
     } else {
         None
     };
+    let drawer = drawer.map(|panel| {
+        panel_entrance(
+            panel,
+            state.drawer_anim,
+            true,
+            state.panels.side_width(state.window_size),
+            palette.surface,
+        )
+    });
     let main_content: Element<FerriteBrowserMessage> = match drawer {
         Some(drawer) => iced::widget::row![
             content,
@@ -6156,7 +6452,13 @@ pub fn view(state: &FerriteBrowser) -> Element<'_, FerriteBrowserMessage> {
     layout.push(main_content);
     if let Some(p) = bottom_panel {
         layout.push(layout::splitter(state, palette, layout::Handle::Bottom));
-        layout.push(p);
+        layout.push(panel_entrance(
+            p,
+            state.bottom_anim,
+            false,
+            bottom_height,
+            palette.surface,
+        ));
     }
 
     let window: Element<FerriteBrowserMessage> = container(column(layout))
@@ -6285,7 +6587,7 @@ fn page_key_target(state: &FerriteBrowser) -> Option<&HeadlessServoSession> {
     if state.address_bar_focused || state.show_find_bar || state.devtools.input_focused {
         return None;
     }
-    if controls::active_control(state).is_some() {
+    if controls::active_control(state).is_some() || permission::active_prompt(state).is_some() {
         return None;
     }
     let showing_page = state
@@ -6437,7 +6739,9 @@ fn wake_flag(busy_ticks: &mut u8) {
 /// control it is waiting on is showing, or a panel is being dragged (the pointer
 /// belongs to the splitter, and a release over the page must not click it).
 fn page_input_blocked(state: &FerriteBrowser) -> bool {
-    state.panels.drag.is_some() || controls::active_control(state).is_some()
+    state.panels.drag.is_some()
+        || controls::active_control(state).is_some()
+        || permission::active_prompt(state).is_some()
 }
 
 /// A cheap fingerprint of a favicon, to tell a new icon from the same one
@@ -6449,6 +6753,28 @@ fn favicon_key(width: u32, height: u32, rgba: &[u8]) -> u64 {
     height.hash(&mut hasher);
     rgba.hash(&mut hasher);
     hasher.finish()
+}
+
+/// One `ServoFrame` each time the engine's waker fires, or after `IDLE_TICK`
+/// without one. The wait blocks, so it runs on a blocking thread; it ends when
+/// the subscription does (the page got busy and ticks with the display again).
+fn engine_wakes() -> impl iced::futures::Stream<Item = FerriteBrowserMessage> {
+    use iced::futures::SinkExt;
+    iced::stream::channel(1, |mut output| async move {
+        loop {
+            let _ = tokio::task::spawn_blocking(|| {
+                ferrite_servo::session::wait_for_engine_wake(IDLE_TICK)
+            })
+            .await;
+            if output
+                .send(FerriteBrowserMessage::ServoFrame)
+                .await
+                .is_err()
+            {
+                break;
+            }
+        }
+    })
 }
 
 pub fn subscription(state: &FerriteBrowser) -> Subscription<FerriteBrowserMessage> {
@@ -6472,7 +6798,11 @@ pub fn subscription(state: &FerriteBrowser) -> Subscription<FerriteBrowserMessag
                 time::every(WATCHDOG_AFTER).map(|_| FerriteBrowserMessage::ServoWatchdog),
             ])
         } else {
-            time::every(cadence).map(|_| FerriteBrowserMessage::ServoFrame)
+            // Nothing is moving: tick only when the engine says it has work
+            // (its event-loop waker), and at the latest every `IDLE_TICK`.
+            // A timer tick redraws the whole window, so polling here drew a
+            // still page twenty times a second.
+            Subscription::run(engine_wakes)
         }
     };
 
@@ -6498,10 +6828,34 @@ pub fn subscription(state: &FerriteBrowser) -> Subscription<FerriteBrowserMessag
         Subscription::none()
     };
 
+    // A new tab's grow-in, only while it is growing.
+    let tab_anim_tick = if state.tab_open_anim.is_some() {
+        time::every(std::time::Duration::from_millis(16))
+            .map(|_| FerriteBrowserMessage::TabAnimTick)
+    } else {
+        Subscription::none()
+    };
+
+    // A page control's overlay easing in, only while it is.
+    let control_anim_tick = if controls::entrance_running(state) {
+        time::every(std::time::Duration::from_millis(16))
+            .map(|_| FerriteBrowserMessage::ControlAnimTick)
+    } else {
+        Subscription::none()
+    };
+
     // The overflow menu's slide-in, only while it is opening.
     let menu_anim_tick = if state.show_menu && state.menu_anim < 1.0 {
         time::every(std::time::Duration::from_millis(16))
             .map(|_| FerriteBrowserMessage::MenuAnimTick)
+    } else {
+        Subscription::none()
+    };
+
+    // A side drawer or bottom panel easing in, only while one is.
+    let panel_anim_tick = if state.drawer_anim < 1.0 || state.bottom_anim < 1.0 {
+        time::every(std::time::Duration::from_millis(16))
+            .map(|_| FerriteBrowserMessage::PanelAnimTick)
     } else {
         Subscription::none()
     };
@@ -6562,6 +6916,9 @@ pub fn subscription(state: &FerriteBrowser) -> Subscription<FerriteBrowserMessag
         agent_event_sub,
         consent_anim_tick,
         menu_anim_tick,
+        panel_anim_tick,
+        tab_anim_tick,
+        control_anim_tick,
         thread_anim_tick,
     ])
 }
@@ -6625,7 +6982,7 @@ fn window_settings() -> window::Settings {
 
 pub fn launch() -> iced::Result {
     lifecycle::start_stall_note();
-    iced::application(window_title, update, view)
+    iced::application(window_title, update_app, view)
         .window(window_settings())
         .window_size(Size::new(1280.0, 800.0))
         .centered()
@@ -7290,6 +7647,31 @@ mod tests {
         );
     }
 
+    #[test]
+    fn a_rejected_origin_also_blocks_a_url_written_without_a_scheme() {
+        let rejected: std::collections::HashSet<String> = ["https://attacker.example".to_string()]
+            .into_iter()
+            .collect();
+        let none = std::collections::HashSet::new();
+        for url in [
+            "attacker.example/payload",
+            "  attacker.example",
+            "https://attacker.example/x",
+        ] {
+            let action = AgentAction::Navigate {
+                url: url.to_string(),
+            };
+            assert!(
+                is_action_rejected(&action, &none, &rejected),
+                "{url} must be blocked"
+            );
+        }
+        let elsewhere = AgentAction::Navigate {
+            url: "docs.example/page".to_string(),
+        };
+        assert!(!is_action_rejected(&elsewhere, &none, &rejected));
+    }
+
     #[tokio::test]
     async fn a_rejected_origin_blocks_a_navigate_before_it_reaches_the_engine() {
         let mut state = FerriteBrowser {
@@ -7796,6 +8178,54 @@ mod tests {
             .contains("step budget"));
     }
 
+    #[tokio::test]
+    async fn a_streamed_reply_shows_for_the_current_run_and_clears_when_the_step_is_in() {
+        let mut state = FerriteBrowser {
+            run_id: 3,
+            agent_is_running: true,
+            ..FerriteBrowser::default()
+        };
+        state.live_loop = Some(fresh_live_loop());
+        let _ = update(
+            &mut state,
+            FerriteBrowserMessage::AgentReplyStreaming {
+                run_id: 3,
+                text: "The price".into(),
+            },
+        );
+        assert_eq!(state.agent_stream.as_deref(), Some("The price"));
+        // A reply from a run that was stopped is not shown.
+        let _ = update(
+            &mut state,
+            FerriteBrowserMessage::AgentReplyStreaming {
+                run_id: 2,
+                text: "stale".into(),
+            },
+        );
+        assert_eq!(state.agent_stream.as_deref(), Some("The price"));
+        // The whole response arrived: the outcome shows it now, not the stream.
+        let _ = update(
+            &mut state,
+            FerriteBrowserMessage::AgentStepReady {
+                run_id: 3,
+                action: Ok(AgentAction::Finish {
+                    answer: "The price is 4 EUR.".into(),
+                }),
+            },
+        );
+        assert_eq!(state.agent_stream, None);
+        assert!(!state.agent_is_running);
+        // And nothing arriving late brings it back.
+        let _ = update(
+            &mut state,
+            FerriteBrowserMessage::AgentReplyStreaming {
+                run_id: 3,
+                text: "The price is".into(),
+            },
+        );
+        assert_eq!(state.agent_stream, None);
+    }
+
     #[test]
     fn stop_agent_bumps_run_id_and_clears_the_live_loop() {
         let mut state = FerriteBrowser {
@@ -7850,6 +8280,25 @@ mod tests {
     }
 
     // ── ease_out_cubic: the consent panel's entrance-transition curve ────
+
+    #[test]
+    fn a_new_tab_grows_in_and_the_animation_ends() {
+        let mut state = FerriteBrowser::default();
+        let tab = push_tab_state(&mut state);
+        assert_eq!(state.tab_open_anim, Some((tab, 0.0)));
+        let mut ticks = 0;
+        while state.tab_open_anim.is_some() {
+            let _ = update(&mut state, FerriteBrowserMessage::TabAnimTick);
+            ticks += 1;
+            assert!(ticks < 50, "the animation must end");
+        }
+        // About 160 ms at 16 ms a tick.
+        assert!((9..=11).contains(&ticks), "{ticks} ticks");
+        // Closing a tab ends one that is still growing.
+        push_tab_state(&mut state);
+        close_tab_at(&mut state, 0);
+        assert_eq!(state.tab_open_anim, None);
+    }
 
     #[test]
     fn ease_out_cubic_starts_at_zero_and_ends_at_one() {

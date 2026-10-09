@@ -834,6 +834,11 @@ impl Window {
         &self.user_scripts
     }
 
+    /// Ferrite: the same scripts, to give a frame this window creates.
+    pub(crate) fn shared_user_scripts(&self) -> Rc<Vec<UserScript>> {
+        self.user_scripts.clone()
+    }
+
     pub(crate) fn get_player_context(&self) -> WindowGLContext {
         self.player_context.clone()
     }
@@ -2450,7 +2455,7 @@ impl Window {
         transfer: CustomAutoRooterGuard<Vec<*mut JSObject>>,
     ) -> ErrorResult {
         // Step 1-2, 6-8.
-        let data = structuredclone::write(cx, message, Some(transfer))?;
+        let data = structuredclone::write_message(cx, message, Some(transfer))?;
 
         // Step 3-5.
         let target_origin = match target_origin.0[..].as_ref() {
@@ -3645,6 +3650,17 @@ impl Window {
             self.as_global_scope().slow_down_timers();
         } else {
             self.as_global_scope().speed_up_timers();
+        }
+        // Ferrite: a throttled page is a background one, so its document is hidden;
+        // an unthrottled page is visible (see FERRITE-PATCHES.md).
+        if let Some(document) = self.document.get() {
+            let document = Trusted::new(&*document);
+            self.as_global_scope()
+                .task_manager()
+                .dom_manipulation_task_source()
+                .queue(task!(apply_throttle_visibility: move |cx| {
+                    document.root().apply_throttle_visibility(cx, throttled);
+                }));
         }
     }
 

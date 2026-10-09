@@ -7,29 +7,34 @@ use std::cell::Cell;
 use dom_struct::dom_struct;
 use js::context::JSContext;
 use js::jsapi::Heap;
-use js::jsval::{JSVal, UndefinedValue};
-use js::rust::MutableHandleValue;
+use js::jsval::{JSVal, NullValue, UndefinedValue};
+use js::rust::{HandleValue, MutableHandleValue};
 use script_bindings::cell::DomRefCell;
 use script_bindings::reflector::{Reflector, reflect_dom_object_with_cx};
-use storage_traits::indexeddb::{IndexedDBKeyRange, IndexedDBKeyType, IndexedDBRecord};
+use storage_traits::indexeddb::{
+    AsyncOperation, AsyncReadOnlyOperation, AsyncReadWriteOperation, IndexedDBKeyRange,
+    IndexedDBKeyType, IndexedDBRecord,
+};
 
 use crate::dom::bindings::codegen::Bindings::IDBCursorBinding::{
     IDBCursorDirection, IDBCursorMethods,
 };
+use crate::dom::bindings::codegen::Bindings::IDBTransactionBinding::IDBTransactionMode;
 use crate::dom::bindings::codegen::UnionTypes::IDBObjectStoreOrIDBIndex;
-use crate::dom::bindings::error::Error;
+use crate::dom::bindings::error::{Error, ErrorResult, Fallible};
 use crate::dom::bindings::refcounted::Trusted;
 use crate::dom::bindings::root::{Dom, DomRoot, MutNullableDom};
 use crate::dom::bindings::structuredclone;
 use crate::dom::globalscope::GlobalScope;
-use crate::dom::indexeddb::idbindex::IDBIndex;
+use crate::dom::indexeddb::idbindex::{IDBIndex, index_records};
 use crate::dom::indexeddb::idbobjectstore::IDBObjectStore;
-use crate::dom::indexeddb::idbrequest::IDBRequest;
+use crate::dom::indexeddb::idbrequest::{IDBRequest, RequestJob, RequestSource};
 use crate::dom::indexeddb::idbtransaction::IDBTransaction;
-use crate::dom::indexeddb::key::key_type_to_jsval;
+use crate::dom::indexeddb::key::{
+    ExtractionResult, convert_value_to_key, extract_key, key_type_to_jsval,
+};
 
 #[derive(JSTraceable, MallocSizeOf)]
-#[expect(unused)]
 #[cfg_attr(crown, crown::unrooted_must_root_lint::must_root)]
 pub(crate) enum ObjectStoreOrIndex {
     ObjectStore(Dom<IDBObjectStore>),
@@ -163,6 +168,94 @@ impl IDBCursor {
         out.set(self.value.get());
     }
 
+    /// The object store the cursor reads: its source, or its source index's store.
+    fn store(&self) -> DomRoot<IDBObjectStore> {
+        match &self.source {
+            ObjectStoreOrIndex::ObjectStore(store) => store.as_rooted(),
+            ObjectStoreOrIndex::Index(index) => index.store(),
+        }
+    }
+
+    fn source_is_deleted(&self) -> bool {
+        match &self.source {
+            ObjectStoreOrIndex::ObjectStore(store) => store.verify_not_deleted().is_err(),
+            ObjectStoreOrIndex::Index(index) => index.is_deleted(),
+        }
+    }
+
+    /// The checks `advance`, `continue` and `continuePrimaryKey` start with
+    /// (<https://www.w3.org/TR/IndexedDB-3/#dom-idbcursor-advance> steps 2 to 4).
+    fn check_can_move(&self) -> Fallible<()> {
+        if !self.transaction.is_active() || !self.transaction.is_usable() {
+            return Err(Error::TransactionInactive(None));
+        }
+        if self.source_is_deleted() {
+            return Err(Error::InvalidState(None));
+        }
+        if !self.got_value.get() {
+            return Err(Error::InvalidState(None));
+        }
+        Ok(())
+    }
+
+    /// Moves the cursor on: unsets the got value flag and runs "iterate a cursor"
+    /// again on the cursor's own request, which becomes pending again and gets its
+    /// next result when the backend answers
+    /// (<https://www.w3.org/TR/IndexedDB-3/#dom-idbcursor-continue> steps 10 to 13).
+    fn move_on(
+        &self,
+        cx: &mut JSContext,
+        key: Option<IndexedDBKeyType>,
+        primary_key: Option<IndexedDBKeyType>,
+        count: Option<u32>,
+    ) -> ErrorResult {
+        self.got_value.set(false);
+        let request = self
+            .request
+            .get()
+            .expect("IDBCursor.request should be set when cursor is opened");
+        // An index cursor reads the whole store and picks its records by index key.
+        let key_range = match &self.source {
+            ObjectStoreOrIndex::ObjectStore(_) => self.range.clone(),
+            ObjectStoreOrIndex::Index(_) => IndexedDBKeyRange::default(),
+        };
+        let store = self.store();
+        let param = IterationParam {
+            cursor: Trusted::new(self),
+            key,
+            primary_key,
+            count,
+        };
+        IDBRequest::execute_async(
+            cx,
+            &store,
+            |callback| {
+                AsyncOperation::ReadOnly(AsyncReadOnlyOperation::Iterate { callback, key_range })
+            },
+            Some(request),
+            Some(RequestJob::Cursor(param)),
+        )?;
+        Ok(())
+    }
+
+    /// The checks `update` and `delete` start with
+    /// (<https://www.w3.org/TR/IndexedDB-3/#dom-idbcursor-update> steps 2 to 5).
+    fn check_can_write(&self) -> Fallible<()> {
+        if !self.transaction.is_active() || !self.transaction.is_usable() {
+            return Err(Error::TransactionInactive(None));
+        }
+        if self.transaction.get_mode() == IDBTransactionMode::Readonly {
+            return Err(Error::ReadOnly(None));
+        }
+        if self.source_is_deleted() {
+            return Err(Error::InvalidState(None));
+        }
+        if !self.got_value.get() {
+            return Err(Error::InvalidState(None));
+        }
+        Ok(())
+    }
+
     /// <https://www.w3.org/TR/IndexedDB-3/#cursor-effective-key>
     pub(crate) fn effective_key(&self) -> Option<IndexedDBKeyType> {
         match &self.source {
@@ -244,6 +337,167 @@ impl IDBCursorMethods<crate::DomTypeHolder> for IDBCursor {
             .get()
             .expect("IDBCursor.request should be set when cursor is opened")
     }
+
+    /// <https://www.w3.org/TR/IndexedDB-3/#dom-idbcursor-advance>
+    fn Advance(&self, cx: &mut JSContext, count: u32) -> ErrorResult {
+        // Step 1. If count is 0 (zero), throw a TypeError.
+        if count == 0 {
+            return Err(Error::Type(c"The count must be greater than zero".to_owned()));
+        }
+        // Steps 2 to 5.
+        self.check_can_move()?;
+        // Steps 6 to 8.
+        self.move_on(cx, None, None, Some(count))
+    }
+
+    /// <https://www.w3.org/TR/IndexedDB-3/#dom-idbcursor-continue>
+    fn Continue(&self, cx: &mut JSContext, key: HandleValue) -> ErrorResult {
+        // Steps 1 to 4.
+        self.check_can_move()?;
+        // Step 5. If key is given, then:
+        let key = if key.is_undefined() {
+            None
+        } else {
+            // Step 5.1. Let r be the result of converting a value to a key with key.
+            // Rethrow any exceptions. If r is invalid, throw a "DataError".
+            let key = convert_value_to_key(cx, key, None)?.into_result()?;
+            // Step 5.2/5.3. The key must be beyond the cursor's position in the
+            // direction it is moving.
+            if let Some(position) = self.position.borrow().as_ref() {
+                let forwards = matches!(
+                    self.direction,
+                    IDBCursorDirection::Next | IDBCursorDirection::Nextunique
+                );
+                if (forwards && &key <= position) || (!forwards && &key >= position) {
+                    return Err(Error::Data(None));
+                }
+            }
+            Some(key)
+        };
+        // Steps 6 to 8.
+        self.move_on(cx, key, None, None)
+    }
+
+    /// <https://www.w3.org/TR/IndexedDB-3/#dom-idbcursor-continueprimarykey>
+    fn ContinuePrimaryKey(
+        &self,
+        cx: &mut JSContext,
+        key: HandleValue,
+        primary_key: HandleValue,
+    ) -> ErrorResult {
+        // Steps 1 and 2.
+        if self.transaction.is_active() && self.transaction.is_usable() {
+            // The checks below follow the specification's order.
+        } else {
+            return Err(Error::TransactionInactive(None));
+        }
+        if self.source_is_deleted() {
+            return Err(Error::InvalidState(None));
+        }
+        // Step 4. If this's source is not an index, throw an "InvalidAccessError".
+        if !matches!(self.source, ObjectStoreOrIndex::Index(_)) {
+            return Err(Error::InvalidAccess(None));
+        }
+        // Step 5. If direction is not "next" or "prev", throw an "InvalidAccessError".
+        let forwards = match self.direction {
+            IDBCursorDirection::Next => true,
+            IDBCursorDirection::Prev => false,
+            _ => return Err(Error::InvalidAccess(None)),
+        };
+        // Step 6. If got value flag is false, throw an "InvalidStateError".
+        if !self.got_value.get() {
+            return Err(Error::InvalidState(None));
+        }
+        // Steps 7 to 10. Convert both keys; an invalid one is a "DataError".
+        let key = convert_value_to_key(cx, key, None)?.into_result()?;
+        let primary_key = convert_value_to_key(cx, primary_key, None)?.into_result()?;
+        // Steps 11 and 12. They must be beyond the cursor's position and object store
+        // position in the direction it is moving.
+        if let (Some(position), Some(store_position)) = (
+            self.position.borrow().as_ref(),
+            self.object_store_position.borrow().as_ref(),
+        ) {
+            let behind = if forwards {
+                &key < position || (&key == position && &primary_key <= store_position)
+            } else {
+                &key > position || (&key == position && &primary_key >= store_position)
+            };
+            if behind {
+                return Err(Error::Data(None));
+            }
+        }
+        // Steps 13 to 15.
+        self.move_on(cx, Some(key), Some(primary_key), None)
+    }
+
+    /// <https://www.w3.org/TR/IndexedDB-3/#dom-idbcursor-update>
+    fn Update(&self, cx: &mut JSContext, value: HandleValue) -> Fallible<DomRoot<IDBRequest>> {
+        // Steps 1 to 4.
+        self.check_can_write()?;
+        // Step 5. If the cursor's key only flag is set, throw an "InvalidStateError".
+        if self.key_only {
+            return Err(Error::InvalidState(None));
+        }
+        let store = self.store();
+        let effective_key = self.effective_key().ok_or(Error::InvalidState(None))?;
+        // Step 6. Let clone be a clone of value in the current Realm.
+        rooted!(&in(cx) let mut clone = NullValue());
+        store.clone_value_in_target_realm(cx, value, clone.handle_mut())?;
+        // Step 7. If the object store uses in-line keys, the key the clone's key path
+        // gives must be the cursor's effective key.
+        if let Some(key_path) = store.store_key_path() {
+            match extract_key(cx, clone.handle(), key_path, None)? {
+                ExtractionResult::Key(key) if key == effective_key => {},
+                _ => return Err(Error::Data(None)),
+            }
+        }
+        let unique_index_keys = store.unique_index_keys(cx, clone.handle())?;
+        let serialized = structuredclone::write(cx, clone.handle(), None)?;
+        let serialized_value =
+            postcard::to_stdvec(&serialized).map_err(|_| Error::InvalidState(None))?;
+        // Step 8. Store the clone under the effective key, overwriting.
+        let request = IDBRequest::execute_async(
+            cx,
+            &store,
+            |callback| {
+                AsyncOperation::ReadWrite(AsyncReadWriteOperation::PutItem {
+                    callback,
+                    key: Some(effective_key),
+                    value: serialized_value,
+                    should_overwrite: true,
+                    key_generator_current_number: None,
+                    unique_index_keys,
+                })
+            },
+            None,
+            None,
+        )?;
+        request.set_source(Some(RequestSource::Cursor(Dom::from_ref(self))));
+        Ok(request)
+    }
+
+    /// <https://www.w3.org/TR/IndexedDB-3/#dom-idbcursor-delete>
+    fn Delete(&self, cx: &mut JSContext) -> Fallible<DomRoot<IDBRequest>> {
+        // Steps 1 to 4.
+        self.check_can_write()?;
+        let store = self.store();
+        let effective_key = self.effective_key().ok_or(Error::InvalidState(None))?;
+        // Step 6. Delete the record at the effective key.
+        let request = IDBRequest::execute_async(
+            cx,
+            &store,
+            |callback| {
+                AsyncOperation::ReadWrite(AsyncReadWriteOperation::RemoveItem {
+                    callback,
+                    key_range: IndexedDBKeyRange::only(effective_key),
+                })
+            },
+            None,
+            None,
+        )?;
+        request.set_source(Some(RequestSource::Cursor(Dom::from_ref(self))));
+        Ok(request)
+    }
 }
 
 /// A struct containing parameters for
@@ -291,7 +545,13 @@ pub(crate) fn iterate_cursor(
     }
 
     // Step 4. Let records be the list of records in source.
-    // NOTE: It is given as a function parameter.
+    // NOTE: It is given as a function parameter. For an index it is the store's
+    // records, and the index's own records are worked out from them here (Ferrite:
+    // the backend keeps no index data; see `idbindex::index_records`).
+    let records = match source {
+        ObjectStoreOrIndex::Index(index) => index_records(cx, global, index, records)?,
+        ObjectStoreOrIndex::ObjectStore(_) => records,
+    };
 
     // Step 5. Let range be cursor’s range.
     let range = &cursor.range;
@@ -300,7 +560,7 @@ pub(crate) fn iterate_cursor(
     let mut position = cursor.position.borrow().clone();
 
     // Step 7. Let object store position be cursor’s object store position.
-    let object_store_position = cursor.object_store_position.borrow().clone();
+    let mut object_store_position = cursor.object_store_position.borrow().clone();
 
     // Step 8. If count is not given, let count be 1.
     let mut count = count.unwrap_or(1);
@@ -508,8 +768,11 @@ pub(crate) fn iterate_cursor(
                 position = Some(found_record.key.clone());
 
                 // Step 9.4. If source is an index, let object store position be found record’s value.
+                // (Ferrite: the local is updated, so a count above 1 keeps stepping and
+                // step 11 stores the right position; servo-script 0.6.0 only wrote the
+                // cursor's field and then overwrote it with the old value in step 11.)
                 if matches!(source, ObjectStoreOrIndex::Index(_)) {
-                    cursor.set_object_store_position(Some(found_record.primary_key.clone()));
+                    object_store_position = Some(found_record.primary_key.clone());
                 }
 
                 // Step 9.5. Decrease count by 1.

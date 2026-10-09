@@ -18,7 +18,7 @@ use std::collections::{HashSet, VecDeque};
 use std::path::{Path, PathBuf};
 
 use ferrite_servo::diag::{
-    ConsoleEntry, ConsoleLevel, CrashNote, NetEvent, PanicNote, MAX_ENTRIES,
+    ConsoleEntry, ConsoleLevel, CrashNote, NetEvent, NetTiming, PanicNote, MAX_ENTRIES,
 };
 use iced::widget::scrollable;
 use iced::Task;
@@ -202,7 +202,7 @@ pub(crate) struct ConsoleRow {
     pub count: u32,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq)]
 pub(crate) struct NetRow {
     pub id: u64,
     pub at_ms: u64,
@@ -210,6 +210,12 @@ pub(crate) struct NetRow {
     pub url: String,
     pub kind: NetKind,
     pub main_frame: bool,
+    /// From the page's Resource Timing, once the request has finished.
+    pub duration_ms: Option<f64>,
+    /// Bytes on the wire (0: served from the cache, or not measurable).
+    pub transfer_size: Option<u64>,
+    /// The body's size as sent.
+    pub body_size: Option<u64>,
 }
 
 fn level_slot(level: ConsoleLevel) -> usize {
@@ -222,8 +228,11 @@ fn level_slot(level: ConsoleLevel) -> usize {
     }
 }
 
-/// Cuts `message` to [`MAX_MESSAGE_CHARS`], saying how much was dropped.
+/// Cuts `message` to [`MAX_MESSAGE_CHARS`], saying how much was dropped. Long
+/// script addresses are shortened first (Google's are thousands of characters),
+/// so the cut falls on padding and not on the error text after the address.
 pub(crate) fn cap_message(message: String) -> String {
+    let message = crate::shorten_urls(&message);
     let total = message.chars().count();
     if total <= MAX_MESSAGE_CHARS {
         return message;
@@ -510,6 +519,24 @@ impl TabLog {
         });
     }
 
+    /// Fills in the duration and size of the requests these timings are for:
+    /// each goes to the newest request for its URL that has none yet. A timing
+    /// for a request that is no longer listed is dropped.
+    pub(crate) fn apply_timings(&mut self, timings: Vec<NetTiming>) {
+        for timing in timings {
+            if let Some(row) = self
+                .net
+                .iter_mut()
+                .rev()
+                .find(|row| row.duration_ms.is_none() && row.url == timing.url)
+            {
+                row.duration_ms = Some(timing.duration_ms);
+                row.transfer_size = Some(timing.transfer_size);
+                row.body_size = Some(timing.body_size);
+            }
+        }
+    }
+
     fn push_net(&mut self, event: NetEvent) {
         let kind = NetKind::of(&event.kind);
         self.kind_counts[kind.slot()] += 1;
@@ -522,6 +549,9 @@ impl TabLog {
             url: event.url,
             kind,
             main_frame: event.is_main_frame,
+            duration_ms: None,
+            transfer_size: None,
+            body_size: None,
         });
         while self.net.len() > MAX_ENTRIES {
             if let Some(old) = self.net.pop_front() {
@@ -1167,12 +1197,42 @@ pub(crate) fn net_time(at_ms: u64, nav_ms: Option<u64>) -> String {
 
 pub(crate) fn net_line(row: &NetRow, nav_ms: Option<u64>) -> String {
     format!(
-        "[{}] {:<6} {:<5} {}",
+        "[{}] {:<6} {:<5} {:>9} {:>7} {}",
         net_time(row.at_ms, nav_ms),
         row.method,
         row.kind.label(),
+        net_size(row),
+        net_duration(row),
         row.url
     )
+}
+
+/// A request's size for the Network tab: bytes on the wire, or the body's
+/// size marked as from the cache when nothing crossed the wire, or a dash
+/// before the request has finished (or when the page may not measure it).
+pub(crate) fn net_size(row: &NetRow) -> String {
+    match (row.transfer_size, row.body_size) {
+        (Some(wire), _) if wire > 0 => bytes(wire),
+        (Some(_), Some(body)) if body > 0 => format!("{} cache", bytes(body)),
+        _ => "\u{2014}".to_string(),
+    }
+}
+
+/// A request's duration for the Network tab, or a dash until it has finished.
+pub(crate) fn net_duration(row: &NetRow) -> String {
+    match row.duration_ms {
+        Some(ms) if ms < 1_000.0 => format!("{} ms", ms.round() as u64),
+        Some(ms) => format!("{:.1} s", ms / 1_000.0),
+        None => "\u{2014}".to_string(),
+    }
+}
+
+fn bytes(n: u64) -> String {
+    match n {
+        0..=1_023 => format!("{n} B"),
+        1_024..=1_048_575 => format!("{:.1} kB", n as f64 / 1_024.0),
+        _ => format!("{:.1} MB", n as f64 / 1_048_576.0),
+    }
 }
 
 pub(crate) fn engine_text(event: &EngineEvent) -> String {
@@ -1219,7 +1279,7 @@ pub(crate) fn export_text(state: &FerriteBrowser, section: DevTab) -> String {
             }
         }
         (DevTab::Network, Some(diag)) => {
-            out.push_str("# status, size and timing are not reported by the engine\n");
+            out.push_str("# size and time from the page's Resource Timing; status is not reported by the engine\n");
             for row in diag.log.net_rows() {
                 out.push_str(&net_line(row, diag.log.nav_ms));
                 out.push('\n');
@@ -1348,6 +1408,43 @@ mod tests {
             kind: kind.to_string(),
             is_main_frame: main,
         }
+    }
+
+    #[test]
+    fn a_timing_fills_the_newest_request_for_its_url_and_is_shown_formatted() {
+        let mut log = TabLog::default();
+        log.ingest(
+            vec![],
+            vec![
+                net(1, "Script", "https://a.example/app.js", false),
+                net(2, "Script", "https://a.example/app.js", false),
+                net(3, "Image", "https://a.example/logo.png", false),
+            ],
+            true,
+        );
+        let timing = |url: &str, d: f64, t: u64, b: u64| NetTiming {
+            url: url.into(),
+            duration_ms: d,
+            transfer_size: t,
+            body_size: b,
+        };
+        log.apply_timings(vec![
+            timing("https://a.example/app.js", 42.4, 2_048, 1_900),
+            timing("https://a.example/logo.png", 1_250.0, 0, 5_000),
+            timing("https://elsewhere.example/x", 1.0, 1, 1),
+        ]);
+        let rows: Vec<&NetRow> = log.net_rows().collect();
+        assert_eq!(rows[0].duration_ms, None, "the newer request got it");
+        assert_eq!(net_duration(rows[1]), "42 ms");
+        assert_eq!(net_size(rows[1]), "2.0 kB");
+        assert_eq!(net_duration(rows[2]), "1.2 s");
+        assert_eq!(net_size(rows[2]), "4.9 kB cache");
+        assert_eq!(net_size(rows[0]), "\u{2014}");
+        // A second timing for the same URL goes to the older one.
+        log.apply_timings(vec![timing("https://a.example/app.js", 7.0, 10, 10)]);
+        let rows: Vec<&NetRow> = log.net_rows().collect();
+        assert_eq!(net_duration(rows[0]), "7 ms");
+        assert!(net_line(rows[1], None).contains("2.0 kB"));
     }
 
     fn log_with(entries: Vec<ConsoleEntry>) -> TabLog {
@@ -1502,6 +1599,25 @@ mod tests {
         );
         assert_eq!(view.hidden, MAX_ENTRIES - 3);
         assert_eq!(log.level_count(LevelFilter::All), MAX_ENTRIES);
+    }
+
+    #[test]
+    fn a_long_script_address_does_not_push_the_error_text_out_of_the_log() {
+        let url = format!(
+            "https://www.google.com/xjs/_/js/k=xjs.s.en_GB/am={}/cb=loaded_h_0/m=csi?cb=1",
+            "A".repeat(MAX_MESSAGE_CHARS * 2)
+        );
+        let message =
+            format!("Error at {url}:996:29 uncaught exception: TypeError: x is undefined");
+        let mut log = TabLog::default();
+        log.push_message(entry(1, ConsoleLevel::Error, &message));
+        let view = log.console_view(LevelFilter::All, "", 1);
+        let kept = &view.rows[0].message;
+        assert!(
+            kept.contains("uncaught exception: TypeError: x is undefined"),
+            "{kept}"
+        );
+        assert!(!kept.contains("not kept"), "{kept}");
     }
 
     #[test]

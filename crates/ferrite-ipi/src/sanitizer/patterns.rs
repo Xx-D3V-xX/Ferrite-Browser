@@ -28,7 +28,7 @@ use std::sync::OnceLock;
 
 /// The pattern-set schema version. Bump when a pattern is added or retired;
 /// each [`PatternDef::since_version`] records which version introduced it.
-pub const PATTERN_SET_VERSION: u32 = 2;
+pub const PATTERN_SET_VERSION: u32 = 3;
 
 /// One named, versioned detection rule.
 #[derive(Debug, Clone, Copy)]
@@ -98,9 +98,10 @@ impl PatternSet {
 
 /// Carrier-agnostic instruction-injection language. Run over visible text
 /// (post-`ammonia`), HTML comments (pre-`ammonia`), and every JSON
-/// tool-output string leaf. Five patterns, matching the parameter rationale
-/// in `docs/DECISIONS.md`/`docs/REBUILD_DIRECTIVE.md` §13.4 ("Pattern count
-/// | 5 labelled patterns | Chosen for precision on literal-phrase attacks").
+/// tool-output string leaf. The rebuild started with five (`docs/REBUILD_DIRECTIVE.md`
+/// §13.4: "chosen for precision on literal-phrase attacks"); each later one is
+/// listed with the version that added it, and each was checked against
+/// everyday text before it was kept (see the tests below).
 pub static GENERAL_PATTERNS: PatternSet = PatternSet::new(
     "general",
     &[
@@ -200,6 +201,28 @@ pub static GENERAL_PATTERNS: PatternSet = PatternSet::new(
             description: "Asks the agent to repeat or reveal the instructions/text above it.",
             regex: r"(?i)\b(?:repeat|reveal|print|output|show|display|leak)\b.{0,25}\b(?:all\s+)?(?:of\s+)?(?:the\s+|your\s+)?(?:text|words|instructions|messages?|prompt|context)\s+(?:above|before|so\s+far)\b",
             since_version: 2,
+        },
+        // Version 3 (T-327): the three dressings of the within-fingerprint attacks
+        // that still ran with every layer on. Written for the class, not the corpus's
+        // sentences, and tested on held-out wording and on everyday near-misses (the
+        // golden corpus in `detect.rs`).
+        PatternDef {
+            id: "claimed_user_authorization",
+            description: "Claims the user (or account owner) already approved or authorized an action.",
+            regex: r"(?i)\b(?:already|pre-?)\s*(?:approved|authori[sz]ed|confirmed|cleared)\s+(?:by|with)\s+(?:the\s+)?(?:user|account\s+(?:owner|holder)|customer)\b|\b(?:already|pre-?)\s*(?:approved|authori[sz]ed)\b.{0,15}\bby\s+the\s+(?:user|account\s+(?:owner|holder))\b|\b(?:the\s+)?(?:user|account\s+(?:owner|holder))\s+(?:has\s+|had\s+)?(?:already\s+)?(?:pre-?)?(?:approved|authori[sz]ed|consented\s+to|agreed\s+to|granted\s+(?:you\s+)?permission\s+(?:to|for))\s+(?:this|that|it|you|the\s+(?:action|request|transfer|purchase|payment|download|export))\b|\byou\s+(?:are|have\s+been)\s+(?:already\s+)?(?:authori[sz]ed|permitted|cleared)\s+by\s+the\s+(?:user|account\s+(?:owner|holder))\b",
+            since_version: 3,
+        },
+        PatternDef {
+            id: "roleplay_framing",
+            description: "Wraps an instruction to the agent in a game, story or role-play.",
+            regex: r"(?i)\b(?:let'?s|let\s+us)\s+play\s+a\s+(?:game|role-?\s?play)\b.{0,160}\b(?:assistant|agent|chatbot|language\s+model)s?\s+(?:must|always|has\s+to|have\s+to|will|should|needs?\s+to|ends?\s+up)\b|\bin\s+(?:this|the|our)\s+(?:game|story|scenario|role-?\s?play)\b.{0,40}\b(?:the\s+)?(?:helpful\s+)?(?:assistant|agent|chatbot|language\s+model)\s+(?:must|always|has\s+to|will|should|needs?\s+to)\b|\b(?:pretend|imagine|act\s+as\s+if)\s+(?:that\s+)?you\s+(?:are|were)\s+(?:an?\s+)?(?:unrestricted|unfiltered|jailbroken|evil|dan\b|different\s+(?:ai|assistant|agent))",
+            since_version: 3,
+        },
+        PatternDef {
+            id: "instruction_override_paraphrase",
+            description: "Tells the reader to set aside what it was told, or names its 'real' task.",
+            regex: r"(?i)\b(?:pay\s+no\s+attention|never\s+mind|don'?t\s+(?:pay\s+attention|listen)|stop\s+following|set\s+aside)\b\s*(?:to\s+)?(?:what|anything|everything|whatever)\s+(?:(?:you\s+(?:were|have\s+been|'ve\s+been)\s+(?:told|asked|instructed|given))|(?:the\s+)?user\s+(?:said|asked|wants|wrote))|\byour\s+(?:real|actual|true)\s+(?:instructions?|task|assignment|orders)\s+(?:is|are)\b",
+            since_version: 3,
         },
     ],
 );

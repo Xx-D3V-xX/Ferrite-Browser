@@ -21,6 +21,10 @@ use std::time::{Duration, Instant};
 /// Each entry is `(name, expression)`; the expression must evaluate to a truthy
 /// value when the API works. All run synchronously inside one try/catch.
 const REQUIRED: &[(&str, &str)] = &[
+    // A page with no service worker keeps the browser's own fetch: sw_compat.js used to
+    // replace it on every page, and anti-abuse scripts (Google's sign-in) treat a replaced
+    // fetch as tampering (T-319).
+    ("fetch is the browser's own (no service worker)", "/\\[native code\\]/.test(Function.prototype.toString.call(window.fetch))"),
     ("window.crypto", "typeof crypto === 'object' && crypto === window.crypto"),
     (
         "crypto.getRandomValues(Uint8Array)",
@@ -44,7 +48,6 @@ const REQUIRED: &[(&str, &str)] = &[
         "WebGL context",
         "(function(){var c=document.createElement('canvas');return !!(c.getContext('webgl')||c.getContext('experimental-webgl'))})()",
     ),
-    ("WebGL2 context", "!!document.createElement('canvas').getContext('webgl2')"),
     ("Notification", "typeof Notification === 'function'"),
     ("navigator.permissions", "typeof navigator.permissions === 'object' && typeof navigator.permissions.query === 'function'"),
     ("navigator.clipboard", "typeof navigator.clipboard === 'object' && typeof navigator.clipboard.writeText === 'function'"),
@@ -56,6 +59,14 @@ const REQUIRED: &[(&str, &str)] = &[
     ("visualViewport", "typeof visualViewport === 'object' && visualViewport.width > 0"),
     ("document.execCommand", "typeof document.execCommand === 'function'"),
     ("TextEncoder / TextDecoder", "new TextDecoder().decode(new TextEncoder().encode('é')) === 'é'"),
+    (
+        "crossOriginIsolated is false (no isolation)",
+        "window.crossOriginIsolated === false && window.originAgentCluster === false",
+    ),
+    (
+        "input.showPicker without a user gesture throws NotAllowedError",
+        "(function(){try{document.createElement('input').showPicker();return false}catch(e){return e.name==='NotAllowedError'}})()",
+    ),
     ("structuredClone", "structuredClone({a:[1,{b:2}]}).a[1].b === 2"),
     ("queueMicrotask", "typeof queueMicrotask === 'function'"),
     ("MutationObserver", "typeof MutationObserver === 'function'"),
@@ -65,21 +76,62 @@ const REQUIRED: &[(&str, &str)] = &[
     ("Shadow DOM", "!!document.createElement('div').attachShadow({mode:'open'})"),
     ("performance.now/mark/measure", "(function(){performance.mark('a');performance.mark('b');performance.measure('m','a','b');return typeof performance.now()==='number'})()"),
     ("requestAnimationFrame", "typeof requestAnimationFrame === 'function'"),
+    ("Animation / KeyframeEffect / element.animate", "typeof Animation === 'function' && typeof KeyframeEffect === 'function' && document.createElement('div').animate([{opacity:0},{opacity:1}],1) instanceof Animation"),
+    ("getAnimations on elements, the document and shadow roots", "typeof document.getAnimations === 'function' && typeof document.createElement('div').getAnimations === 'function' && typeof document.createElement('div').attachShadow({mode:'open'}).getAnimations === 'function'"),
+    ("SVGAElement and the other missing SVG interfaces answer instanceof by tag", "(function(){var n='http://www.w3.org/2000/svg';var a=document.createElementNS(n,'a'),t=document.createElementNS(n,'text');return typeof SVGAElement==='function'&&a instanceof SVGAElement&&a instanceof SVGElement&&!(t instanceof SVGAElement)&&t instanceof SVGTextContentElement&&!(document.createElement('a') instanceof SVGAElement)})()"),
+    ("PublicKeyCredential says there is no authenticator", "typeof PublicKeyCredential === 'function' && typeof PublicKeyCredential.getClientCapabilities === 'function' && typeof PublicKeyCredential.isUserVerifyingPlatformAuthenticatorAvailable === 'function'"),
+    // An exception the engine makes says where in the page's script it was made, so a
+    // rejection the console reports can name the file (vendored servo-script, patch 12).
+    ("a DOMException the engine throws has a stack", "(function(){try{document.createElement('a b')}catch(e){return e instanceof DOMException&&e.name==='InvalidCharacterError'&&typeof e.stack==='string'&&e.stack.length>0&&!Object.keys(e).includes('stack')}return false})()"),
+    ("new DOMException() has a stack", "typeof new DOMException('x','AbortError').stack === 'string'"),
+    ("cancelIdleCallback beside requestIdleCallback", "typeof cancelIdleCallback === 'function' && typeof requestIdleCallback === 'function'"),
     ("AbortController", "typeof AbortController === 'function' && typeof AbortSignal === 'function'"),
     ("URL / URLSearchParams", "new URL('https://a.b/c?d=1').searchParams.get('d') === '1'"),
     ("fetch / Headers / Request", "typeof fetch === 'function' && typeof Headers === 'function' && typeof Request === 'function'"),
     ("Intl.DateTimeFormat / NumberFormat", "typeof Intl.DateTimeFormat === 'function' && typeof Intl.NumberFormat === 'function'"),
     ("Promise.allSettled / WeakRef", "typeof Promise.allSettled === 'function' && typeof WeakRef === 'function'"),
     ("Array.prototype.at / Object.hasOwn", "[1,2,3].at(-1) === 3 && Object.hasOwn({a:1},'a')"),
+    // CSS the style engine ships off; `ferrite-servo` switches these on.
+    (":has() styles and matches", "getComputedStyle(document.getElementById('has1')).width === '20px' && document.getElementById('has1').matches(':has(.kid)') && CSS.supports('selector(:has(a))')"),
+    (":nth-child(n of S)", "getComputedStyle(document.querySelectorAll('#nco li')[2]).width === '30px'"),
+    ("@scope", "getComputedStyle(document.getElementById('sc1')).width === '50px'"),
     ("localStorage / sessionStorage", "typeof localStorage === 'object' && typeof sessionStorage === 'object'"),
     ("history.pushState", "typeof history.pushState === 'function'"),
     ("matchMedia", "typeof matchMedia === 'function' && typeof matchMedia('(min-width:1px)').matches === 'boolean'"),
     ("getComputedStyle", "typeof getComputedStyle(document.body).display === 'string'"),
+    ("about:blank iframe has the compatibility interfaces (Animation, serviceWorker)", "(function(){var f=document.createElement('iframe');document.body.appendChild(f);var w=f.contentWindow;var ok=typeof w.Animation==='function'&&typeof w.navigator.serviceWorker==='object'&&typeof w.SVGAElement==='function';f.remove();if(!ok)throw new Error(typeof w.Animation+' '+typeof w.navigator.serviceWorker);return true})()"),
+    // github.com aborted the engine on exit: a VAO's finalizer reached into a buffer the
+    // page had deleted (or the same GC had freed). This leaves such VAOs for the final GC;
+    // a regression shows as this probe crashing on exit, not as a FAIL line.
+    ("WebGL VAOs holding deleted buffers are left for the final GC", "(function(){var gl=document.createElement('canvas').getContext('webgl');var x=gl.getExtension('OES_vertex_array_object');for(var i=0;i<60;i++){var b=gl.createBuffer(),e=gl.createBuffer(),v=x.createVertexArrayOES();x.bindVertexArrayOES(v);gl.bindBuffer(gl.ARRAY_BUFFER,b);gl.enableVertexAttribArray(0);gl.vertexAttribPointer(0,2,gl.FLOAT,false,0,0);gl.bindBuffer(gl.ELEMENT_ARRAY_BUFFER,e);if(i%2)gl.deleteBuffer(b);x.bindVertexArrayOES(null);if(!(i%2))gl.deleteBuffer(e)}return true})()"),
 ];
 
 /// Present in current Chrome, Firefox and Safari and used by real sites, but
 /// not needed to run a page: a gap is reported as `INFO`, never as a failure.
 const OPTIONAL: &[(&str, &str)] = &[
+    // Which built-ins Ferrite's scripts replace on an ordinary page (`missing` = replaced).
+    ("native: navigator.mediaDevices getter", "(function(){var d=Object.getOwnPropertyDescriptor(Navigator.prototype,'mediaDevices')||Object.getOwnPropertyDescriptor(navigator,'mediaDevices');return !!d&&/\\[native code\\]/.test(Function.prototype.toString.call(d.get))})()"),
+    ("native: navigator.serviceWorker getter", "(function(){var d=Object.getOwnPropertyDescriptor(Navigator.prototype,'serviceWorker');return !!d&&/\\[native code\\]/.test(Function.prototype.toString.call(d.get))})()"),
+    ("native: Element.prototype.animate", "/\\[native code\\]/.test(Function.prototype.toString.call(Element.prototype.animate))"),
+    ("native: history.pushState", "/\\[native code\\]/.test(Function.prototype.toString.call(history.pushState))"),
+    ("native: XMLHttpRequest.prototype.open", "/\\[native code\\]/.test(Function.prototype.toString.call(XMLHttpRequest.prototype.open))"),
+    ("no extra window globals (__ferrite*)", "Object.getOwnPropertyNames(window).filter(function(n){return /^__ferrite/.test(n)}).length===0"),
+    // Where Google's scripts got `SecurityError: The operation is insecure` (T-267/T-270):
+    // the APIs a page commonly touches through a blank iframe or its own history. Every
+    // other browser allows each of these on a same-origin page.
+    ("about:blank iframe has the parent's origin", "(function(){var f=document.createElement('iframe');document.body.appendChild(f);var o=f.contentWindow.origin;f.remove();if(o!==window.origin)throw new Error(o);return true})()"),
+    ("about:blank iframe localStorage", "(function(){var f=document.createElement('iframe');document.body.appendChild(f);var s=f.contentWindow.localStorage;s.setItem('fx','1');var ok=s.getItem('fx')==='1';s.removeItem('fx');f.remove();return ok})()"),
+    ("about:blank iframe sessionStorage", "(function(){var f=document.createElement('iframe');document.body.appendChild(f);var s=f.contentWindow.sessionStorage;s.setItem('fx','1');var ok=s.getItem('fx')==='1';f.remove();return ok})()"),
+    ("about:blank iframe document.cookie", "(function(){var f=document.createElement('iframe');document.body.appendChild(f);f.contentDocument.cookie='fxi=1';var ok=typeof f.contentDocument.cookie==='string';f.remove();return ok})()"),
+    ("about:blank iframe indexedDB", "(function(){var f=document.createElement('iframe');document.body.appendChild(f);var r=f.contentWindow.indexedDB.open('fx-probe');f.remove();return !!r})()"),
+    ("document.domain = document.domain", "(function(){document.domain=document.domain;return true})()"),
+    ("history.pushState / replaceState (same origin)", "(function(){var p=location.pathname;history.pushState({a:1},'',p+'?fx=1');history.replaceState(null,'',p);return location.search===''})()"),
+    ("document.cookie read/write", "(function(){document.cookie='fxt=1';return document.cookie.indexOf('fxt=1')>=0})()"),
+    // Off by default since the macOS fix (docs/TO-DO.md T-305); `FERRITE_WEBGL=on` turns it on.
+    (
+        "WebGL2 context",
+        "!!document.createElement('canvas').getContext('webgl2')",
+    ),
     (
         "requestIdleCallback",
         "typeof requestIdleCallback === 'function'",
@@ -138,8 +190,132 @@ const ASYNC: &[(&str, &str)] = &[
          if(v!==true)throw new Error('verify returned '+v);})",
     ),
     (
+        // A tracking pixel with no colour table at all (apple.com, T-332): the `gif`
+        // crate refused it, so the `<img>` fired `error` (vendor/servo-pixels).
+        "a GIF with no colour table loads (img onload)",
+        "new Promise(function(res,rej){var i=new Image();var t=setTimeout(function(){rej(new Error('neither load nor error'))},5000);\
+         i.onload=function(){clearTimeout(t);i.naturalWidth===1?res():rej(new Error('naturalWidth '+i.naturalWidth))};\
+         i.onerror=function(){clearTimeout(t);rej(new Error('error event'))};\
+         i.src='data:image/gif;base64,R0lGODlhAQABAAAAACH5BAEAAAAALAAAAAABAAEAAAICRAEAOw=='})",
+    ),
+    (
+        "for await over a ReadableStream",
+        "(async function(){var s=new ReadableStream({start:function(c){c.enqueue('a');c.enqueue('b');c.close()}});\
+         var out='';for await (const x of s) out+=x;if(out!=='ab')throw new Error('got '+out);\
+         var t=new ReadableStream({start:function(c){c.enqueue(1);c.enqueue(2)}});for await (const y of t) break;\
+         if(t.locked)throw new Error('break left the stream locked');})()",
+    ),
+    (
         "fetch() of a same-origin resource",
         "fetch('/ping').then(function(r){return r.text()}).then(function(t){if(t!=='pong')throw new Error('got '+t);})",
+    ),
+    (
+        "container queries: min-width, ranges, not, or, named, nesting, cq units, and a resize",
+        "new Promise(function(res,rej){var w=function(id){return getComputedStyle(document.getElementById(id)).width};\
+         setTimeout(function(){\
+         var first=[w('cqa'),w('cqb'),w('cqc'),w('cqd'),w('cqe'),w('cqu')].join();\
+         if(first!=='40px,10px,42px,46px,44px,30px')return rej(new Error('at 300px: '+first));\
+         document.getElementById('cqbox').style.width='500px';\
+         setTimeout(function(){var second=[w('cqa'),w('cqb'),w('cqc'),w('cqd'),w('cqu')].join();\
+         if(second!=='40px,41px,10px,10px,50px')return rej(new Error('at 500px: '+second));res();},700);},700)})",
+    ),
+    (
+        // A frame on the same host and another port: same site (so the same script
+        // thread, as Google's account bar beside www.google.com), another origin. The
+        // engine said only "The operation is insecure." here, which told the owner
+        // nothing about which check Google's scripts tripped (T-321). Reading the
+        // frame's `document` once threw nothing on this path (T-322).
+        "cross-origin window: only the allowed properties, errors name the property",
+        "new Promise(function(res,rej){var f=document.createElement('iframe');f.src='http://127.0.0.1:'+window.__otherPort+'/';\
+         var t=setTimeout(function(){rej(new Error('frame never loaded'))},5000);\
+         f.onload=function(){clearTimeout(t);var w=f.contentWindow,bad=[];\
+         function denied(label,fn,prop){try{fn();bad.push(label+': no error')}catch(e){\
+         if(!(e.name==='SecurityError'&&e.message.indexOf(prop)>=0&&/cross-origin/.test(e.message)))bad.push(label+': '+e.name+': '+e.message)}}\
+         denied('location.href',function(){return w.location.href},'href');\
+         denied('document (T-322)',function(){return w.document},'document');\
+         denied('localStorage',function(){return w.localStorage},'localStorage');\
+         denied('set name',function(){w.name='x'},'name');\
+         try{if(typeof w.postMessage!=='function')bad.push('postMessage not a function');\
+         if(w.closed!==false)bad.push('closed is '+w.closed);if(w.parent!==window)bad.push('parent is not this window');\
+         if(w.then!==undefined)bad.push('then is not undefined');w.postMessage('hi','*')}catch(e){bad.push('allowed use threw '+e.name+': '+e.message)}\
+         f.remove();if(bad.length)rej(new Error(bad.join(' | ')));else res()};\
+         document.body.appendChild(f)})",
+    ),
+    (
+        // Google's scripts read `location.pathname`/`search`/`href` across their own
+        // frames and got a SecurityError (T-267). Chrome makes setting `document.domain`
+        // a no-op (origin-keyed agent clusters, Chrome 115+), so such frames stay same
+        // origin there.
+        "after document.domain is set, same-origin frames still read each other's location",
+        "new Promise(function(res,rej){document.domain=document.domain;var seen=[];\
+         function read(label,fn){try{fn();}catch(e){seen.push(label+': '+e.name+': '+e.message)}}\
+         read('own location',function(){return location.pathname});\
+         var b=document.createElement('iframe');document.body.appendChild(b);\
+         read('parent reads blank frame',function(){return b.contentWindow.location.pathname});\
+         read('blank frame reads parent',function(){return b.contentWindow.Function('return parent.location.pathname')()});\
+         var f=document.createElement('iframe');f.src='/ping';\
+         var t=setTimeout(function(){rej(new Error('frame never loaded'))},5000);\
+         f.onload=function(){clearTimeout(t);\
+         read('parent reads same-origin frame',function(){return f.contentWindow.location.search});\
+         read('same-origin frame reads parent',function(){return f.contentWindow.Function('return parent.location.href')()});\
+         b.remove();f.remove();if(seen.length)rej(new Error(seen.join(' | ')));else res()};\
+         document.body.appendChild(f)})",
+    ),
+    (
+        // The compatibility scripts run in frames too, before the frame's own scripts:
+        // airbnb.com's service-worker frame stopped on "navigator.serviceWorker is
+        // undefined".
+        "a same-origin frame's own scripts see the compatibility interfaces",
+        "new Promise(function(res,rej){var f=document.createElement('iframe');f.src='/frame';\
+         var t=setTimeout(function(){rej(new Error('frame never loaded'))},5000);\
+         f.onload=function(){clearTimeout(t);var s=f.contentWindow.__seen;f.remove();\
+         if(!s)rej(new Error('the frame script did not run'));\
+         else if(s.sw!=='object'||s.animate!=='function')rej(new Error(JSON.stringify(s)));else res()};\
+         document.body.appendChild(f)})",
+    ),
+    (
+        // youtube.com's watch page has an iframe with src="about:blank" whose window had
+        // neither idle-callback function, and its scheduler called cancelIdleCallback on
+        // it: "window.cancelIdleCallback is not a function" (T-340).
+        "an iframe navigated to about:blank gets the compatibility interfaces",
+        "new Promise(function(res,rej){var f=document.createElement('iframe');f.src='about:blank';\
+         var t=setTimeout(function(){rej(new Error('frame never loaded'))},5000);\
+         f.onload=function(){clearTimeout(t);var w=f.contentWindow;\
+         var got=typeof w.requestIdleCallback+'/'+typeof w.cancelIdleCallback+'/'+typeof w.Animation;f.remove();\
+         if(got!=='function/function/function')rej(new Error(got));else res()};\
+         document.body.appendChild(f)})",
+    ),
+    (
+        "a sandboxed same-origin about:blank iframe gets them",
+        "new Promise(function(res,rej){var f=document.createElement('iframe');f.setAttribute('sandbox','allow-same-origin');f.src='about:blank';\
+         var t=setTimeout(function(){rej(new Error('frame never loaded'))},5000);\
+         f.onload=function(){clearTimeout(t);var w=f.contentWindow;\
+         var got=typeof w.requestIdleCallback+'/'+typeof w.cancelIdleCallback;f.remove();\
+         if(got!=='function/function')rej(new Error(got));else res()};\
+         document.body.appendChild(f)})",
+    ),
+    (
+        // The compatibility scripts run in a frame sandboxed without allow-scripts; the
+        // page's own scripts in it still must not.
+        "a sandboxed frame's own scripts still do not run",
+        "new Promise(function(res,rej){var f=document.createElement('iframe');f.setAttribute('sandbox','allow-same-origin');\
+         f.srcdoc='<script>parent.__sandboxRan=1<\\/script>';\
+         var t=setTimeout(function(){rej(new Error('frame never loaded'))},5000);\
+         f.onload=function(){clearTimeout(t);var ran=window.__sandboxRan;var rif=typeof f.contentWindow.requestIdleCallback;f.remove();\
+         if(ran)rej(new Error('the sandboxed script ran'));else if(rif!=='function')rej(new Error(rif));else res()};\
+         document.body.appendChild(f)})",
+    ),
+    (
+        "an about:blank iframe the page writes into keeps them",
+        "new Promise(function(res,rej){var f=document.createElement('iframe');document.body.appendChild(f);\
+         var d=f.contentDocument;d.open();d.write('<!doctype html><html><head><title>w</title></head><body>x</body></html>');d.close();\
+         setTimeout(function(){var w=f.contentWindow;var got=typeof w.requestIdleCallback+'/'+typeof w.cancelIdleCallback;f.remove();\
+         if(got!=='function/function')rej(new Error(got));else res()},300)})",
+    ),
+    (
+        "passkey checks answer no",
+        "Promise.all([PublicKeyCredential.getClientCapabilities(),PublicKeyCredential.isUserVerifyingPlatformAuthenticatorAvailable()])\
+         .then(function(r){if(r[0].passkeyPlatformAuthenticator!==false||r[1]!==false)throw new Error(JSON.stringify(r))})",
     ),
     (
         "setTimeout/Promise ordering",
@@ -147,7 +323,7 @@ const ASYNC: &[(&str, &str)] = &[
     ),
 ];
 
-fn page() -> String {
+fn page(other_port: u16) -> String {
     let mut sync = String::from("var R={};\n");
     for (name, expr) in REQUIRED {
         sync.push_str(&format!(
@@ -168,14 +344,25 @@ fn page() -> String {
     }
     format!(
         "<!doctype html><html><head><meta charset=utf-8><title>web api probe</title>\
-         <style>html,body{{margin:0}}.svgprobe{{position:absolute;left:0;top:0;width:40px;height:40px;fill:rgb(0,200,0)}}</style></head><body>\
+         <style>html,body{{margin:0}}\
+         #cqbox i,#cqside i{{display:block;height:10px}}.cqi{{width:10px}}#cqu{{width:10cqw}}\
+         @container (min-width: 200px){{#cqa{{width:40px}}}}@container (min-width: 400px){{#cqb{{width:41px}}}}\
+         @container (width > 250px) and (width <= 320px){{#cqc{{width:42px}}}}\
+         @container not (min-width: 400px){{#cqd{{width:46px}}}}@container side (min-width: 450px){{#cqe{{width:44px}}}}\
+         @media (min-width: 1px){{@container (min-width: 100px){{#cqu{{width:10cqw}}}}}}\
+         #has1:has(> .kid){{width:20px}}#nco li:nth-child(2 of .on){{width:30px}}@scope (#sc){{.in{{width:50px}}}}\
+         .svgprobe{{position:absolute;left:0;top:0;width:40px;height:40px;fill:rgb(0,200,0)}}</style></head><body>\
+         <div id=has1 style=\"height:1px\"><span class=kid></span></div><ul id=nco><li class=on>a<li>b<li class=on>c</ul><div id=sc><div class=in id=sc1 style=\"height:1px\"></div></div>\
+         <div id=cqbox style=\"container-type:inline-size;width:300px;height:1px;overflow:hidden\"><i class=cqi id=cqa></i><i class=cqi id=cqb></i><i class=cqi id=cqc></i><i class=cqi id=cqd></i><i class=cqi id=cqu></i></div>\
+         <div id=cqside style=\"container:side/inline-size;width:500px;height:1px;overflow:hidden\"><i class=cqi id=cqe></i></div>\
          <svg class=svgprobe viewBox=\"0 0 10 10\"><rect width=10 height=10 /></svg>\
-         <script>{sync}{asyncs}window.__sync=R;window.__optional=O;Promise.all(ps).then(function(){{window.__async=A}});</script>\
+         <script>window.__otherPort={other_port};{sync}{asyncs}window.__sync=R;window.__optional=O;Promise.all(ps).then(function(){{window.__async=A}});</script>\
          </body></html>"
     )
 }
 
-/// A one-page loopback server: `/` is the probe page, `/ping` answers `pong`.
+/// A one-page loopback server: `/` is the probe page, `/ping` answers `pong`,
+/// `/frame` is a page for a frame.
 fn serve(listener: TcpListener, page: String) {
     for stream in listener.incoming() {
         let Ok(mut stream) = stream else { continue };
@@ -184,6 +371,16 @@ fn serve(listener: TcpListener, page: String) {
         let request = String::from_utf8_lossy(&buf[..n]);
         let (ctype, body) = if request.starts_with("GET /ping") {
             ("text/plain", "pong".to_string())
+        } else if request.starts_with("GET /frame") {
+            // A frame page reporting what its own window has, as Google Tag Manager's
+            // `sw_iframe.html` on airbnb.com reads `navigator.serviceWorker` inline.
+            (
+                "text/html; charset=utf-8",
+                "<!doctype html><html><head><title>f</title></head><body><script>\
+                 window.__seen={sw:typeof navigator.serviceWorker,animate:typeof document.body.animate}\
+                 </script></body></html>"
+                    .to_string(),
+            )
         } else {
             ("text/html; charset=utf-8", page.clone())
         };
@@ -244,7 +441,17 @@ fn main() {
         }
     };
     let port = listener.local_addr().map(|a| a.port()).unwrap_or(0);
-    let body = page();
+    // A second origin on the same host, for the cross-origin check.
+    let other = match TcpListener::bind("127.0.0.1:0") {
+        Ok(l) => l,
+        Err(e) => {
+            println!("FAIL second loopback server: {e}");
+            std::process::exit(2);
+        }
+    };
+    let other_port = other.local_addr().map(|a| a.port()).unwrap_or(0);
+    std::thread::spawn(move || serve(other, "<!doctype html><title>other origin</title>".into()));
+    let body = page(other_port);
     std::thread::spawn(move || serve(listener, body));
 
     let mut session = match HeadlessServoSession::new(900, 600) {
@@ -343,6 +550,26 @@ fn main() {
         println!("FAIL async checks never finished");
         failed += 1;
     }
+    // The Network tab's sizes and times: the page's Resource Timing entries
+    // reach the session, and the marked lines never show as console messages.
+    let timings = session.take_net_timings();
+    let ping = timings.iter().find(|t| t.url.ends_with("/ping"));
+    let leaked = session
+        .take_console_entries()
+        .iter()
+        .any(|e| e.message.contains(ferrite_servo::diag::NET_TIMING_MARK));
+    if ping.is_some_and(|t| t.duration_ms >= 0.0) && !leaked {
+        println!(
+            "PASS request timings reach the Network tab ({} entries)",
+            timings.len()
+        );
+    } else {
+        println!(
+            "FAIL request timings: {} entries, /ping {ping:?}, leaked to the console: {leaked}",
+            timings.len()
+        );
+        failed += 1;
+    }
     println!(
         "{}",
         if failed == 0 {
@@ -351,5 +578,8 @@ fn main() {
             "SOME FAILED"
         }
     );
+    // Shut the engine down cleanly: exiting with it running crashes in its exit handlers.
+    drop(session);
+    ferrite_servo::session::shutdown_engine();
     std::process::exit(if failed == 0 { 0 } else { 1 });
 }

@@ -414,7 +414,7 @@ session. There is no teammate or professor slice.
 | Dry-run timeout | 30s | Verified true: the default `timeout_secs: 30` of `DryRunOrchestrator::new`. This session did not touch it. |
 | Excision granularity | sentence segment | Verified true of A5's sanitizer. This session did not touch it. We did not check it again beyond reading. |
 | Excision replacement | single space, no marker | Same as above. |
-| Pattern count | 5 labelled patterns | Carried forward from A5 and A11's audit. We did not count it again this session. |
+| Pattern count | 18 general and 8 script patterns (pattern set 3) | Started at 5 (A5); grown since, each with the version that added it in `crates/ferrite-ipi/src/sanitizer/patterns.rs`. Set 3 (T-327) added claimed user authorization, role-play framing and "set aside what you were told" paraphrases. |
 | Scope precedence | exact > domain-suffix > task-open | Verified unchanged. This is A7's comparator. This session did not touch it. |
 | **Consent policy (sim)** | swept; `RejectFlagged` headline | **Corrected this session (T-010/D10).** It was fixed to `RejectFlagged` before (D10's defect). Now it is a real `ConsentPolicy` enum with `RejectFlagged`, `ApproveAll` and `RandomP(p, seed)`. `adjudicate` really reads it. `RejectFlagged` is reported everywhere as the explicit upper bound that §13.4 always meant it to be. See §2.5. |
 | Detection vs excision split | independently toggled | **Corrected this session (T-215).** Before, `harness.rs::run_one` called `set_detect_enabled` alone. So `strip_enabled` stayed `false` in every eval-harness mode, whatever the `DefenseMode`. `On` and `LoopOnly` acted the same in the real harness, even though A5 had wired live excision in production. Now `run_one` and the dry-run setup of `ferrite-ui` both call `set_defense_mode(mode)`. It sets both flags together. This is what makes the path where `On`'s `SanitizerOnly` catches and strips (`FinalOutcome::Stripped`, T-004) reachable at all in the eval harness. |
@@ -838,17 +838,20 @@ second author. So Cohen's κ still cannot be computed (T-227).
 | Mode | ASR | ADR | SDR | FGR |
 |---|---|---|---|---|
 | Off | 809/809 = 100.0% | n/a | n/a | n/a |
-| SanitizerOnly | 135/806 = 16.7% [14.3–19.5] | n/a | 671/673 = 99.7% | 3/129 = 2.3% (FSR-proxy) |
+| SanitizerOnly | 27/806 = 3.3% [2.3–4.8] | n/a | 779/781 = 99.7% | 3/129 = 2.3% (FSR-proxy) |
 | LoopOnly | 122/806 = 15.1% [12.8–17.8] | 621/621 = 100% | n/a | n/a |
-| On | 63/809 = 7.8% [6.1–9.8] | 624/624 = 100% | 671/676 = 99.3% | 0/129 = 0.0% [0–2.9] |
+| On | 0/809 = 0.0% [0–0.5] | 624/624 = 100% | 779/784 = 99.4% | 0/129 = 0.0% [0–2.9] |
 
 Residual R (actions that the prediction admits): 122/809 = 15.1%. LoopOnly's ASR
 *is* the residual. That is the point of ADR-007. The architecture contains every
 attack that needs an action outside the prediction, and nothing else. The
-sanitizer cuts 59 of the 122 (wording it can detect). That leaves On at 63.
-These 63 are the residual with wording that the sanitizer cannot recognise
-(paraphrase, social engineering, story framing) on the carriers that the scan
-cannot see.
+sanitizer cuts all 122. Until pattern set 3 (T-327, October 2026) it cut 59,
+leaving On at 63/809 = 7.8% [6.1–9.8] and SanitizerOnly at 135/806 = 16.7%:
+the residual worded as a paraphrase, a false claim of the user's approval, or
+a role-play game. Set 3 covers those three kinds of wording. **It was written
+after reading those 63 cases, so this corpus no longer tests it
+independently**; its golden cases (sentences it never saw, and everyday
+near-misses) are the evidence that the classes generalise.
 
 **What these numbers do not say.** The agent is scripted from ground truth. So
 the numbers say nothing about whether a real model takes the bait. That is the

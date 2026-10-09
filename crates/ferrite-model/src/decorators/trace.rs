@@ -10,7 +10,7 @@ use std::time::Instant;
 use async_trait::async_trait;
 
 use crate::error::ModelError;
-use crate::provider::{ModelProvider, ProviderCapabilities, ProviderId};
+use crate::provider::{ModelProvider, ProviderCapabilities, ProviderId, TextSink};
 use crate::request::CompletionRequest;
 use crate::response::CompletionResponse;
 use crate::trace::{TraceBackend, TraceEvent, TraceLog};
@@ -56,15 +56,44 @@ impl<P: ModelProvider> ModelProvider for Trace<P> {
     }
 
     async fn complete(&self, req: CompletionRequest) -> Result<CompletionResponse, ModelError> {
-        let stage = if req.label.is_empty() {
-            format!("{:?} tier", req.tier)
-        } else {
-            req.label.clone()
-        };
-        let mut event = TraceEvent::new(TraceBackend::Llm, stage, req.model_tag.clone());
-        event.request = request_text(&req);
-        let started = Instant::now();
+        let (event, started) = start_event(&req);
         let result = self.inner.complete(req).await;
+        self.finish(event, started, result)
+    }
+
+    async fn complete_streaming(
+        &self,
+        req: CompletionRequest,
+        sink: &TextSink<'_>,
+    ) -> Result<CompletionResponse, ModelError> {
+        let (event, started) = start_event(&req);
+        let result = self.inner.complete_streaming(req, sink).await;
+        self.finish(event, started, result)
+    }
+
+    fn capabilities(&self) -> ProviderCapabilities {
+        self.inner.capabilities()
+    }
+}
+
+fn start_event(req: &CompletionRequest) -> (TraceEvent, Instant) {
+    let stage = if req.label.is_empty() {
+        format!("{:?} tier", req.tier)
+    } else {
+        req.label.clone()
+    };
+    let mut event = TraceEvent::new(TraceBackend::Llm, stage, req.model_tag.clone());
+    event.request = request_text(req);
+    (event, Instant::now())
+}
+
+impl<P: ModelProvider> Trace<P> {
+    fn finish(
+        &self,
+        mut event: TraceEvent,
+        started: Instant,
+        result: Result<CompletionResponse, ModelError>,
+    ) -> Result<CompletionResponse, ModelError> {
         event.latency_ms = u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX);
         match &result {
             Ok(response) => {
@@ -84,10 +113,6 @@ impl<P: ModelProvider> ModelProvider for Trace<P> {
         }
         self.log.record(event);
         result
-    }
-
-    fn capabilities(&self) -> ProviderCapabilities {
-        self.inner.capabilities()
     }
 }
 

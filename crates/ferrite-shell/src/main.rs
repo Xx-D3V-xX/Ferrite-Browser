@@ -1,3 +1,8 @@
+// Windows: a GUI program, so a double-click opens no console window beside the browser,
+// and what it prints goes to `ferrite.log` (`logging`). The commands below print to the
+// console they are started from (`logging::attach_parent_console`).
+#![cfg_attr(windows, windows_subsystem = "windows")]
+
 use ferrite_servo::session::HeadlessServoSession;
 use ferrite_servo::shell::ServoShell;
 
@@ -6,8 +11,12 @@ mod logging;
 fn main() {
     // First, before anything can print or panic: a run with no terminal gets
     // a log file (see `logging`).
-    let _log = logging::init();
     let arg = std::env::args().nth(1).unwrap_or_default();
+    #[cfg(windows)]
+    if matches!(arg.as_str(), "jstest" | "agent-smoke" | "smoke") {
+        logging::attach_parent_console();
+    }
+    let _log = logging::init();
     match arg.as_str() {
         "ui" => run_ui(),
         "window" => ServoShell::new().run(),

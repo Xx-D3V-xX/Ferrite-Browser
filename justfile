@@ -122,6 +122,45 @@ run *ARGS:
 build-servo:
     cargo build -p ferrite-shell --features ferrite-servo/servo
 
+# Audio, video and WebRTC need GStreamer (its development files to build, its runtime and
+# plugins to run); docs/COMMANDS.md lists the packages. Not part of any release build.
+# Run the real-Servo browser with audio, video and WebRTC (needs GStreamer).
+run-media *ARGS:
+    cargo run -p ferrite-shell --features ferrite-servo/servo,ferrite-servo/media -- ui {{ARGS}}
+
+# Checks the whole of "a page asks for the camera, microphone or screen": the prompt, the
+# answers, remembered decisions (and that the agent's presence stops them being used),
+# `stop()`, the browser's "stop sharing", and that a page cannot hide a live capture.
+# Uses the engine's test sources for the camera and microphone. Needs GStreamer.
+# Check camera, microphone and screen sharing in the real engine (needs GStreamer).
+probe-capture:
+    cargo run -p ferrite-servo --features servo,media --example capture_probe
+
+# Registers a service worker from loopback and checks its whole life: install, activate,
+# `ready`, `controller`, `postMessage`, `clients`, `fetch` events (answered, passed through,
+# a POST body, the Cache API inside the worker), a remembered registration on the next page,
+# `unregister` and the refusals. Needs the real Servo build.
+# Check service workers in the real engine.
+probe-sw:
+    cargo run -p ferrite-servo --features servo --example sw_probe
+
+# Plays a WebM video and an Ogg file, draws a decoded frame, opens a WebRTC data channel
+# between two peers and checks that camera, microphone and screen capture are refused.
+# Needs the real Servo build with GStreamer.
+# Check audio, video and WebRTC in the real engine (needs GStreamer).
+probe-media:
+    cargo run -p ferrite-servo --features servo,media --example media_probe
+
+# Media Source Extensions in a real headless Servo session: a page builds a stream out of
+# SourceBuffers and it plays, seeks, stalls and ends (56 checks). Needs GStreamer.
+probe-mse:
+    cargo run -p ferrite-servo --features servo,media --example mse_probe
+
+# The same, with the libraries pages use: hls.js, dash.js and Shaka Player play a stream
+# (fetches them with npm and makes the stream with GStreamer; see scripts/mse-libs/run.sh).
+probe-mse-libs *PAGES:
+    scripts/mse-libs/run.sh {{PAGES}}
+
 # Drives a real headless Servo session against a built-in page and checks
 # scrolling, clicking, typing and reload (no network or window needed).
 # Pass a URL to probe another page. Needs the real Servo build.
@@ -135,6 +174,13 @@ probe-input *ARGS:
 # Check that the Web APIs benchmarks and frameworks assume exist in the real engine.
 probe-web-api:
     cargo run -p ferrite-servo --features servo --example web_api_probe
+
+# Checks page storage in the real engine: IndexedDB indexes and cursors, the Cache
+# API (`caches`), localStorage and sessionStorage, served from loopback. Needs the
+# real Servo build.
+# Check IndexedDB, the Cache API and web storage in the real engine.
+probe-storage:
+    cargo run -p ferrite-servo --features servo --example storage_probe
 
 # Runs the real page script in a headless Servo session and drives a form by
 # `@ref`: digest, type, tick, select, click, scroll. Needs the real Servo build.

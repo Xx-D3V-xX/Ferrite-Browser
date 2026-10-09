@@ -34,6 +34,11 @@ const FOLD_CHARS: usize = 320;
 /// A location is shown at most this many characters long (the full text is
 /// what Copy takes).
 const SOURCE_CHARS: usize = 46;
+/// Width of the Network tab's size column.
+const NET_SIZE_W: f32 = 76.0;
+/// Width of the Network tab's duration column.
+const NET_DURATION_W: f32 = 56.0;
+
 /// Shown URL length in a collapsed Network row.
 const URL_CHARS: usize = 140;
 /// The window width below which the header's buttons lose their labels.
@@ -840,7 +845,7 @@ fn network_list<'a>(
     let banner = container(
         row![
             icon(Icon::Info, 13.0, palette.accent_bright),
-            text("Status, size and timing are not reported by the engine yet. Each request is listed as it starts.")
+            text("Each request is listed as it starts. Size and time come from the page's own Resource Timing once it finishes; the status code is not reported by the engine yet.")
                 .size(TEXT_SMALL)
                 .color(palette.text_dim)
                 .wrapping(text::Wrapping::Word),
@@ -876,6 +881,14 @@ fn network_list<'a>(
                 .size(TEXT_CAPTION)
                 .color(palette.text_dim)
                 .width(Length::Fixed(50.0)),
+            text("SIZE")
+                .size(TEXT_CAPTION)
+                .color(palette.text_dim)
+                .width(Length::Fixed(NET_SIZE_W)),
+            text("TIME")
+                .size(TEXT_CAPTION)
+                .color(palette.text_dim)
+                .width(Length::Fixed(NET_DURATION_W)),
             text("URL")
                 .size(TEXT_CAPTION)
                 .color(palette.text_dim)
@@ -982,6 +995,16 @@ fn net_row<'a>(
                 },
                 ..container::Style::default()
             }),
+        text(devtools::net_size(r))
+            .size(TEXT_CAPTION)
+            .font(mono())
+            .color(palette.text_dim)
+            .width(Length::Fixed(NET_SIZE_W)),
+        text(devtools::net_duration(r))
+            .size(TEXT_CAPTION)
+            .font(mono())
+            .color(palette.text_dim)
+            .width(Length::Fixed(NET_DURATION_W)),
         column(url_cell).spacing(1).width(Length::Fill),
     ]
     .spacing(SP_SM)

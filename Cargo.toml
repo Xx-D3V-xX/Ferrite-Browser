@@ -12,6 +12,7 @@ members = [
   "crates/ferrite-eval",
   "crates/ferrite-engine",
   "crates/ferrite-engine-servo",
+  "crates/ferrite-mse",
 ]
 resolver = "2"
 
@@ -170,10 +171,19 @@ panic = "unwind"
 inherits = "release"
 debug = "line-tables-only"
 
-# The engine's script, WebGL and layout crates with Ferrite's fixes
-# (vendor/servo-script, vendor/servo-webgl and vendor/servo-layout, each with a
-# FERRITE-PATCHES.md).
+# The engine's script, script-bindings, WebGL, layout, storage and image-decoding crates with Ferrite's
+# fixes (vendor/servo-script, vendor/servo-script-bindings, vendor/servo-webgl,
+# vendor/servo-layout, vendor/servo-storage and vendor/servo-storage-traits, each with
+# a FERRITE-PATCHES.md).
 [patch.crates-io]
 servo-script = { path = "vendor/servo-script" }
+servo-script-bindings = { path = "vendor/servo-script-bindings" }
 servo-webgl = { path = "vendor/servo-webgl" }
 servo-layout = { path = "vendor/servo-layout" }
+servo-storage = { path = "vendor/servo-storage" }
+servo-storage-traits = { path = "vendor/servo-storage-traits" }
+servo-embedder-traits = { path = "vendor/servo-embedder-traits" }
+servo-media-streams = { path = "vendor/servo-media-streams" }
+servo-media-gstreamer = { path = "vendor/servo-media-gstreamer" }
+servo-media-player = { path = "vendor/servo-media-player" }
+servo-pixels = { path = "vendor/servo-pixels" }

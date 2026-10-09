@@ -197,9 +197,10 @@ async fn every_ending_path_records_its_outcome_and_saves() {
         (
             "dry run failed",
             |s| {
+                let run_id = s.run_id;
                 let _ = update(
                     s,
-                    FerriteBrowserMessage::AgentFailed("dry run failed".into()),
+                    FerriteBrowserMessage::AgentFailed(run_id, "dry run failed".into()),
                 );
             },
             |o| *o == Outcome::Failed("dry run failed".into()),
@@ -207,7 +208,11 @@ async fn every_ending_path_records_its_outcome_and_saves() {
         (
             "completed message",
             |s| {
-                let _ = update(s, FerriteBrowserMessage::AgentCompleted("fine".into()));
+                let run_id = s.run_id;
+                let _ = update(
+                    s,
+                    FerriteBrowserMessage::AgentCompleted(run_id, "fine".into()),
+                );
             },
             |o| *o == Outcome::Answered("fine".into()),
         ),
@@ -280,11 +285,33 @@ fn a_late_ending_after_the_turn_finished_cannot_overwrite_its_outcome() {
         }),
     );
     let _ = update(&mut state, FerriteBrowserMessage::StopAgent);
+    let run_id = state.run_id;
     let _ = update(
         &mut state,
-        FerriteBrowserMessage::AgentFailed("late".into()),
+        FerriteBrowserMessage::AgentFailed(run_id, "late".into()),
     );
     assert_eq!(last_outcome(&state), Outcome::Answered("first".into()));
+}
+
+#[test]
+fn a_message_from_an_earlier_run_does_not_end_the_current_one() {
+    let dir = TempDir::new("stale");
+    let mut state = running_state(&dir, "q");
+    let stale = state.run_id;
+    // A new run starts; the old one's dry run then reports, late.
+    state.run_id += 1;
+    let _ = update(
+        &mut state,
+        FerriteBrowserMessage::AgentFailed(stale, "late failure".into()),
+    );
+    let _ = update(
+        &mut state,
+        FerriteBrowserMessage::AgentCompleted(stale, "late answer".into()),
+    );
+    assert!(
+        state.agent_is_running,
+        "the current run must still be running"
+    );
 }
 
 #[test]
@@ -426,9 +453,10 @@ async fn a_second_message_continues_the_same_chat() {
     };
     let _ = update(&mut state, FerriteBrowserMessage::AgentTaskSubmitted);
     let id = state.chat.id.clone();
+    let run_id = state.run_id;
     let _ = update(
         &mut state,
-        FerriteBrowserMessage::AgentCompleted("one".into()),
+        FerriteBrowserMessage::AgentCompleted(run_id, "one".into()),
     );
     state.agent_task_input = "second".into();
     let _ = update(&mut state, FerriteBrowserMessage::AgentTaskSubmitted);
@@ -1517,9 +1545,10 @@ async fn new_items_start_entrance_animations_that_tick_out_and_switch_the_tick_o
     assert!(state.thread_anims.iter().any(|(k, _)| *k == first_step));
 
     // The answer animates in when the run ends.
+    let run_id = state.run_id;
     let _ = update(
         &mut state,
-        FerriteBrowserMessage::AgentCompleted("done".into()),
+        FerriteBrowserMessage::AgentCompleted(run_id, "done".into()),
     );
     let outcome = ItemKey {
         turn: 0,

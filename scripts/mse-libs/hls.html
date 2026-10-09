@@ -1,0 +1,18 @@
+<!doctype html><meta charset=utf-8><title>hls</title>
+<video id=v muted playsinline width=320 height=240></video>
+<script src="hls.min.js"></script><script src="common.js"></script>
+<script>
+(async function(){ try {
+  var v = document.getElementById('v');
+  ok('hls.js says it is supported', Hls.isSupported());
+  var hls = new Hls();
+  var errors = [];
+  hls.on(Hls.Events.ERROR, function(e, d){ errors.push(d.type + '/' + d.details + (d.fatal ? '!' : '')); log('INFO hls error ' + d.type + ' ' + d.details + ' fatal=' + d.fatal); });
+  var parsed = new Promise(function(r){ hls.on(Hls.Events.MANIFEST_PARSED, function(){ r(true); }); setTimeout(function(){ r(false); }, 15000); });
+  hls.loadSource('master.m3u8'); hls.attachMedia(v);
+  ok('the playlist parses', await parsed);
+  v.play().catch(function(e){ log('INFO play ' + e); });
+  await standardChecks(v, 12);
+  ok('no fatal errors', errors.filter(function(e){ return e.endsWith('!'); }).length === 0, errors);
+ } catch (e) { log('EXCEPTION ' + e + ' ' + (e && e.stack)); } document.title = 'DONE'; })();
+</script>

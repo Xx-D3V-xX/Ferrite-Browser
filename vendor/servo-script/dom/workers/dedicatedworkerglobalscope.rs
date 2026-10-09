@@ -497,6 +497,10 @@ impl DedicatedWorkerGlobalScope {
                 // because it will never outlive it (runtime destruction happens at the end of this function)
                 let mut cx = unsafe { runtime.cx() };
                 let cx = &mut cx;
+                // Ferrite: a worker may block on `Atomics.wait` (the main thread may not,
+                // and does not call this). Without it every `Atomics.wait` in a worker
+                // threw, which is how a wasm-threads program waits for its other threads.
+                unsafe { js::rust::wrappers2::JS_SetFutexCanWait(cx) };
                 let debugger_global = DebuggerGlobalScope::new(
                     pipeline_id,
                     init.to_devtools_sender.clone(),
@@ -1036,7 +1040,7 @@ impl DedicatedWorkerGlobalScope {
         message: HandleValue,
         transfer: CustomAutoRooterGuard<Vec<*mut JSObject>>,
     ) -> ErrorResult {
-        let data = structuredclone::write(cx, message, Some(transfer))?;
+        let data = structuredclone::write_message(cx, message, Some(transfer))?;
         let worker = self.worker.borrow().as_ref().unwrap().clone();
         let global_scope = self.upcast::<GlobalScope>();
         let pipeline_id = global_scope.pipeline_id();
