@@ -178,3 +178,9 @@ directory) when the engine is upgraded to a release that includes the fixes.
    and a lost stream), not before; with the run check in the source, a seek the old
    pipeline still reports cannot replace it (T-339).
 18. `dom/userscripts.rs` + `dom/trustedtypes/trustedscripturl.rs`: **Ferrite's own compat scripts are named `ferrite-user-script`, and a plain string passed to a `TrustedScriptURL` sink by that caller is accepted.** The service-worker support in `sw_compat.js` starts a worker from a blob URL; under a page policy of `require-trusted-types-for 'script'` (Google Meet) that threw `Cannot set value, expected trusted type` (T-348). Page scripts always have a URL as file name, so a page cannot pass as the caller.
+19. `dom/window/windowproxy.rs`, `cross_origin_named_child`: **a cross-origin window gives
+   a child frame by name**, the last step of the spec's cross-origin `[[GetOwnProperty]]`,
+   in `get`, `has` and `getOwnPropertyDescriptor`. Gmail's chat frame (chat.google.com)
+   read a frame of mail.google.com by name and got `SecurityError: Blocked get of property`
+   (T-348). Only a window in this script thread (another origin of the same site) is
+   looked up; a `DissimilarOriginWindow`'s children are known only to the constellation.

@@ -1199,6 +1199,44 @@ unsafe fn GetSubframeWindowProxy(
     None
 }
 
+/// A child frame of a cross-origin window, by its name: the spec's last step of a
+/// cross-origin window's `[[GetOwnProperty]]`, after the cross-origin properties
+/// (<https://html.spec.whatwg.org/multipage/#windowproxy-getownproperty>). Only a
+/// window in this script thread (another origin of the same site) is looked up here;
+/// one in another thread is a `DissimilarOriginWindow`, whose children only the
+/// constellation knows, and stays a SecurityError.
+#[expect(unsafe_code)]
+fn cross_origin_named_child(
+    cx: &mut JSContext,
+    proxy: RawHandleObject,
+    id: RawHandleId,
+) -> Option<DomRoot<WindowProxy>> {
+    use crate::dom::bindings::codegen::Bindings::HTMLIFrameElementBinding::HTMLIFrameElementMethods;
+
+    let id = unsafe { Handle::from_raw(id) };
+    if !id.get().is_string() {
+        return None;
+    }
+    let name = script_bindings::conversions::jsid_to_string(cx, id)?;
+    if name.is_empty() {
+        return None;
+    }
+    let name = DOMString::from(&*name.str());
+    let mut slot = UndefinedValue();
+    unsafe { GetProxyPrivate(*proxy.ptr, &mut slot) };
+    if !slot.is_object() {
+        return None;
+    }
+    rooted!(&in(cx) let target = slot.to_object());
+    let win = root_from_handleobject::<Window>(cx, target.handle()).ok()?;
+    let document = win.Document();
+    let iframes = document.iframes();
+    iframes
+        .iter()
+        .filter_map(|iframe| iframe.GetContentWindow())
+        .find(|child| child.get_name() == name)
+}
+
 // What a script may do with a window of another origin that lives in its own
 // script thread (two origins of one site, e.g. `a.example.com` and
 // `b.example.com`, or two ports of one host). These traps once checked no origin
@@ -1288,6 +1326,17 @@ unsafe extern "C" fn get_own_property_descriptor(
                 return true;
             },
             CrossOriginUse::Denied => {
+                if let Some(child) = cross_origin_named_child(cx, proxy, id) {
+                    rooted!(&in(cx) let mut val = UndefinedValue());
+                    child.to_jsval(cx, val.handle_mut());
+                    set_property_descriptor(
+                        desc,
+                        val.handle(),
+                        JSPROP_READONLY as u32,
+                        unsafe { &mut *is_none },
+                    );
+                    return true;
+                }
                 let mut realm = CurrentRealm::assert(cx);
                 return throw_security_error(&mut realm, "get", Some(id));
             },
@@ -1362,6 +1411,10 @@ unsafe extern "C" fn has(
                 return true;
             },
             CrossOriginUse::Denied => {
+                if cross_origin_named_child(cx, proxy, id).is_some() {
+                    unsafe { *bp = true };
+                    return true;
+                }
                 let mut realm = CurrentRealm::assert(cx);
                 return throw_security_error(&mut realm, "access", Some(id));
             },
@@ -1408,6 +1461,10 @@ unsafe extern "C" fn get(
                 return true;
             },
             CrossOriginUse::Denied => {
+                if let Some(child) = cross_origin_named_child(cx, proxy, id) {
+                    child.to_jsval(cx, vp);
+                    return true;
+                }
                 let mut realm = CurrentRealm::assert(cx);
                 return throw_security_error(&mut realm, "get", Some(id));
             },

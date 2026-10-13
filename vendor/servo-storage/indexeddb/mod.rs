@@ -1609,10 +1609,12 @@ impl IndexedDBManager {
         };
 
         // Step 1: Let db be connection’s database.
-        let db = self
-            .databases
-            .get_mut(&key)
-            .expect("Db should have been opened.");
+        // FERRITE: a missing database is a bug in the queue's bookkeeping; refuse the
+        // upgrade rather than panic the thread every page's IndexedDB runs on.
+        let Some(db) = self.databases.get_mut(&key) else {
+            error!("IndexedDB upgrade of {:?} without an open database", key.name);
+            return debug_assert!(false, "Db should have been opened.");
+        };
 
         // Step 2: Let transaction be a new upgrade transaction with connection used as connection.
         let transaction = self.serial_number_counter;
@@ -2153,10 +2155,16 @@ impl IndexedDBManager {
                 proxy_map: _,
             } = open_request
             {
-                pending_close.remove(&id);
+                // FERRITE: only a connection the request was waiting on can let it go on.
+                // A close from any other connection (a frame removed right after its
+                // `open()`, before that open ran) used to start the upgrade of a request
+                // that was not waiting, whose database did not exist yet, and the panic in
+                // `upgrade_database` took every page's IndexedDB down with this thread.
+                let was_waiting = pending_close.remove(&id);
                 (
                     // Note: need to exclude requests that have already started upgrading.
-                    pending_close.is_empty() &&
+                    was_waiting &&
+                        pending_close.is_empty() &&
                         pending_versionchange.is_empty() &&
                         !pending_upgrade.is_some(),
                     *version,
