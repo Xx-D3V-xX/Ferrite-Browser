@@ -72,7 +72,7 @@ keyring = { version = "3", default-features = false, features = ["apple-native",
 dirs = "5"
 
 # ── ferrite-ipi ──────────────────────────────────────────────────────────
-ammonia = "3"
+ammonia = "4"
 regex = "1"
 aes-gcm = "0.10"
 rand = "0.8"
