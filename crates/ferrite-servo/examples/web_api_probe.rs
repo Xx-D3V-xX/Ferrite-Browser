@@ -317,6 +317,27 @@ const ASYNC: &[(&str, &str)] = &[
         "Promise.all([PublicKeyCredential.getClientCapabilities(),PublicKeyCredential.isUserVerifyingPlatformAuthenticatorAvailable()])\
          .then(function(r){if(r[0].passkeyPlatformAuthenticator!==false||r[1]!==false)throw new Error(JSON.stringify(r))})",
     ),
+    // Google Meet's policy (`require-trusted-types-for 'script'`) refused the worker
+    // Ferrite's own service-worker support starts from a blob URL (T-348).
+    (
+        "a service worker registers under a Trusted Types policy",
+        "new Promise(function(res,rej){var f=document.createElement('iframe');f.src='http://127.0.0.1:'+window.__otherPort+'/tt';\
+         var t=setTimeout(function(){rej(new Error('no answer'))},8000);\
+         window.addEventListener('message',function m(e){if(String(e.data).indexOf('tt:')!==0)return;\
+         clearTimeout(t);window.removeEventListener('message',m);f.remove();\
+         if(e.data==='tt:ok')res();else rej(new Error(e.data))});document.body.appendChild(f)})",
+    ),
+    // A frame of another origin reads a sibling frame by its name through the parent, as
+    // chat.google.com does inside mail.google.com (T-348); any other name stays refused.
+    (
+        "a cross-origin frame finds a child frame by name",
+        "new Promise(function(res,rej){var k=document.createElement('iframe');k.name='kidframe';document.body.appendChild(k);\
+         var f=document.createElement('iframe');f.src='http://127.0.0.1:'+window.__otherPort+'/named';\
+         var t=setTimeout(function(){rej(new Error('no answer'))},8000);\
+         window.addEventListener('message',function m(e){if(String(e.data).indexOf('named:')!==0)return;\
+         clearTimeout(t);window.removeEventListener('message',m);f.remove();k.remove();\
+         if(e.data==='named:ok')res();else rej(new Error(e.data))});document.body.appendChild(f)})",
+    ),
     (
         "setTimeout/Promise ordering",
         "new Promise(function(res){var o=[];setTimeout(function(){o.push('t');if(o.join('')==='mt')res();else throw new Error(o.join(''))},0);Promise.resolve().then(function(){o.push('m')})})",
@@ -369,8 +390,33 @@ fn serve(listener: TcpListener, page: String) {
         let mut buf = [0u8; 2048];
         let n = stream.read(&mut buf).unwrap_or(0);
         let request = String::from_utf8_lossy(&buf[..n]);
+        let mut extra = "";
         let (ctype, body) = if request.starts_with("GET /ping") {
             ("text/plain", "pong".to_string())
+        } else if request.starts_with("GET /tt") {
+            extra = "Content-Security-Policy: require-trusted-types-for 'script'; trusted-types goog#html\r\n";
+            (
+                "text/html; charset=utf-8",
+                "<!doctype html><title>tt</title><script>navigator.serviceWorker.register('/sw-tt.js',{scope:'/tt-scope/'})\
+                 .then(function(){parent.postMessage('tt:ok','*')},function(e){parent.postMessage('tt:'+e.name+': '+e.message,'*')})\
+                 </script>"
+                    .to_string(),
+            )
+        } else if request.starts_with("GET /sw-tt.js") {
+            (
+                "text/javascript",
+                "self.addEventListener('install',function(){self.skipWaiting()});".to_string(),
+            )
+        } else if request.starts_with("GET /named") {
+            (
+                "text/html; charset=utf-8",
+                "<!doctype html><title>named</title><script>var r;\
+                 try{var w=parent.kidframe;var same=false;for(var i=0;i<parent.length;i++)if(parent.frames[i]===w)same=true;\
+                 r=(w&&same&&('kidframe' in parent))?'ok':'got '+w}catch(e){r='threw '+e}\
+                 try{parent.notAFrame;r+=' / an unknown name did not throw'}catch(e){if(e.name!=='SecurityError')r+=' / '+e}\
+                 parent.postMessage('named:'+r,'*')</script>"
+                    .to_string(),
+            )
         } else if request.starts_with("GET /frame") {
             // A frame page reporting what its own window has, as Google Tag Manager's
             // `sw_iframe.html` on airbnb.com reads `navigator.serviceWorker` inline.
@@ -386,7 +432,7 @@ fn serve(listener: TcpListener, page: String) {
         };
         let _ = write!(
             stream,
-            "HTTP/1.1 200 OK\r\nContent-Type: {ctype}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+            "HTTP/1.1 200 OK\r\nContent-Type: {ctype}\r\n{extra}Content-Length: {}\r\nConnection: close\r\n\r\n{body}",
             body.len()
         );
     }

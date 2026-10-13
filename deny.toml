@@ -115,7 +115,6 @@ skip = [
   { name = "redox_syscall" },
   { name = "rustc-hash" },
   { name = "rustix" },
-  { name = "siphasher" },
   { name = "smithay-client-toolkit" },
   { name = "syn" },
   # Added at the Servo 0.6.0 bump (ADR-013): zerofrom-derive (icu) and servo's

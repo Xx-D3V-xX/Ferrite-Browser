@@ -24,3 +24,10 @@ enforces unique indexes.
    *name* unique across the whole database, so two object stores could not each have
    an index called `by_date` (the second `createIndex` failed). It is unique per object
    store now. A database created before this change keeps the old table.
+3. `indexeddb/mod.rs`, `close_database` and `upgrade_database`: **a closed connection lets an
+   open request go on only if that request was waiting for it.** The close of any other
+   connection (a frame removed right after its `open()`) started the upgrade of a request
+   whose database was never opened, and the `expect("Db should have been opened.")` in
+   `upgrade_database` panicked the IndexedDB thread, which every page's IndexedDB shares.
+   That `expect` is now a logged refusal. Found by `web_api_probe`'s
+   "about:blank iframe indexedDB" check, which printed the panic on every run.

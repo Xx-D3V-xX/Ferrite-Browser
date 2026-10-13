@@ -48,6 +48,13 @@ impl TrustedScriptURL {
         sink: &str,
     ) -> Fallible<DOMString> {
         match value {
+            // Ferrite: a worker the browser itself starts for the page (a service worker,
+            // whose address the page already gave to `register()`) is not the page's sink.
+            TrustedScriptURLOrUSVString::USVString(value)
+                if crate::dom::userscripts::caller_is_user_script(cx) =>
+            {
+                Ok(value.as_ref().into())
+            },
             TrustedScriptURLOrUSVString::USVString(value) => {
                 TrustedTypePolicyFactory::get_trusted_type_compliant_string(
                     cx,
