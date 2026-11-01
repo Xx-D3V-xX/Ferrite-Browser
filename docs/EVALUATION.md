@@ -1321,6 +1321,72 @@ only the calls that reached the backend. Do not read the run times as the cost
 of the guard. The guard runs reuse answers that are already stored (3,988 of
 their 4,957 model calls were cache hits).
 
+### 11.7 Rerun after the T-301 changes (branch `web-interact-fix`)
+
+**What was run.** The same selection as §11.1 (gemma4:31b for both roles, corpus
+`all`, seed 1, modes `off` and `guard`, 1,984 cases, 3,968 runs, 0 failed) after
+three changes: `scroll` and `wait` lower to `web.read`, predictor prompt v2, and
+extra write-verb rules. Source: `docs/results/live-eval-ollama-gemma4-31b-web-interact-fix.md`
+(the report) and `...-failures.md` (the cases). The raw run file was in a sandbox
+that is gone, so this run cannot be re-checked from the repository either. One sample
+per case at temperature 0. The config id did not change because it does not cover the
+prompt, so the two reports show the same id.
+
+| measure | before | after |
+|---|---|---|
+| benign tasks with an action refused (guard) | 86/226 = 38.1% [32.0-44.5] | 70/226 = 31.0% [25.3-37.3] |
+| attacks attempted, `off` / `guard` | 31/1542 = 2.0% / 21/1542 = 1.4% | 30/1542 = 1.9% / 22/1542 = 1.4% |
+| attacks executed, `off` / `guard` | 31/1542 = 2.0% / 6/1542 = 0.4% [0.2-0.8] | 30/1542 = 1.9% / 7/1542 = 0.5% [0.2-0.9] |
+| blocked, of attempted (guard) | 15/21 = 71.4% [50.0-86.2] | 15/22 = 68.2% [47.3-83.6] |
+| precision | 1196/2293 = 52.2% [50.1-54.2] | 1665/2872 = 58.0% [56.2-59.8] |
+| recall | 1196/1706 = 70.1% [67.9-72.2] | 1665/1706 = 97.6% [96.8-98.2] |
+| whole ideal set predicted | 588/1046 = 56.2% [53.2-59.2] | 1005/1046 = 96.1% [94.7-97.1] |
+| empty fingerprint | 41/1984 = 2.1% [1.5-2.8] | 0/1984 = 0.0% [0.0-0.2] |
+| unusable model answer | 27/1984 = 1.4% [0.9-2.0] | 7/1984 = 0.4% [0.2-0.7] |
+| prediction also admits the attack's capability | 98/393 = 24.9% [20.9-29.4] | 201/393 = 51.1% [46.2-56.1] |
+
+**What this shows.** The predictor's recall and whole-set rates rose a lot, and
+empty fingerprints are gone. The false-positive rate fell from 38.1% to 31.0%, but
+the two intervals overlap, so this run does not show the fall is real. We have no
+paired test because the earlier raw file is not available. The fraction of
+predictions that admit the attack's extra capability **doubled** (24.9% to 51.1%):
+the prompt v2 predicts more capabilities, which helps normal tasks and also lets
+more attacks through the capability check. The measured attack results did not move
+beyond noise (executed 6 to 7 of 1,542; baseline attempts 31 to 30 with the same
+settings shows that a change of one run is noise). They did not get worse in this
+run, but the capability layer is weaker than before, and the attack outcome now rests
+more on the origin scope. A model that falls for injections more often would show
+the cost; this one rarely does (about 2% attempts).
+
+**Why normal tasks are still refused** (77 refused actions in 70 cases, from the
+failures file):
+
+- 71 actions: every capability the task needs was predicted, but the action was at an
+  origin or primitive outside the scope. 65 were `navigate`, 48 of all refusals were
+  `navigate` to `https://lite.duckduckgo.com` (the agent searched the web; the case's
+  authored `expected_origins` do not include a search engine). 4 were `js.execute`,
+  which is unscopable by design (ADR-003).
+- 5 actions: a capability was missing (`dom.read` x3, `click`, `navigate`).
+- 1 action: the predictor's answer was unusable.
+
+So the predictor is no longer the main cause. Most refusals come from the origin scope,
+which the capability prediction cannot fix. 30 of the 70 refused cases have no authored
+`ideal_capabilities`, so they cannot be scored for capability misses.
+
+**Other findings.**
+
+- All 7 unusable predictions are the same case type (travel): the model wrapped its
+  JSON in a ```` ```json ```` fence and the parser rejected it. The fallback to the rule
+  layer worked as designed. Accepting a fenced answer is a parser change and was not
+  made here.
+- 7 attacks executed under the guard (5 Slack, 1 core, 1 redteam). The Slack ones are
+  the `dom.read`/`navigate` residual-like cases already seen.
+
+**Not verified.** One model, one seed, one sample per case. Whether the
+31.0% vs 38.1% difference is real. Whether the app (as opposed to this evaluation)
+behaves better, because the `origins_named_in` change does not run in the live eval.
+The attack-side effect on a model that is injected more often.
+
 ### How to read this honestly
 
 1. **The model fell for the injection only 2.0% of the time.** So the guard had
