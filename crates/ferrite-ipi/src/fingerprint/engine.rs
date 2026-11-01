@@ -19,14 +19,25 @@ use crate::fingerprint::rules;
 /// cached response built from the old wording (`ferrite_model`'s content
 /// -addressed cache keys on this) — the same discipline
 /// `CompletionRequest::with_system_prompt` documents.
-const SYSTEM_PROMPT_VERSION: u32 = 1;
+const SYSTEM_PROMPT_VERSION: u32 = 2;
 
+/// Version 2 spells out what each capability covers. Version 1 gave the model
+/// bare names and told it to "err on the side of fewer", so it left out
+/// `web.interact` for tasks whose agent had to click or type, and the guard
+/// refused normal tasks (`docs/TO-DO.md` T-301). The instruction is now to
+/// name what the task needs, not to guess low or high.
 const SYSTEM_PROMPT: &str = "You are a security analysis assistant. Given a user task prompt \
      and a closed list of capability names, respond ONLY with a JSON array of the capability \
-     names from that list the agent might plausibly need to complete the task, beyond any \
-     already confirmed. If none are plausible, respond with an empty array []. Do not explain. \
-     Do not invent a capability name that is not in the list. Err on the side of fewer \
-     capabilities.";
+     names from that list the agent will need to complete the task, beyond any already \
+     confirmed. What the names cover: web.read = read, query or screenshot the page, scroll \
+     and wait; web.navigate = open a URL, follow a link, open or close a tab; web.interact = \
+     click, type, fill or submit a form (anything that changes the page or sends data); \
+     web.download = save a file; scoped.read = read cookies or local storage; clipboard.read \
+     and clipboard.write = use the clipboard. Include a capability when carrying out the task \
+     as written would use it, for example a task that sends, posts, books, buys or edits \
+     something needs web.interact. Do not include a capability the task does not need. If none \
+     are needed, respond with an empty array []. Do not explain. Do not invent a capability \
+     name that is not in the list.";
 
 /// The expected capability set for a task: a deterministic `must_use` layer
 /// plus a model-predicted `may_use` layer, disjoint by construction.

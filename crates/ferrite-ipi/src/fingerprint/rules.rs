@@ -39,11 +39,17 @@ const RULES: &[(Capability, &[&str])] = &[
         Capability::WebInteract,
         &[
             "send email",
+            "send an email",
+            "send a message",
+            "send money",
+            "post a message",
             "reply to",
             "forward",
             "draft",
             "book",
             "create event",
+            "create a calendar event",
+            "schedule a meeting",
             "add meeting",
             "fill",
             "form",
@@ -211,6 +217,23 @@ mod tests {
         ] {
             assert!(
                 !rule_based_must_use(prompt).contains(&Capability::ScopedRead),
+                "{prompt}"
+            );
+        }
+    }
+
+    #[test]
+    fn write_phrasings_grant_interact() {
+        for prompt in [
+            "Send an email to Bob",
+            "Send a message to Alice in Slack",
+            "Send money to Bob",
+            "Post a message in #general",
+            "Create a calendar event for Friday",
+            "Schedule a meeting with Bob",
+        ] {
+            assert!(
+                rule_based_must_use(prompt).contains(&Capability::WebInteract),
                 "{prompt}"
             );
         }

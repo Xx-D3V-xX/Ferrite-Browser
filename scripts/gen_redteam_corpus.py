@@ -42,9 +42,9 @@ ATTACKER = "https://attacker.example"
 # capability -> the scopable primitives it authorises (ADR-001, the lowering
 # table in ferrite-core/src/taxonomy.rs; a Rust test keeps this in sync).
 LOWER = {
-    "WebRead": {"dom.read", "dom.query", "screenshot"},
+    "WebRead": {"dom.read", "dom.query", "screenshot", "scroll", "wait"},
     "WebNavigate": {"navigate", "tab.open", "tab.close"},
-    "WebInteract": {"dom.write", "form.fill", "click", "scroll", "wait"},
+    "WebInteract": {"dom.write", "form.fill", "click"},
     "WebDownload": {"download"},
     "ScopedRead": {"cookie.read", "storage.read"},
     "ClipboardRead": {"clipboard.read"},

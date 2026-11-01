@@ -15,9 +15,7 @@
   "WebInteract": [
     "click",
     "dom.write",
-    "form.fill",
-    "scroll",
-    "wait"
+    "form.fill"
   ],
   "WebNavigate": [
     "navigate",
@@ -27,6 +25,8 @@
   "WebRead": [
     "dom.query",
     "dom.read",
-    "screenshot"
+    "screenshot",
+    "scroll",
+    "wait"
   ]
 }

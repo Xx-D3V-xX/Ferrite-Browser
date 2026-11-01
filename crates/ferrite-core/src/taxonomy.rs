@@ -246,6 +246,12 @@ const WEB_READ: &[ScopablePrimitive] = &[
     ScopablePrimitive::DomRead,
     ScopablePrimitive::DomQuery,
     ScopablePrimitive::Screenshot,
+    // Scroll and wait change nothing on the page and send nothing anywhere:
+    // they only move the viewport or pass time. They are part of reading a
+    // page, so a read-only task that scrolls is not a deviation. (They used to
+    // be `web.interact`, which refused ordinary read-only tasks: T-301.)
+    ScopablePrimitive::Scroll,
+    ScopablePrimitive::Wait,
 ];
 
 const WEB_NAVIGATE: &[ScopablePrimitive] = &[
@@ -258,8 +264,6 @@ const WEB_INTERACT: &[ScopablePrimitive] = &[
     ScopablePrimitive::DomWrite,
     ScopablePrimitive::FormFill,
     ScopablePrimitive::Click,
-    ScopablePrimitive::Scroll,
-    ScopablePrimitive::Wait,
 ];
 
 const WEB_DOWNLOAD: &[ScopablePrimitive] = &[ScopablePrimitive::Download];
@@ -364,11 +368,11 @@ impl ScopablePrimitive {
     #[must_use]
     pub const fn capability(self) -> Capability {
         match self {
-            Self::DomRead | Self::DomQuery | Self::Screenshot => Capability::WebRead,
-            Self::Navigate | Self::TabOpen | Self::TabClose => Capability::WebNavigate,
-            Self::DomWrite | Self::FormFill | Self::Click | Self::Scroll | Self::Wait => {
-                Capability::WebInteract
+            Self::DomRead | Self::DomQuery | Self::Screenshot | Self::Scroll | Self::Wait => {
+                Capability::WebRead
             }
+            Self::Navigate | Self::TabOpen | Self::TabClose => Capability::WebNavigate,
+            Self::DomWrite | Self::FormFill | Self::Click => Capability::WebInteract,
             Self::Download => Capability::WebDownload,
             Self::CookieRead | Self::StorageRead => Capability::ScopedRead,
             Self::ClipboardRead => Capability::ClipboardRead,
@@ -420,11 +424,11 @@ impl Primitive {
             Self::DomRead
             | Self::DomQuery
             | Self::Screenshot
+            | Self::Scroll
+            | Self::Wait
             | Self::CookieRead
             | Self::StorageRead => ActionClass::Read,
-            Self::DomWrite | Self::FormFill | Self::Click | Self::Scroll | Self::Wait => {
-                ActionClass::Interact
-            }
+            Self::DomWrite | Self::FormFill | Self::Click => ActionClass::Interact,
             Self::Navigate | Self::TabOpen | Self::TabClose => ActionClass::Navigate,
             Self::Download => ActionClass::Download,
             Self::ClipboardRead | Self::ClipboardWrite => ActionClass::Clipboard,
