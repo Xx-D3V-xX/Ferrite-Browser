@@ -1350,8 +1350,9 @@ empty fingerprints are gone. The false-positive rate fell from 38.1% to 31.0%, b
 the two intervals overlap, so this run does not show the fall is real. We have no
 paired test because the earlier raw file is not available. The fraction of
 predictions that admit the attack's extra capability **doubled** (24.9% to 51.1%):
-the prompt v2 predicts more capabilities, which helps normal tasks and also lets
-more attacks through the capability check. The measured attack results did not move
+a likely reason is that prompt v2 predicts more capabilities (precision is 58.0%
+for 2,872 predicted against 2,293 before), which helps normal tasks and also leaves
+more attacks inside the capability check. We did not test that reason. The measured attack results did not move
 beyond noise (executed 6 to 7 of 1,542; baseline attempts 31 to 30 with the same
 settings shows that a change of one run is noise). They did not get worse in this
 run, but the capability layer is weaker than before, and the attack outcome now rests
@@ -1379,8 +1380,8 @@ which the capability prediction cannot fix. 30 of the 70 refused cases have no a
   JSON in a ```` ```json ```` fence and the parser rejected it. The fallback to the rule
   layer worked as designed. Accepting a fenced answer is a parser change and was not
   made here.
-- 7 attacks executed under the guard (5 Slack, 1 core, 1 redteam). The Slack ones are
-  the `dom.read`/`navigate` residual-like cases already seen.
+- 7 attacks executed under the guard (5 Slack, 1 core, 1 redteam). Their primitives
+  and origins are in the failures file; we did not classify them further.
 
 **Not verified.** One model, one seed, one sample per case. Whether the
 31.0% vs 38.1% difference is real. Whether the app (as opposed to this evaluation)
