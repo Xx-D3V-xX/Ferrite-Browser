@@ -27,6 +27,7 @@ use ferrite_model::{EnvSource, SecretStore};
 
 use super::config::{Command, LiveArgs, ModelTags, ProviderKind, HELP};
 use super::corpus::{self, Window};
+use super::failures::generate_failures;
 use super::plan;
 use super::provider::connect;
 use super::record::Redactor;
@@ -102,10 +103,20 @@ fn report(args: &LiveArgs, out: &mut dyn Write) -> i32 {
         say(out, &report.markdown);
         return EXIT_OK;
     }
+    let failures = generate_failures(
+        &results,
+        &ReportOptions {
+            compare: args.compare.clone(),
+        },
+    );
     let md = args.out_dir.join("REPORT.md");
     let csv = args.out_dir.join("report.csv");
-    if let Err(e) =
-        std::fs::write(&md, &report.markdown).and_then(|()| std::fs::write(&csv, &report.csv))
+    let fail_md = args.out_dir.join("FAILURES.md");
+    let fail_csv = args.out_dir.join("failures.csv");
+    if let Err(e) = std::fs::write(&md, &report.markdown)
+        .and_then(|()| std::fs::write(&csv, &report.csv))
+        .and_then(|()| std::fs::write(&fail_md, &failures.markdown))
+        .and_then(|()| std::fs::write(&fail_csv, &failures.csv))
     {
         say(out, &format!("cannot write the report: {e}"));
         return EXIT_INTERNAL;
@@ -113,11 +124,14 @@ fn report(args: &LiveArgs, out: &mut dyn Write) -> i32 {
     say(
         out,
         &format!(
-            "report over {} run group(s), {} stored result(s):\n  {}\n  {}",
+            "report over {} run group(s), {} stored result(s):\n  {}\n  {}\n  {} ({} failing case row(s))\n  {}",
             report.groups,
             results.by_key.len(),
             md.display(),
-            csv.display()
+            csv.display(),
+            fail_md.display(),
+            failures.rows,
+            fail_csv.display()
         ),
     );
     if results.unreadable_lines > 0 {
@@ -582,6 +596,7 @@ mod tests {
         let md = std::fs::read_to_string(out.join("REPORT.md")).unwrap();
         assert!(md.contains("MOCK PROVIDER"));
         assert!(md.contains("agentdojo/slack"));
+        assert!(out.join("FAILURES.md").is_file() && out.join("failures.csv").is_file());
         let csv = std::fs::read_to_string(out.join("report.csv")).unwrap();
         assert!(csv.starts_with("group,section,mode,key,metric,k,n,rate,ci_low,ci_high,note"));
     }

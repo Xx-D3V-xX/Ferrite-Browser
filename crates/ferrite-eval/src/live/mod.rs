@@ -30,6 +30,7 @@
 //! | [`record`], [`store`] | the JSONL result line, redaction, resume |
 //! | [`plan`] | `--plan`: calls and tokens a selection would cost, without calling |
 //! | [`report`] | Markdown and CSV with Wilson intervals, paired tests and breakdowns |
+//! | [`failures`] | `FAILURES.md` / `failures.csv`: the individual cases behind the report's counts |
 //! | [`mock_model`] | the `mock` provider: the whole pipeline with no network |
 //!
 //! # What is and is not tested without a key
@@ -43,6 +44,7 @@ pub mod agent;
 pub mod cli;
 pub mod config;
 pub mod corpus;
+pub mod failures;
 pub mod mock_model;
 pub mod outcome;
 pub mod plan;

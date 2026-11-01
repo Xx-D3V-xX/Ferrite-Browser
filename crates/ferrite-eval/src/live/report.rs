@@ -51,7 +51,7 @@ pub const TOO_FEW: usize = 20;
 pub const INDICATIVE: usize = 50;
 
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
-struct GroupKey {
+pub(super) struct GroupKey {
     provider: String,
     small: String,
     main: String,
@@ -61,7 +61,7 @@ struct GroupKey {
 }
 
 impl GroupKey {
-    fn of(r: &LiveRecord) -> Self {
+    pub(super) fn of(r: &LiveRecord) -> Self {
         Self {
             provider: r.provider.clone(),
             small: r.small_model.clone(),
@@ -72,7 +72,7 @@ impl GroupKey {
         }
     }
 
-    fn label(&self) -> String {
+    pub(super) fn label(&self) -> String {
         format!(
             "{} / main {} / small {} / agent {} / predictor {} / config {}",
             self.provider, self.main, self.small, self.agent, self.predictor, self.config_hash
@@ -80,7 +80,7 @@ impl GroupKey {
     }
 }
 
-fn matches(key: &GroupKey, compare: &[(String, String)]) -> bool {
+pub(super) fn matches(key: &GroupKey, compare: &[(String, String)]) -> bool {
     compare.is_empty()
         || compare
             .iter()
@@ -229,7 +229,7 @@ fn count(records: &[&LiveRecord], f: impl Fn(&LiveRecord) -> bool) -> usize {
     records.iter().filter(|r| f(r)).count()
 }
 
-fn modes_present(records: &[&LiveRecord]) -> Vec<LiveMode> {
+pub(super) fn modes_present(records: &[&LiveRecord]) -> Vec<LiveMode> {
     LiveMode::ALL
         .into_iter()
         .filter(|m| records.iter().any(|r| r.mode == *m))
