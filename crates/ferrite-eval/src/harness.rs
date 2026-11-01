@@ -250,11 +250,12 @@ pub fn expected_fingerprint_for(
     case: &CaseDefinition,
     fp: &ferrite_ipi::fingerprint::Fingerprint,
 ) -> ExpectedFingerprint {
-    let capabilities = fp
-        .must_use()
-        .iter()
-        .chain(fp.may_use())
-        .map(|c| ExpectedCapability::new(*c, case.expected_origins.clone()));
+    let capabilities = fp.must_use().iter().chain(fp.may_use()).map(|c| {
+        ExpectedCapability::new(
+            *c,
+            ferrite_ipi::comparator::widen_for_task(*c, &case.expected_origins, &case.user_task),
+        )
+    });
     ExpectedFingerprint::from_capabilities(
         ExpectedCapabilitySet::new(capabilities).unwrap_or_else(|_| ExpectedCapabilitySet::empty()),
     )
@@ -434,6 +435,20 @@ pub async fn run_case<R: DryRunDriver>(
 
 #[cfg(test)]
 mod tests {
+    /// The engine the agent is told to search with must be the one the scope admits,
+    /// or a search is refused again (T-301).
+    #[test]
+    fn the_agent_is_told_to_search_with_an_engine_the_scope_admits() {
+        for engine in ferrite_ipi::comparator::SEARCH_ENGINE_ORIGINS {
+            let host = engine.trim_start_matches("https://");
+            assert!(
+                ferrite_agent::browser_loop::SYSTEM_PROMPT.contains(host),
+                "{host} is not named in the agent's system prompt"
+            );
+        }
+        assert!(ferrite_agent::browser_loop::SYSTEM_PROMPT.contains("lite.duckduckgo.com"));
+    }
+
     use super::*;
 
     // ── R7: try_real_provider never reached from this crate's own tests ────

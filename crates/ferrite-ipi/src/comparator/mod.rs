@@ -218,7 +218,7 @@ mod guard;
 
 pub use consent::ConsentDecision;
 pub use diff::{Attribution, FingerprintDiff};
-pub use expected::ExpectedFingerprint;
+pub use expected::{widen_for_task, ExpectedFingerprint, SEARCH_ENGINE_ORIGINS};
 pub use guard::{GuardVerdict, RuntimeGuard};
 
 use ferrite_core::scope::Specificity;

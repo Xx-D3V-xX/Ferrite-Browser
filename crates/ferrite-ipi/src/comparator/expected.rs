@@ -142,11 +142,12 @@ impl ExpectedFingerprint {
             }
         };
 
-        let entries = fp
-            .must_use()
-            .iter()
-            .chain(fp.may_use())
-            .map(|capability| ExpectedCapability::new(*capability, scope_for_each()));
+        let entries = fp.must_use().iter().chain(fp.may_use()).map(|capability| {
+            ExpectedCapability::new(
+                *capability,
+                widen_for_task(*capability, &scope_for_each(), prompt),
+            )
+        });
 
         // must_use/may_use are disjoint by construction (`Fingerprint::new`),
         // so this can never actually hit the duplicate-capability error —
@@ -180,7 +181,14 @@ impl ExpectedFingerprint {
 /// letters) and the name must have at least one dot.
 #[must_use]
 pub fn origins_named_in(prompt: &str) -> Vec<Origin> {
-    let mut found: Vec<Origin> = Vec::new();
+    named_hosts(prompt).into_iter().map(|(o, _)| o).collect()
+}
+
+/// [`origins_named_in`] with, for each origin, whether the user wrote it without a
+/// scheme (`www.example.org`). A bare name does not say `https`, so
+/// [`widen_for_task`] also admits its `http` form.
+fn named_hosts(prompt: &str) -> Vec<(Origin, bool)> {
+    let mut found: Vec<(Origin, bool)> = Vec::new();
     let tokens = prompt.split(|c: char| {
         c.is_whitespace()
             || matches!(
@@ -191,7 +199,8 @@ pub fn origins_named_in(prompt: &str) -> Vec<Origin> {
     for raw in tokens {
         let token = raw.trim_end_matches(['.', '!', '?', ':']);
         let lower = token.to_ascii_lowercase();
-        let candidate = if lower.starts_with("https://") || lower.starts_with("http://") {
+        let bare = !(lower.starts_with("https://") || lower.starts_with("http://"));
+        let candidate = if !bare {
             token.to_string()
         } else {
             let host = lower.split(['/', '?', '#']).next().unwrap_or("");
@@ -215,12 +224,66 @@ pub fn origins_named_in(prompt: &str) -> Vec<Origin> {
             format!("https://{token}")
         };
         if let Ok(origin) = Origin::parse(&candidate) {
-            if !found.contains(&origin) {
-                found.push(origin);
+            if !found.iter().any(|(o, _)| *o == origin) {
+                found.push((origin, bare));
             }
         }
     }
     found
+}
+
+/// Search engines the browser's agent is told to use for a web search (its system
+/// prompt names `lite.duckduckgo.com`; a test in `ferrite-eval` keeps the two in
+/// step). A search is ordinary browsing, so a task that looks something up must not
+/// be refused for opening the engine.
+pub const SEARCH_ENGINE_ORIGINS: &[&str] = &["https://lite.duckduckgo.com"];
+
+/// The scope `capability` gets for a task, from the `base` scope that the context
+/// URL (or an authored list) gives it. Two widenings, both for an `Exact` scope only:
+///
+/// - **Search engines** ([`SEARCH_ENGINE_ORIGINS`]) are added to `web.navigate` and
+///   `web.read` only. Nothing else is admitted there: no `web.interact`, no
+///   `web.download`, no clipboard, no `js.execute`. Admitting the engine does not
+///   admit the sites it lists: a result link to another origin is still outside the
+///   scope and is refused, so text from a result page cannot send the agent anywhere
+///   (the search page is untrusted data, as every page is). The one thing a search
+///   origin cannot be stopped from receiving is the query string of an allowed visit.
+/// - **`http` form of a site the user named without a scheme.** "Visit
+///   www.example.org" does not say `https`, and a task whose site is `https://...`
+///   must not be refused for the same host over `http`. Only a name the user typed in
+///   the task prompt gets this, never a name from a page, and only for an origin
+///   already in `base`.
+///
+/// A `DomainSuffix` or `TaskOpen` scope is returned unchanged. The result is never
+/// narrower than `base`.
+#[must_use]
+pub fn widen_for_task(capability: Capability, base: &OriginScope, prompt: &str) -> OriginScope {
+    let OriginScope::Exact(origins) = base else {
+        return base.clone();
+    };
+    let mut widened = origins.clone();
+    let mut add = |origin: Origin| {
+        if !widened.contains(&origin) {
+            widened.push(origin);
+        }
+    };
+    for (named, bare) in named_hosts(prompt) {
+        if bare && origins.contains(&named) {
+            if let Some(rest) = named.as_str().strip_prefix("https://") {
+                if let Ok(http) = Origin::parse(format!("http://{rest}")) {
+                    add(http);
+                }
+            }
+        }
+    }
+    if matches!(capability, Capability::WebNavigate | Capability::WebRead) {
+        for engine in SEARCH_ENGINE_ORIGINS {
+            if let Ok(origin) = Origin::parse(*engine) {
+                add(origin);
+            }
+        }
+    }
+    OriginScope::exact(widened).unwrap_or_else(|_| base.clone())
 }
 
 /// File extensions that look like a top-level domain but are, in a task prompt,
@@ -372,6 +435,100 @@ mod tests {
             assert!(scope
                 .admits(&Origin::parse("https://evil.example").unwrap())
                 .is_none());
+        }
+    }
+
+    fn exact(origins: &[&str]) -> OriginScope {
+        OriginScope::exact(origins.iter().map(|o| origin(o))).unwrap()
+    }
+
+    #[test]
+    fn a_search_engine_is_admitted_for_reading_and_navigating_only() {
+        let base = exact(&["https://travel.example"]);
+        let engine = origin("https://lite.duckduckgo.com");
+        for cap in [Capability::WebNavigate, Capability::WebRead] {
+            let scope = widen_for_task(cap, &base, "find a hotel");
+            assert!(scope.admits(&engine).is_some(), "{cap:?}");
+            assert!(scope.admits(&origin("https://travel.example")).is_some());
+        }
+        for cap in [
+            Capability::WebInteract,
+            Capability::WebDownload,
+            Capability::ScopedRead,
+            Capability::ClipboardRead,
+            Capability::ClipboardWrite,
+        ] {
+            let scope = widen_for_task(cap, &base, "find a hotel");
+            assert_eq!(scope, base, "{cap:?} must not gain the search engine");
+        }
+    }
+
+    #[test]
+    fn admitting_the_engine_does_not_admit_what_the_results_link_to() {
+        let base = exact(&["https://travel.example"]);
+        let scope = widen_for_task(Capability::WebNavigate, &base, "find a hotel");
+        for result in ["https://attacker.example", "https://www.tripadvisor.com"] {
+            assert_eq!(scope.admits(&origin(result)), None, "{result}");
+        }
+    }
+
+    #[test]
+    fn the_http_form_is_admitted_only_for_a_site_the_user_named_without_a_scheme() {
+        let base = exact(&["https://www.dora-website.com", "https://slack.example"]);
+        let scope = widen_for_task(
+            Capability::WebInteract,
+            &base,
+            "Invite Dora. Her email is on www.dora-website.com",
+        );
+        assert!(scope
+            .admits(&origin("http://www.dora-website.com"))
+            .is_some());
+        // slack.example is in the scope but the user did not name it.
+        assert_eq!(scope.admits(&origin("http://slack.example")), None);
+        // A name with an explicit scheme is taken as written.
+        let explicit = widen_for_task(
+            Capability::WebInteract,
+            &base,
+            "Open https://www.dora-website.com",
+        );
+        assert_eq!(
+            explicit.admits(&origin("http://www.dora-website.com")),
+            None
+        );
+        // A named site that is not in the scope is not added.
+        let other = widen_for_task(Capability::WebInteract, &base, "see evil.example");
+        assert_eq!(other.admits(&origin("http://evil.example")), None);
+    }
+
+    #[test]
+    fn other_scope_kinds_are_returned_unchanged() {
+        let suffix =
+            OriginScope::domain_suffix([
+                ferrite_core::scope::DomainSuffix::parse("example.com").unwrap()
+            ])
+            .unwrap();
+        assert_eq!(widen_for_task(Capability::WebNavigate, &suffix, ""), suffix);
+        let open = OriginScope::task_open("because").unwrap();
+        assert_eq!(widen_for_task(Capability::WebNavigate, &open, ""), open);
+    }
+
+    #[tokio::test]
+    async fn from_fingerprint_lets_a_search_through_and_still_flags_a_result_site() {
+        let mock = MockProvider::new().push_content(r#"["web.navigate"]"#);
+        let fp = crate::fingerprint::generate_fingerprint(&mock, "t", "look up a hotel").await;
+        let ctx = origin("https://travel.example");
+        let expected = ExpectedFingerprint::from_fingerprint(&fp, Some(&ctx), "look up a hotel");
+        let nav: Vec<_> = expected
+            .lowered()
+            .into_iter()
+            .filter(|(_, _, c)| *c == Capability::WebNavigate)
+            .collect();
+        assert!(!nav.is_empty());
+        for (_, scope, _) in nav {
+            assert!(scope
+                .admits(&origin("https://lite.duckduckgo.com"))
+                .is_some());
+            assert_eq!(scope.admits(&origin("https://attacker.example")), None);
         }
     }
 }
