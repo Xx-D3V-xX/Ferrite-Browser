@@ -656,7 +656,11 @@ mod tests {
             "read the article",
         )
         .await;
-        let expected = crate::comparator::ExpectedFingerprint::from_fingerprint(&fingerprint, None);
+        let expected = crate::comparator::ExpectedFingerprint::from_fingerprint(
+            &fingerprint,
+            None,
+            "read the article",
+        );
         let expected_primitives: HashSet<ToolId> = expected
             .lowered()
             .into_iter()

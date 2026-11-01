@@ -3828,7 +3828,11 @@ fn submit_task(state: &mut FerriteBrowser) -> Task<FerriteBrowserMessage> {
         let context_origin = context_url
             .as_deref()
             .and_then(|url| ferrite_core::Origin::parse(url).ok());
-        let expected = ExpectedFingerprint::from_fingerprint(&fingerprint, context_origin.as_ref());
+        let expected = ExpectedFingerprint::from_fingerprint(
+            &fingerprint,
+            context_origin.as_ref(),
+            &ipi_task.prompt,
+        );
         let diff = compare(&expected, &dry_record);
         // The real run is held to the same prediction (ADR-014): the dry run
         // saw only synthetic pages, so whatever an actual page provokes is

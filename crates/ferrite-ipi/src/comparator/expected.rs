@@ -93,7 +93,12 @@ impl ExpectedFingerprint {
     ///   the escape hatch once a caller *does* have that signal (see
     ///   `docs/TO-DO.md`'s new row for wiring `dataset::CaseDefinition`'s
     ///   scope-rationale field, or a per-task authoring UI, into this path).
-    /// - `context_url` is `None` → [`OriginScope::task_open`], the weakest
+    /// - Sites the user named in the task prompt (`https://example.org/x`,
+    ///   `example.org`) are added to that `exact` scope, for every capability.
+    ///   Only the user's prompt is read, never page text, so an attacker cannot
+    ///   add one. With no context URL but a named site, the scope is those sites
+    ///   rather than `task_open`.
+    /// - `context_url` is `None` and no site is named → [`OriginScope::task_open`], the weakest
     ///   tier, carrying [`PROVISIONAL_NO_CONTEXT_URL_RATIONALE`] so anyone
     ///   reading the scope back (consent UI, audit entry, `PROGRESS.md`
     ///   citation) sees *why* the task went unscoped rather than a bare tag.
@@ -118,14 +123,22 @@ impl ExpectedFingerprint {
     /// is the regression test that would fail if this ever silently
     /// degraded back to always-`task_open`).
     #[must_use]
-    pub fn from_fingerprint(fp: &Fingerprint, context_url: Option<&Origin>) -> Self {
+    pub fn from_fingerprint(fp: &Fingerprint, context_url: Option<&Origin>, prompt: &str) -> Self {
+        // The user's own words are trusted text (a page cannot edit them), so a
+        // site they name is a site the task may use: "compare this with
+        // example.org" must not refuse the visit to example.org (T-301).
+        let mut origins: Vec<Origin> = context_url.into_iter().cloned().collect();
+        for named in origins_named_in(prompt) {
+            if !origins.contains(&named) {
+                origins.push(named);
+            }
+        }
         let scope_for_each = || -> OriginScope {
-            match context_url {
-                Some(origin) => {
-                    OriginScope::exact([origin.clone()]).expect("one origin is never empty")
-                }
-                None => OriginScope::task_open(PROVISIONAL_NO_CONTEXT_URL_RATIONALE)
-                    .expect("the rationale constant is non-blank"),
+            if origins.is_empty() {
+                OriginScope::task_open(PROVISIONAL_NO_CONTEXT_URL_RATIONALE)
+                    .expect("the rationale constant is non-blank")
+            } else {
+                OriginScope::exact(origins.clone()).expect("a non-empty list is never empty")
             }
         };
 
@@ -160,6 +173,64 @@ impl ExpectedFingerprint {
     }
 }
 
+/// Origins the user's task prompt names: `http(s)://` URLs and bare host names
+/// (`example.org`, `docs.example.org/page`). Reads the prompt only, which is
+/// trusted text; file names such as `report.pdf` are not hosts and are skipped
+/// because the last label must be a plausible top-level domain (2 to 24
+/// letters) and the name must have at least one dot.
+#[must_use]
+pub fn origins_named_in(prompt: &str) -> Vec<Origin> {
+    let mut found: Vec<Origin> = Vec::new();
+    let tokens = prompt.split(|c: char| {
+        c.is_whitespace()
+            || matches!(
+                c,
+                '<' | '>' | '(' | ')' | '[' | ']' | '{' | '}' | '"' | '\'' | ',' | ';'
+            )
+    });
+    for raw in tokens {
+        let token = raw.trim_end_matches(['.', '!', '?', ':']);
+        let lower = token.to_ascii_lowercase();
+        let candidate = if lower.starts_with("https://") || lower.starts_with("http://") {
+            token.to_string()
+        } else {
+            let host = lower.split(['/', '?', '#']).next().unwrap_or("");
+            let host = host.rsplit_once('@').map_or(host, |(_, h)| h);
+            let name = host.split(':').next().unwrap_or("");
+            let labels: Vec<&str> = name.split('.').collect();
+            let plausible = labels.len() >= 2
+                && labels.iter().all(|l| {
+                    !l.is_empty()
+                        && !l.starts_with('-')
+                        && !l.ends_with('-')
+                        && l.chars().all(|c| c.is_ascii_alphanumeric() || c == '-')
+                })
+                && labels.last().is_some_and(|tld| {
+                    (2..=24).contains(&tld.len()) && tld.chars().all(|c| c.is_ascii_alphabetic())
+                })
+                && !NOT_HOSTS.contains(&labels.last().copied().unwrap_or(""));
+            if !plausible {
+                continue;
+            }
+            format!("https://{token}")
+        };
+        if let Ok(origin) = Origin::parse(&candidate) {
+            if !found.contains(&origin) {
+                found.push(origin);
+            }
+        }
+    }
+    found
+}
+
+/// File extensions that look like a top-level domain but are, in a task prompt,
+/// almost always a file name (`report.pdf`, `notes.txt`).
+const NOT_HOSTS: &[&str] = &[
+    "pdf", "txt", "csv", "doc", "docx", "xls", "xlsx", "ppt", "pptx", "json", "xml", "html", "htm",
+    "png", "jpg", "jpeg", "gif", "svg", "md", "rs", "py", "js", "ts", "css", "log", "tar", "gz",
+    "exe", "dmg",
+];
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -181,7 +252,7 @@ mod tests {
         );
 
         let ctx = origin("https://mail.example.com");
-        let expected = ExpectedFingerprint::from_fingerprint(&fp, Some(&ctx));
+        let expected = ExpectedFingerprint::from_fingerprint(&fp, Some(&ctx), "");
 
         for (_, scope, _) in expected.lowered() {
             assert_eq!(
@@ -197,7 +268,7 @@ mod tests {
         let mock = MockProvider::new().push_content("[]");
         let fp =
             crate::fingerprint::generate_fingerprint(&mock, "test-tag", "check my inbox").await;
-        let expected = ExpectedFingerprint::from_fingerprint(&fp, None);
+        let expected = ExpectedFingerprint::from_fingerprint(&fp, None, "");
 
         let (_, scope, _) = expected
             .lowered()
@@ -222,7 +293,7 @@ mod tests {
         let fp =
             crate::fingerprint::generate_fingerprint(&mock, "test-tag", "check my inbox").await;
         let ctx = origin("https://mail.example.com");
-        let expected = ExpectedFingerprint::from_fingerprint(&fp, Some(&ctx));
+        let expected = ExpectedFingerprint::from_fingerprint(&fp, Some(&ctx), "");
 
         let attacker = origin("https://attacker.example");
         for (_, scope, _) in expected.lowered() {
@@ -239,5 +310,68 @@ mod tests {
     #[test]
     fn empty_lowers_to_nothing() {
         assert!(ExpectedFingerprint::empty().lowered().is_empty());
+    }
+
+    #[test]
+    fn origins_named_in_a_prompt_are_found_and_file_names_are_not() {
+        let named = |p: &str| -> Vec<String> {
+            origins_named_in(p)
+                .iter()
+                .map(|o| o.as_str().to_string())
+                .collect()
+        };
+        assert_eq!(
+            named("Compare https://a.example/x with b.example, then email me."),
+            vec!["https://a.example", "https://b.example"]
+        );
+        assert_eq!(
+            named("Open docs.example.org/page?x=1."),
+            vec!["https://docs.example.org"]
+        );
+        assert!(named("Download report.pdf and read notes.txt, e.g. today").is_empty());
+        assert!(named("What is 3.14 times two? Version 1.2.3").is_empty());
+        assert!(named("").is_empty());
+    }
+
+    #[tokio::test]
+    async fn a_site_the_user_named_is_admitted_for_every_capability_and_others_are_not() {
+        use crate::fingerprint::generate_fingerprint;
+        use ferrite_core::Primitive;
+        let mock = ferrite_model::MockProvider::new().push_content("[\"web.navigate\"]");
+        let prompt = "Compare this flight with prices on other.example";
+        let fp = generate_fingerprint(&mock, "t", prompt).await;
+        let ctx = Origin::parse("https://airline.example").unwrap();
+        let expected = ExpectedFingerprint::from_fingerprint(&fp, Some(&ctx), prompt);
+        let admits = |origin: &str| {
+            expected.lowered().iter().any(|(sp, scope, _)| {
+                Primitive::from(*sp) == Primitive::Navigate
+                    && scope.admits(&Origin::parse(origin).unwrap()).is_some()
+            })
+        };
+        assert!(admits("https://airline.example"));
+        assert!(admits("https://other.example"), "named by the user");
+        assert!(
+            !admits("https://attacker.example"),
+            "named by nobody trusted"
+        );
+    }
+
+    #[tokio::test]
+    async fn with_no_context_url_a_named_site_narrows_the_scope_from_task_open() {
+        let fp = crate::fingerprint::generate_fingerprint(
+            &ferrite_model::MockProvider::new(),
+            "t",
+            "open a.example",
+        )
+        .await;
+        let expected = ExpectedFingerprint::from_fingerprint(&fp, None, "open a.example");
+        for (_, scope, _) in expected.lowered() {
+            assert!(scope
+                .admits(&Origin::parse("https://a.example").unwrap())
+                .is_some());
+            assert!(scope
+                .admits(&Origin::parse("https://evil.example").unwrap())
+                .is_none());
+        }
     }
 }
