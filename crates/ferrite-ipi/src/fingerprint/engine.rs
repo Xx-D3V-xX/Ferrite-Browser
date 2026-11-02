@@ -10,7 +10,7 @@
 use std::collections::BTreeSet;
 
 use ferrite_core::Capability;
-use ferrite_model::{CompletionRequest, Message, ModelProvider, ModelTier};
+use ferrite_model::{CompletionRequest, Message, ModelProvider, ModelTier, SamplingOptions};
 use serde::{Deserialize, Serialize};
 
 use crate::fingerprint::rules;
@@ -124,6 +124,14 @@ fn schema_for(available: &[Capability]) -> serde_json::Value {
     })
 }
 
+/// `num_predict` for the fingerprint call. A reasoning model (for example
+/// `gpt-oss:20b` on Ollama) spends part of this budget on hidden thinking
+/// before the first answer token; at the 128-token default the budget ran
+/// out inside the thinking and the answer came back empty, which this layer
+/// correctly turns into an empty may-use set, so every task was refused.
+/// The cap stays finite (§10.3); it only has to leave room for the answer.
+const FINGERPRINT_NUM_PREDICT: u32 = 2048;
+
 /// Builds the one completion call the `may_use` prediction makes.
 ///
 /// Carries only the user's prompt and the still-available capability names
@@ -141,6 +149,7 @@ fn build_request(
     );
     CompletionRequest::new(model_tag, ModelTier::Small, vec![Message::user(user)])
         .with_label("fingerprint")
+        .with_options(SamplingOptions::default().with_num_predict(FINGERPRINT_NUM_PREDICT))
         .with_system_prompt(SYSTEM_PROMPT, SYSTEM_PROMPT_VERSION)
         .with_format_schema(schema_for(available))
 }
