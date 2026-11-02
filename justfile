@@ -267,6 +267,22 @@ agentdojo-check src:
 live-eval *ARGS:
     cargo run --release -p ferrite-eval --example live_eval -- {{ARGS}}
 
+# AgentDojo's own harness (environments, tools, attack, utility and security checks) with
+# Ferrite's guard in front of every tool call (docs/EVALUATION.md section 12). Needs a Python
+# env with scripts/requirements-agentdojo.txt; AGENTDOJO_PY points at its python.
+# Set it up once: python3 -m venv .venv-agentdojo && .venv-agentdojo/bin/pip install -r scripts/requirements-agentdojo.txt
+# Offline: replay ground-truth calls through the guard and run the harness tests (no network, mock predictor).
+agentdojo-offline:
+    cargo build --release -p ferrite-eval --example agentdojo_guard
+    env -u OLLAMA_API_KEY ${AGENTDOJO_PY:-.venv-agentdojo/bin/python} -m unittest scripts/test_agentdojo_ferrite.py
+    ${AGENTDOJO_PY:-.venv-agentdojo/bin/python} scripts/agentdojo_ferrite.py replay --provider mock --model x --pause-ms 0
+
+# Example: just agentdojo-run run --suite slack --mode guard --model gemma4:31b   (then: just agentdojo-run report)
+# Run real AgentDojo with a live model (OLLAMA_API_KEY, OLLAMA_HOST); resumable from target/agentdojo/logs.
+agentdojo-run *ARGS:
+    cargo build --release -p ferrite-eval --example agentdojo_guard
+    ${AGENTDOJO_PY:-.venv-agentdojo/bin/python} scripts/agentdojo_ferrite.py {{ARGS}}
+
 # Prices a selection (calls, tokens, invocations at the --max-calls cap) and calls nothing; no key needed.
 # Example: just live-eval-plan --provider gemini --model <tag>
 # Preview what a live evaluation would cost, calling nothing.

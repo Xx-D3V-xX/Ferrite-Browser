@@ -212,13 +212,15 @@
 //!   survives.
 
 mod consent;
+mod destination;
 mod diff;
 mod expected;
 mod guard;
 
 pub use consent::ConsentDecision;
+pub use destination::{destinations_named_in, Destination};
 pub use diff::{Attribution, FingerprintDiff};
-pub use expected::{widen_for_task, ExpectedFingerprint, SEARCH_ENGINE_ORIGINS};
+pub use expected::{origins_named_in, widen_for_task, ExpectedFingerprint, SEARCH_ENGINE_ORIGINS};
 pub use guard::{GuardVerdict, RuntimeGuard};
 
 use ferrite_core::scope::Specificity;

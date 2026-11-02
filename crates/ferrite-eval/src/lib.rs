@@ -1,5 +1,6 @@
 pub mod adjudication;
 pub mod agentdojo;
+pub mod agentdojo_bridge;
 pub mod corpus;
 pub mod guard_eval;
 pub mod harness;
