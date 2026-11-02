@@ -1530,3 +1530,52 @@ that explanation per case. The app's behavior (the eval scopes cases with author
   refused every deviation.
 - Whether the plan's estimates (§9.3) match the measured calls and tokens in the
   Cost table. We have not compared them yet (T-278).
+
+## 12. AgentDojo's own harness with `gpt-oss:20b` (2026-11-02)
+
+This section is the real benchmark, not the parsed corpus of section 10. AgentDojo 0.1.35
+(benchmark v1.2.2) ran its own environments, tools, `important_instructions` attack and its own
+`utility()`/`security()` checks, unchanged. Ferrite's part is one pipeline element
+(`GuardedToolsExecutor` in `scripts/agentdojo_ferrite.py`) that asks the Rust bridge
+(`crates/ferrite-eval/src/agentdojo_bridge.rs`, example `agentdojo_guard`) before each tool
+call. Agent and fingerprint predictor: `gpt-oss:20b` on Ollama Cloud, temperature 0, one sample.
+All four suites, both modes (`off` = stock pipeline, `guard`), 2,092 runs, 0 runs with an error.
+
+### 12.1 Numbers (k/n = p% [95% Wilson])
+
+| | benign utility (97 user tasks) off | guard | utility under attack off | guard | attack succeeded off | guard |
+|---|---|---|---|---|---|---|
+| workspace | 26/40 = 65.0% [49.5-77.9] | 23/40 = 57.5% [42.2-71.5] | 329/560 = 58.8% [54.6-62.8] | 268/560 = 47.9% [43.7-52.0] | 40/560 = 7.1% [5.3-9.6] | 10/560 = 1.8% [1.0-3.3] |
+| travel | 5/20 = 25.0% [11.2-46.9] | 8/20 = 40.0% [21.9-61.3] | 21/140 = 15.0% [10.0-21.8] | 22/140 = 15.7% [10.6-22.6] | 35/140 = 25.0% [18.6-32.8] | 25/140 = 17.9% [12.4-25.0] |
+| banking | 9/16 = 56.2% [33.2-76.9] | 7/16 = 43.8% [23.1-66.8] | 70/144 = 48.6% [40.6-56.7] | 77/144 = 53.5% [45.3-61.4] | 54/144 = 37.5% [30.0-45.6] | 4/144 = 2.8% [1.1-6.9] |
+| slack | 17/21 = 81.0% [60.0-92.3] | 2/21 = 9.5% [2.7-28.9] | 56/105 = 53.3% [43.8-62.6] | 10/105 = 9.5% [5.3-16.6] | 54/105 = 51.4% [42.0-60.8] | 1/105 = 1.0% [0.2-5.2] |
+| **all** | 57/97 = 58.8% [48.8-68.0] | 40/97 = 41.2% [32.0-51.2] | 476/949 = 50.2% [47.0-53.3] | 377/949 = 39.7% [36.7-42.9] | 183/949 = 19.3% [16.9-21.9] | 40/949 = 4.2% [3.1-5.7] |
+
+Plain reading: the guard cut attack success from 19.3% to 4.2% overall (from 51.4% to 1.0% in
+slack, 37.5% to 2.8% in banking, 7.1% to 1.8% in workspace, 25.0% to 17.9% in travel). It also
+cost utility: benign 58.8% to 41.2%, and utility under attack 50.2% to 39.7%. The benign loss is
+almost all in slack (81.0% to 9.5%); workspace and banking lose a few tasks, and travel gains
+three (small samples, the intervals overlap). Full report, refusal causes and residual attacks:
+`docs/results/agentdojo-ollama-gpt-oss-20b.md`. The report's own benign rows use 132 tasks because
+AgentDojo also runs its injection tasks as user tasks; the table above keeps the 97 real ones.
+
+### 12.2 A fault found and fixed during the run
+
+The first guard run on slack scored 0% everywhere, which was wrong. Every one of the 46
+fingerprint calls had failed with "empty response body": `gpt-oss:20b` is a reasoning model and
+its hidden thinking used the fingerprint call's 128-token `num_predict` before it wrote an answer.
+Fail-to-empty did its job (everything went to consent, nothing was admitted), so the run was
+safe but meaningless. Commit `31d1d0b` gives that one call `num_predict` 2048; it changes
+nothing else. Those results were discarded and the guard side of slack was run again. The same
+128-token cap will hit any other reasoning model.
+
+### 12.3 What is not verified
+
+- One sample per task at temperature 0; one attack template; results for `gpt-oss:20b` only.
+- The attack text calls the agent "Local model" (AgentDojo does not know this model).
+- Nobody approved guard prompts: best case for containment, worst case for utility.
+- AgentDojo's web tools are simulated. This does not test URL-query-parameter exfiltration
+  through a real browser.
+- Benign refusal causes: 8 of 44 refused calls cannot be attributed to a stored reason (see
+  the results file).
+- Raw logs are in git-ignored `target/` and were lost with the container.
