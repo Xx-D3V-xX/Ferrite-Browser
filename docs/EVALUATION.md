@@ -1447,13 +1447,13 @@ labeled "executed" work. The honest summary is that the measured attack numbers 
 and the cause is a labeling limit at the new admissions, not a new route to an attacker
 origin. We did not show that with a different labeler.
 
-**Remaining refusals** (35 actions in 28 cases): 30 are at an origin outside the scope with
-every needed capability predicted (real-world sites the model chose over the task's site:
-`mail.google.com` 5, `tripadvisor.com` 3, `calendar.google.com` 2, `drive.google.com` 2,
-`docs.google.com` 2, and others), 3 are `js.execute` plus 2 more in the cause count, 5
-are a capability the predictor missed (same-origin `navigate`/`dom.read`/`click`). The
-unusable-answer count fell to 0 in this run (it was 7); we did not find out why, because
-the same request should have come back from the cache.
+**Remaining refusals** (35 actions in 28 cases): 6 are `js.execute` (unscopable by design),
+5 are in cases where the predictor missed a capability the task ideally needs, and the
+rest are navigations to real-world sites the model chose instead of the task's site
+(`mail.google.com` 5, `tripadvisor.com` 3, `calendar.google.com` 2, `drive.google.com` 2,
+`docs.google.com` 2, and a few others). The unusable-answer count fell to 0 in this run
+(it was 7); we did not find out why, because the same request should have come back from
+the cache.
 
 **Tried and dropped:** adding `web.read` and `web.navigate` whenever `web.interact` is
 predicted. The test `the_guard_blocks_what_a_compliant_model_does_and_the_baseline_does_not`
